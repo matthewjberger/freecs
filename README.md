@@ -8,7 +8,7 @@ Add this to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-freecs = "0.1.2"
+freecs = "0.1.3"
 rayon = "1.10.0"
 serde = { version = "1.0.214", features = ["derive"] }
 ```
