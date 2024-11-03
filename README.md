@@ -1,6 +1,6 @@
 # freecs
 
-A high-performance, archetype-based Entity Component System (ECS) written in Rust using only static dispatch 🚀
+A high-performance archetype-based Entity Component System (ECS) in Rust using only static dispatch 🚀
 
 ## Quick Start
 
