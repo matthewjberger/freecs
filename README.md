@@ -2,8 +2,6 @@
 
 A high-performance, archetype-based Entity Component System (ECS) written in Rust.
 
-```rust
-
 ## Features
 
 - 🚀 **Archetype-based Storage**: Optimal cache coherency through grouped component storage
