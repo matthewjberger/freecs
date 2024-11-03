@@ -1,8 +1,8 @@
-use freecs::{has_components, impl_world};
+use freecs::{has_components, world};
 use macroquad::prelude::*;
 use rayon::prelude::*;
 
-impl_world! {
+world! {
     World {
         positions: Position3D => POSITION,
         rotations: Rotation => ROTATION,
@@ -200,6 +200,14 @@ async fn main() {
                 z: pz,
             },
         );
+
+        // Components can be accessed immutably
+        let _position = get_component::<Position3D>(&world, *entity, POSITION);
+
+        // Components can be accessed mutably
+        if let Some(_position) = get_component_mut::<Position3D>(&mut world, *entity, POSITION) {
+            // Could mutate position here
+        }
 
         // Random initial velocity scaled with position
         set_component(

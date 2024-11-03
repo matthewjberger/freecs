@@ -1,6 +1,14 @@
 [package]
 name = "freecs"
 version = "0.1.0"
+authors = ["Matthew Berger <matthewjordanberger@gmail.com>"]
+description = """
+A high-performance, archetype-based Entity Component System (ECS) written in Rust.
+"""
+homepage = "https://github.com/matthewjberger/freecs"
+repository = "https://github.com/matthewjberger/freecs"
+keywords = ["macro"]
+license = "MIT"
 edition = "2021"
 
 [dependencies]

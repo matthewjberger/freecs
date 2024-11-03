@@ -1,216 +1,5 @@
-//! # freecs
-//!
-//! `freecs` is a high-performance, archetype-based Entity Component System (ECS) for Rust
-//! that emphasizes parallel processing and cache-friendly data layouts. It provides a simple,
-//! macro-based API for defining and managing game worlds with components.
-//!
-//! ## Features
-//!
-//! - Archetype-based storage for optimal cache coherency
-//! - Built-in parallel processing support
-//! - Zero-overhead component access
-//! - Type-safe component management
-//! - Dynamic component addition and removal
-//! - Automatic table defragmentation
-//! - Batch entity operations
-//! - Serialization support via serde
-//!
-//! ## Quick Start
-//!
-//! ```rust
-//! use freecs::{impl_world, has_components};
-//!
-//! // Define your components
-//! #[derive(Default, Clone, serde::Serialize, serde::Deserialize)]
-//! struct Position {
-//!     x: f32,
-//!     y: f32,
-//! }
-//!
-//! #[derive(Default, Clone, serde::Serialize, serde::Deserialize)]
-//! struct Velocity {
-//!     x: f32,
-//!     y: f32,
-//! }
-//!
-//! // Create a world with your components
-//! impl_world! {
-//!     World {
-//!         positions: Position => POSITION,
-//!         velocities: Velocity => VELOCITY,
-//!     }
-//! }
-//!
-//! // Create a new world
-//! let mut world = World::default();
-//!
-//! // Spawn entities with components
-//! let entity = spawn_entities(&mut world, POSITION | VELOCITY, 1)[0];
-//! ```
-//!
-//! ## Parallel Systems Example
-//!
-//! ```rust
-//! use rayon::prelude::*;
-//!
-//! fn run_systems(world: &mut World, dt: f32) {
-//!     world.tables.par_iter_mut().for_each(|table| {
-//!         if has_components!(table, POSITION | VELOCITY) {
-//!             update_positions(&mut table.positions, &table.velocities, dt);
-//!         }
-//!     });
-//! }
-//!
-//! #[inline]
-//! fn update_positions(positions: &mut [Position], velocities: &[Velocity], dt: f32) {
-//!     positions
-//!         .par_iter_mut()
-//!         .zip(velocities.par_iter())
-//!         .for_each(|(pos, vel)| {
-//!             pos.x += vel.x * dt;
-//!             pos.y += vel.y * dt;
-//!         });
-//! }
-//! ```
-//!
-//! ## Component Access
-//!
-//! ```rust
-//! // Get component
-//! if let Some(pos) = get_component::<Position>(&world, entity, POSITION) {
-//!     println!("Position: ({}, {})", pos.x, pos.y);
-//! }
-//!
-//! // Modify component
-//! if let Some(vel) = get_component_mut::<Velocity>(&mut world, entity, VELOCITY) {
-//!     vel.x += 1.0;
-//! }
-//! ```
-//!
-//! ## Entity Management
-//!
-//! ```rust
-//! // Spawn multiple entities
-//! let entities = spawn_entities(&mut world, POSITION | VELOCITY, 1000);
-//!
-//! // Add components to existing entity
-//! add_components(&mut world, entity, NEW_COMPONENT);
-//!
-//! // Remove components
-//! remove_components(&mut world, entity, VELOCITY);
-//!
-//! // Despawn entities
-//! despawn_entities(&mut world, &entities);
-//! ```
-//!
-//! ## Performance Notes
-//!
-//! The library is designed for high performance with the following features:
-//!
-//! - Archetype tables store entities with identical component layouts together
-//! - Parallel iteration over components using rayon
-//! - Contiguous memory layout for cache-friendly access
-//! - Zero-cost component access through direct slice indexing
-//! - Efficient batch operations for entity management
-//!
-//! For optimal performance:
-//!
-//! ```rust
-//! // Periodically merge tables to prevent fragmentation
-//! merge_tables(&mut world);
-//!
-//! // Use batch operations when possible
-//! let entities = spawn_entities(&mut world, POSITION | VELOCITY, 1000);
-//!
-//! // Leverage parallel systems for large worlds
-//! world.tables.par_iter_mut().for_each(|table| {
-//!     // Process components in parallel
-//! });
-//! ```
-//!
-//! ## Safety
-//!
-//! The library uses several mechanisms to ensure safety:
-//!
-//! - Generational indices prevent use-after-free bugs
-//! - Type-safe component access through generics
-//! - Automatic table consistency maintenance
-//! - Safe parallel access through rayon's parallel iterators
-//!
-//! ## Example Game Architecture
-//!
-//! Here's a typical game architecture using freecs:
-//!
-//! ```rust
-//! mod components {
-//!     #[derive(Default, Clone, serde::Serialize, serde::Deserialize)]
-//!     pub struct Position3D { pub x: f32, pub y: f32, pub z: f32 }
-//!
-//!     #[derive(Default, Clone, serde::Serialize, serde::Deserialize)]
-//!     pub struct Rotation { pub x: f32, pub y: f32, pub z: f32 }
-//!
-//!     #[derive(Default, Clone, serde::Serialize, serde::Deserialize)]
-//!     pub struct Velocity { pub x: f32, pub y: f32, pub z: f32 }
-//! }
-//!
-//! impl_world! {
-//!     World {
-//!         positions: Position3D => POSITION,
-//!         rotations: Rotation => ROTATION,
-//!         velocities: Velocity => VELOCITY,
-//!     }
-//! }
-//!
-//! mod systems {
-//!     pub fn run_systems(world: &mut World, dt: f32) {
-//!         world.tables.par_iter_mut().for_each(|table| {
-//!             if has_components!(table, POSITION | VELOCITY) {
-//!                 movement_system(&mut table.positions, &table.velocities, dt);
-//!             }
-//!             if has_components!(table, ROTATION) {
-//!                 rotation_system(&mut table.rotations, dt);
-//!             }
-//!         });
-//!     }
-//! }
-//!
-//! fn game_loop(world: &mut World) {
-//!     let dt = get_frame_time();
-//!     systems::run_systems(world, dt);
-//!     // Render entities...
-//! }
-//! ```
-//!
-//! ## Implementation Details
-//!
-//! The core of freecs is built around:
-//!
-//! - **Archetype Tables**: Store entities with identical component layouts
-//! - **Component Arrays**: Contiguous storage for each component type
-//! - **Entity Locations**: Fast entity-to-component lookup
-//! - **Component Masks**: Bitflags for component combinations
-//! - **Generational Indices**: Safe entity reference management
-//!
-//! Table operations maintain consistency by:
-//!
-//! 1. Updating entity locations when components change
-//! 2. Managing table creation and merging automatically
-//! 3. Handling entity despawning with proper cleanup
-//! 4. Maintaining generation counters for safety
-//!
-//! ## Serialization
-//!
-//! All core types implement `serde::Serialize` and `serde::Deserialize`:
-//!
-//! ```rust
-//! // Save world state
-//! let serialized = serde_json::to_string(&world)?;
-//!
-//! // Load world state
-//! let mut world: World = serde_json::from_str(&serialized)?;
-//! ```
 #[macro_export]
-macro_rules! impl_world {
+macro_rules! world {
     (
         $world:ident {
             $($name:ident: $type:ty => $mask:ident),* $(,)?
@@ -221,11 +10,11 @@ macro_rules! impl_world {
         #[repr(u32)]
         #[allow(clippy::upper_case_acronyms)]
         #[allow(non_camel_case_types)]
-        enum ComponentIndex {
+        pub enum Component {
             $($mask,)*
         }
 
-        $(pub const $mask: u32 = 1 << (ComponentIndex::$mask as u32);)*
+        $(pub const $mask: u32 = 1 << (Component::$mask as u32);)*
 
         /// Entity ID, an index into storage and a generation counter to prevent stale references
         #[derive(Default, Clone, Copy, Debug, Eq, PartialEq, Hash, serde::Serialize, serde::Deserialize)]
@@ -334,9 +123,10 @@ macro_rules! impl_world {
 
                $(
                    if mask == $mask && std::any::TypeId::of::<T>() == std::any::TypeId::of::<$type>() {
-                       // SAFETY: We've verified that T is exactly $type via TypeId,
-                       // and we know the component exists in the table because we checked the mask.
-                       // The pointer cast is valid because they are the same type and properly aligned.
+                       // SAFETY: We've verified that `T` is exactly `$type` by comparing `TypeId::of::<T>()`
+                       // with `TypeId::of::<$type>()`, so this cast from `&mut $type` to `&mut T` is safe.
+                       // Additionally, the `mask` check ensures this component exists in the current table,
+                       // confirming that the component storage vector is large enough and correctly aligned.
                        unsafe { *(&mut table.$name[array_idx] as *mut $type as *mut T) = component; }
                        return;
                    }
@@ -355,17 +145,17 @@ macro_rules! impl_world {
 
            $(
                if mask == $mask && std::any::TypeId::of::<T>() == std::any::TypeId::of::<$type>() {
-                    // SAFETY: This operation is safe because:
-                    // 1. We verify the component type T exactly matches $type via TypeId
-                    // 2. We confirm the table contains this component via mask check
-                    // 3. array_idx is valid from location_get bounds check
-                    // 4. The reference is valid for the lifetime of the return value
-                    //    because it's tied to the table reference lifetime
-                    // 5. No mutable aliases can exist during the shared borrow
-                    // 6. The type cast maintains proper alignment as types are identical
-                    return Some(unsafe { &*(&table.$name[array_idx] as *const $type as *const T) });
-                }
-            )*
+                   // SAFETY: This operation is safe because:
+                   // 1. We verify the component type T exactly matches $type via TypeId
+                   // 2. We confirm the table contains this component via mask check
+                   // 3. array_idx is valid from location_get bounds check
+                   // 4. The reference is valid for the lifetime of the return value
+                   //    because it's tied to the table reference lifetime
+                   // 5. No mutable aliases can exist during the shared borrow
+                   // 6. The type cast maintains proper alignment as types are identical
+                   return Some(unsafe { &*(&table.$name[array_idx] as *const $type as *const T) });
+               }
+           )*
 
            None
         }
