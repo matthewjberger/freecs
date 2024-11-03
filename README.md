@@ -39,7 +39,7 @@ pub fn main() {
 
     // Read a component
     let position = get_component::<Position>(&world, entity, POSITION);
-    println!("Position: {:?}", position); // Prints "Some(Position { x: 0.0, y: 0.0 })"
+    println!("Position: {:?}", position);
 
     // Mutate a component
     if let Some(position) = get_component_mut::<Position>(&mut world, entity, POSITION) {
