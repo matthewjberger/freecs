@@ -1,0 +1,12 @@
+[package]
+name = "freecs"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+serde = { version = "1.0.214", features = ["derive"] }
+
+[dev-dependencies]
+macroquad = "0.4.13"
+rayon = "1.10.0"
+serde = { version = "1.0.214", features = ["derive"] }
