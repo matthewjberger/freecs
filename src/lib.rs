@@ -1,3 +1,93 @@
+//! freecs is a zero-abstraction ECS library for Rust, designed for high performance and simplicity.
+//!
+//! It provides an archetypal table-based storage system for components, allowing for fast queries,
+//! fast system iteration and parallel processing.
+//!
+//! A macro is used to define the world and its components, and generates
+//! the entity component system as part of your source code at compile time. The generated code
+//! contains only plain data structures (no methods) and free functions that transform them, achieving static dispatch.
+//!
+//! The internal implementation is ~500 loc, and does not use object orientation, generics, traits, or dynamic dispatch.
+//!
+//! # Basic Usage
+//!
+//! ```rust
+//! use freecs::{world, has_components};
+//! use serde::{Serialize, Deserialize};
+//!
+//! // Define components
+//! #[derive(Default, Clone, Debug, Serialize, Deserialize)]
+//! struct Position { x: f32, y: f32 }
+//!
+//! #[derive(Default, Clone, Debug, Serialize, Deserialize)]
+//! struct Velocity { x: f32, y: f32 }
+//!
+//! // Create a world
+//! world! {
+//!     GameWorld {
+//!         positions: Position => POSITION,
+//!         velocities: Velocity => VELOCITY,
+//!     }
+//! }
+//!
+//! let mut world = GameWorld::default();
+//!
+//! // Spawn entity with components
+//! let entity = spawn_entities(&mut world, POSITION | VELOCITY, 1)[0];
+//!
+//! // Update component
+//! if let Some(pos) = get_component_mut::<Position>(&mut world, entity, POSITION) {
+//!     pos.x += 1.0;
+//! }
+//! ```
+//!
+//! # Key Features
+//!
+//! - **Table-based Storage**: Entities with the same components are stored together in memory
+//! - **Raw Access**: Functions work directly on the underlying vectors of components
+//! - **Parallel Processing**: Built-in support for processing tables in parallel with rayon
+//! - **Simple Queries**: Find entities by their components using bit masks
+//! - **Serialization**: Save and load worlds using serde
+//!
+//! # Component Requirements
+//!
+//! Components must implement: `Default + Clone + Serialize + Deserialize`
+//!
+//! # Entity Operations
+//!
+//! ```rust
+//! # use freecs::*;
+//! # let mut world = GameWorld::default();
+//! # let entity = EntityId { id: 0, generation: 0 };
+//! // Add/remove components
+//! add_components(&mut world, entity, HEALTH);
+//! remove_components(&mut world, entity, VELOCITY);
+//!
+//! // Query entities
+//! let entities = query_entities(&world, POSITION | VELOCITY);
+//! let player = query_first_entity(&world, POSITION | VELOCITY);
+//! ```
+//!
+//! # Systems
+//!
+//! ```rust
+//! # use freecs::*;
+//! # use rayon::prelude::*;
+//! # let mut world = GameWorld::default();
+//! # let dt = 0.016f32;
+//! world.tables.par_iter_mut().for_each(|table| {
+//!     if has_components!(table, POSITION | VELOCITY) {
+//!         update_positions(&mut table.positions, &table.velocities, dt);
+//!     }
+//! });
+//! ```
+//!
+//! # Performance Tips
+//!
+//! - Call `merge_tables(&mut world)` periodically to combine tables with identical layouts
+//! - Group commonly accessed components at entity creation
+//! - Use `query_first_entity` for singleton components
+//! - Leverage parallel iteration for large datasets
 #[macro_export]
 macro_rules! world {
     (

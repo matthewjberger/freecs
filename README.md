@@ -1,6 +1,15 @@
 # freecs
 
-A high-performance archetype-based Entity Component System (ECS) in Rust using only static dispatch 🚀
+freecs is a zero-abstraction ECS library for Rust, designed for high performance and simplicity. 🚀
+
+It provides an archetypal table-based storage system for components, allowing for fast queries,
+fast system iteration, and parallel processing.
+
+A macro is used to define the world and its components, and generates
+the entity component system as part of your source code at compile time. The generated code
+contains only plain data structures (no methods) and free functions that transform them, achieving static dispatch.
+
+The internal implementation is ~500 loc, and does not use object orientation, generics, traits, or dynamic dispatch.
 
 ## Quick Start
 
