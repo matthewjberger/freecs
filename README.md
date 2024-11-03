@@ -47,8 +47,8 @@ pub fn main() {
     println!("Position: {:?}", position); // Prints "Some(Position { x: 0.0, y: 0.0 })"
 
     // Write a component
-    if let Some(_position) = get_component_mut::<Position>(&mut world, *entity, POSITION) {
-        // _position could be mutated here
+    if let Some(position) = get_component_mut::<Position>(&mut world, *entity, POSITION) {
+        position.x += 1.0;
     }
 
     // Assign a component
