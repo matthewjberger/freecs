@@ -1,17 +1,6 @@
 # freecs
 
-A high-performance, archetype-based Entity Component System (ECS) written in Rust.
-
-## Features
-
-- 🚀 **Archetype-based Storage**: Optimal cache coherency through grouped component storage
-- 🔄 **Built-in Parallel Processing**: Leverages rayon for efficient multi-threading
-- 📦 **Zero-overhead Component Access**: Direct slice indexing for component data
-- 🛡️ **Type-safe Component Management**: Compile-time component type checking
-- 🔧 **Dynamic Components**: Add or remove components at runtime
-- 🧹 **Table Defragmentation**: Maintains optimal memory layout
-- 📝 **Batch Operations**: Efficient bulk entity operations
-- 💾 **Serialization Support**: Built-in serde support for all core types
+A high-performance, archetype-based Entity Component System (ECS) written in Rust using only static dispatch and cache-friendly data oriented design.
 
 ## Quick Start
 
