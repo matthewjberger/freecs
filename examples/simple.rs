@@ -1,21 +1,3 @@
-# freecs
-
-A high-performance archetype-based Entity Component System (ECS) in Rust using only static dispatch 🚀
-
-## Quick Start
-
-Add this to your `Cargo.toml`:
-
-```toml
-[dependencies]
-freecs = "0.1.2"
-rayon = "1.10.0"
-serde = { version = "1.0.214", features = ["derive"] }
-```
-
-And in `main.rs`:
-
-```rust
 use freecs::{has_components, world};
 use rayon::prelude::*;
 
@@ -141,8 +123,3 @@ mod systems {
         });
     }
 }
-```
-
-## License
-
-This project is licensed under the MIT License - see the [LICENSE](LICENSE.md) file for details.

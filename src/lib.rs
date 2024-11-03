@@ -112,28 +112,6 @@ macro_rules! world {
             None
         }
 
-        /// Set a specific component for an entity
-        pub fn set_component<T: 'static>(world: &mut World, entity: EntityId, mask: u32, component: T) {
-           if let Some((table_idx, array_idx)) = location_get(&world.entity_locations, entity) {
-               let table = &mut world.tables[table_idx];
-
-               if table.mask & mask == 0 {
-                   return;
-               }
-
-               $(
-                   if mask == $mask && std::any::TypeId::of::<T>() == std::any::TypeId::of::<$type>() {
-                       // SAFETY: We've verified that `T` is exactly `$type` by comparing `TypeId::of::<T>()`
-                       // with `TypeId::of::<$type>()`, so this cast from `&mut $type` to `&mut T` is safe.
-                       // Additionally, the `mask` check ensures this component exists in the current table,
-                       // confirming that the component storage vector is large enough and correctly aligned.
-                       unsafe { *(&mut table.$name[array_idx] as *mut $type as *mut T) = component; }
-                       return;
-                   }
-               )*
-           }
-        }
-
         /// Get a specific component for an entity
         pub fn get_component<T: 'static>(world: &World, entity: EntityId, mask: u32) -> Option<&T> {
            let (table_idx, array_idx) = location_get(&world.entity_locations, entity)?;
@@ -305,7 +283,7 @@ macro_rules! world {
                 .map(|(table_idx, _)| world.tables[table_idx].mask)
         }
 
-        /// Merge tables that have the same mask. Call this periodically, such as every 60 frames.
+        /// Merge tables that have the same mask
         pub fn merge_tables(world: &mut World) {
             let mut moves = Vec::new();
 

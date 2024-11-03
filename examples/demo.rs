@@ -189,69 +189,44 @@ async fn main() {
         let py = START_HEIGHT + (ny * GRID_SIZE * 0.5);
         let pz = (nz * 2.0 - 1.0) * GRID_SIZE;
 
-        // Position in expanded lattice
-        set_component(
-            &mut world,
-            *entity,
-            POSITION,
-            Position3D {
+        if let Some(position) = get_component_mut::<Position3D>(&mut world, *entity, POSITION) {
+            *position = Position3D {
                 x: px,
                 y: py,
                 z: pz,
-            },
-        );
-
-        // Components can be accessed immutably
-        let _position = get_component::<Position3D>(&world, *entity, POSITION);
-
-        // Components can be accessed mutably
-        if let Some(_position) = get_component_mut::<Position3D>(&mut world, *entity, POSITION) {
-            // Could mutate position here
+            };
         }
 
         // Random initial velocity scaled with position
-        set_component(
-            &mut world,
-            *entity,
-            VELOCITY,
-            Velocity {
+        if let Some(velocity) = get_component_mut::<Velocity>(&mut world, *entity, VELOCITY) {
+            *velocity = Velocity {
                 x: rand::gen_range(-2.0, 2.0) * (px / GRID_SIZE),
                 y: 0.0,
                 z: rand::gen_range(-2.0, 2.0) * (pz / GRID_SIZE),
-            },
-        );
+            };
+        }
 
-        set_component(
-            &mut world,
-            *entity,
-            ROTATION,
-            Rotation {
+        if let Some(rotation) = get_component_mut::<Rotation>(&mut world, *entity, ROTATION) {
+            *rotation = Rotation {
                 x: rand::gen_range(-1.0, 1.0),
                 y: rand::gen_range(-1.0, 1.0),
                 z: rand::gen_range(-1.0, 1.0),
-            },
-        );
+            };
+        }
 
         // Scale varies with height
         let scale_factor = 0.4 + (ny * 0.2);
-        set_component(
-            &mut world,
-            *entity,
-            SCALE,
-            Scale {
+        if let Some(scale) = get_component_mut::<Scale>(&mut world, *entity, SCALE) {
+            *scale = Scale {
                 x: scale_factor,
                 y: scale_factor,
                 z: scale_factor,
-            },
-        );
+            };
+        }
 
-        // Gravity varies with height
-        set_component(
-            &mut world,
-            *entity,
-            GRAVITY,
-            Gravity(9.81 * (1.0 + ny * 0.2)),
-        );
+        if let Some(gravity) = get_component_mut::<Gravity>(&mut world, *entity, GRAVITY) {
+            *gravity = Gravity(9.81 * (1.0 + ny * 0.2));
+        }
     }
 
     println!(
