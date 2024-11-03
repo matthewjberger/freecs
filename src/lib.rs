@@ -11,7 +11,7 @@
 //!
 //! # Basic Usage
 //!
-//! ```rust
+//! ```rust,ignore
 //! use freecs::{world, has_components};
 //! use serde::{Serialize, Deserialize};
 //!
@@ -55,7 +55,7 @@
 //!
 //! # Entity Operations
 //!
-//! ```rust
+//! ```rust,ignore
 //! # use freecs::*;
 //! # let mut world = GameWorld::default();
 //! # let entity = EntityId { id: 0, generation: 0 };
@@ -70,7 +70,7 @@
 //!
 //! # Systems
 //!
-//! ```rust
+//! ```rust,ignore
 //! # use freecs::*;
 //! # use rayon::prelude::*;
 //! # let mut world = GameWorld::default();
@@ -568,4 +568,278 @@ macro_rules! has_components {
     ($table:expr, $mask:expr) => {
         $table.mask & $mask == $mask
     };
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rayon::*;
+    use std::collections::HashSet;
+
+    world! {
+      World {
+          positions: Position => POSITION,
+          velocities: Velocity => VELOCITY,
+          health: Health => HEALTH,
+      }
+    }
+
+    use components::*;
+    mod components {
+        #[derive(Default, Debug, Clone, serde::Serialize, serde::Deserialize)]
+        pub struct Position {
+            pub x: f32,
+            pub y: f32,
+        }
+
+        #[derive(Default, Debug, Clone, serde::Serialize, serde::Deserialize)]
+        pub struct Velocity {
+            pub x: f32,
+            pub y: f32,
+        }
+
+        #[derive(Default, Debug, Clone, serde::Serialize, serde::Deserialize)]
+        pub struct Health {
+            pub value: f32,
+        }
+    }
+
+    mod systems {
+        use super::*;
+        use rayon::prelude::*;
+
+        // Systems are functions that iterate over
+        // the component tables and transform component data.
+        // This function invokes two systems in parallel
+        // for each table in the world filtered by component mask.
+        pub fn run_systems(world: &mut World, dt: f32) {
+            world.tables.par_iter_mut().for_each(|table| {
+                if has_components!(table, POSITION | VELOCITY | HEALTH) {
+                    update_positions_system(&mut table.positions, &table.velocities, dt);
+                }
+                if has_components!(table, HEALTH) {
+                    health_system(&mut table.health);
+                }
+            });
+        }
+
+        // The system itself can also access components in parallel
+        #[inline]
+        pub fn update_positions_system(
+            positions: &mut [Position],
+            velocities: &[Velocity],
+            dt: f32,
+        ) {
+            positions
+                .par_iter_mut()
+                .zip(velocities.par_iter())
+                .for_each(|(pos, vel)| {
+                    pos.x += vel.x * dt;
+                    pos.y += vel.y * dt;
+                });
+        }
+
+        #[inline]
+        pub fn health_system(health: &mut [Health]) {
+            health.par_iter_mut().for_each(|health| {
+                health.value *= 0.98; // gradually decline health value
+            });
+        }
+    }
+    // Helper function to create a test world with some entities
+    fn setup_test_world() -> (World, EntityId) {
+        let mut world = World::default();
+        let entity = spawn_entities(&mut world, POSITION | VELOCITY, 1)[0];
+
+        // Set initial component values
+        if let Some(pos) = get_component_mut::<Position>(&mut world, entity, POSITION) {
+            pos.x = 1.0;
+            pos.y = 2.0;
+        }
+        if let Some(vel) = get_component_mut::<Velocity>(&mut world, entity, VELOCITY) {
+            vel.x = 3.0;
+            vel.y = 4.0;
+        }
+
+        (world, entity)
+    }
+
+    #[test]
+    fn test_spawn_entities() {
+        let mut world = World::default();
+        let entities = spawn_entities(&mut world, POSITION | VELOCITY, 3);
+
+        assert_eq!(entities.len(), 3);
+        assert_eq!(total_entities(&world), 3);
+
+        // Verify each entity has the correct components
+        for entity in entities {
+            assert!(get_component::<Position>(&world, entity, POSITION).is_some());
+            assert!(get_component::<Velocity>(&world, entity, VELOCITY).is_some());
+            assert!(get_component::<Health>(&world, entity, HEALTH).is_none());
+        }
+    }
+
+    #[test]
+    fn test_component_access() {
+        let (mut world, entity) = setup_test_world();
+
+        // Test reading components
+        let pos = get_component::<Position>(&world, entity, POSITION).unwrap();
+        assert_eq!(pos.x, 1.0);
+        assert_eq!(pos.y, 2.0);
+
+        // Test mutating components
+        if let Some(pos) = get_component_mut::<Position>(&mut world, entity, POSITION) {
+            pos.x = 5.0;
+        }
+
+        let pos = get_component::<Position>(&world, entity, POSITION).unwrap();
+        assert_eq!(pos.x, 5.0);
+    }
+
+    #[test]
+    fn test_add_remove_components() {
+        let (mut world, entity) = setup_test_world();
+
+        // Initial state
+        assert!(get_component::<Health>(&world, entity, HEALTH).is_none());
+
+        // Add component
+        add_components(&mut world, entity, HEALTH);
+        assert!(get_component::<Health>(&world, entity, HEALTH).is_some());
+
+        // Remove component
+        remove_components(&mut world, entity, HEALTH);
+        assert!(get_component::<Health>(&world, entity, HEALTH).is_none());
+    }
+
+    #[test]
+    fn test_component_mask() {
+        let (mut world, entity) = setup_test_world();
+
+        // Check initial mask
+        let mask = component_mask(&world, entity).unwrap();
+        assert_eq!(mask, POSITION | VELOCITY);
+
+        // Check mask after adding component
+        add_components(&mut world, entity, HEALTH);
+        let mask = component_mask(&world, entity).unwrap();
+        assert_eq!(mask, POSITION | VELOCITY | HEALTH);
+    }
+
+    #[test]
+    fn test_query_entities() {
+        let mut world = World::default();
+
+        // Create entities with different component combinations
+        let e1 = spawn_entities(&mut world, POSITION | VELOCITY, 1)[0];
+        let _e2 = spawn_entities(&mut world, POSITION | HEALTH, 1)[0];
+        let e3 = spawn_entities(&mut world, POSITION | VELOCITY | HEALTH, 1)[0];
+
+        // Test queries
+        let pos_vel = query_entities(&world, POSITION | VELOCITY);
+        let pos_health = query_entities(&world, POSITION | HEALTH);
+        let all = query_entities(&world, POSITION | VELOCITY | HEALTH);
+
+        assert_eq!(pos_vel.len(), 2);
+        assert_eq!(pos_health.len(), 2);
+        assert_eq!(all.len(), 1);
+
+        let pos_vel: HashSet<_> = pos_vel.into_iter().collect();
+        assert!(pos_vel.contains(&e1));
+        assert!(pos_vel.contains(&e3));
+
+        assert_eq!(all[0], e3);
+    }
+
+    #[test]
+    fn test_query_first_entity() {
+        let mut world = World::default();
+
+        let e1 = spawn_entities(&mut world, POSITION | VELOCITY, 1)[0];
+        let e2 = spawn_entities(&mut world, POSITION | VELOCITY | HEALTH, 1)[0];
+
+        let first = query_first_entity(&world, POSITION | VELOCITY).unwrap();
+        assert!(first == e1 || first == e2);
+
+        assert!(query_first_entity(&world, HEALTH).is_some());
+        assert!(query_first_entity(&world, POSITION | VELOCITY | HEALTH).is_some());
+    }
+
+    #[test]
+    fn test_despawn_entities() {
+        let mut world = World::default();
+
+        // Spawn multiple entities
+        let entities = spawn_entities(&mut world, POSITION | VELOCITY, 3);
+        assert_eq!(total_entities(&world), 3);
+
+        // Despawn one entity
+        let despawned = despawn_entities(&mut world, &[entities[1]]);
+        assert_eq!(despawned.len(), 1);
+        assert_eq!(total_entities(&world), 2);
+
+        // Verify the entity is truly despawned
+        assert!(get_component::<Position>(&world, entities[1], POSITION).is_none());
+
+        // Verify other entities still exist
+        assert!(get_component::<Position>(&world, entities[0], POSITION).is_some());
+        assert!(get_component::<Position>(&world, entities[2], POSITION).is_some());
+    }
+
+    #[test]
+    fn test_merge_tables() {
+        let mut world = World::default();
+
+        // Create entities in different tables with same components
+        let e1 = spawn_entities(&mut world, POSITION | VELOCITY, 1)[0];
+        let e2 = spawn_entities(&mut world, POSITION | VELOCITY, 1)[0];
+
+        // Add and remove a component to create a fragmented table
+        add_components(&mut world, e1, HEALTH);
+        remove_components(&mut world, e1, HEALTH);
+
+        let initial_table_count = world.tables.len();
+        merge_tables(&mut world);
+
+        // Verify tables were merged
+        assert!(world.tables.len() <= initial_table_count);
+
+        // Verify all entities still accessible
+        assert!(get_component::<Position>(&world, e1, POSITION).is_some());
+        assert!(get_component::<Position>(&world, e2, POSITION).is_some());
+    }
+
+    #[test]
+    fn test_parallel_systems() {
+        let mut world = World::default();
+
+        // Spawn entity with all components
+        let entity = spawn_entities(&mut world, POSITION | VELOCITY | HEALTH, 1)[0];
+
+        // Set initial values
+        if let Some(pos) = get_component_mut::<Position>(&mut world, entity, POSITION) {
+            pos.x = 0.0;
+            pos.y = 0.0;
+        }
+        if let Some(vel) = get_component_mut::<Velocity>(&mut world, entity, VELOCITY) {
+            vel.x = 1.0;
+            vel.y = 1.0;
+        }
+        if let Some(health) = get_component_mut::<Health>(&mut world, entity, HEALTH) {
+            health.value = 100.0;
+        }
+
+        // Run systems
+        systems::run_systems(&mut world, 1.0);
+
+        // Verify system effects
+        let pos = get_component::<Position>(&world, entity, POSITION).unwrap();
+        let health = get_component::<Health>(&world, entity, HEALTH).unwrap();
+
+        assert_eq!(pos.x, 1.0);
+        assert_eq!(pos.y, 1.0);
+        assert!(health.value < 100.0); // Health should have decreased
+    }
 }
