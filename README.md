@@ -27,26 +27,6 @@ world! {
   }
 }
 
-use components::*;
-mod components {
-    #[derive(Default, Debug, Clone, serde::Serialize, serde::Deserialize)]
-    pub struct Position {
-        pub x: f32,
-        pub y: f32,
-    }
-
-    #[derive(Default, Debug, Clone, serde::Serialize, serde::Deserialize)]
-    pub struct Velocity {
-        pub x: f32,
-        pub y: f32,
-    }
-
-    #[derive(Default, Debug, Clone, serde::Serialize, serde::Deserialize)]
-    pub struct Health {
-        pub value: f32,
-    }
-}
-
 pub fn main() {
     let mut world = World::default();
 
@@ -66,6 +46,26 @@ pub fn main() {
     set_component(&mut world, entity, VELOCITY, Velocity { x: 1.0, y: 2.0 });
 
     systems::run_systems(&mut world, 0.01);
+}
+
+use components::*;
+mod components {
+    #[derive(Default, Debug, Clone, serde::Serialize, serde::Deserialize)]
+    pub struct Position {
+        pub x: f32,
+        pub y: f32,
+    }
+
+    #[derive(Default, Debug, Clone, serde::Serialize, serde::Deserialize)]
+    pub struct Velocity {
+        pub x: f32,
+        pub y: f32,
+    }
+
+    #[derive(Default, Debug, Clone, serde::Serialize, serde::Deserialize)]
+    pub struct Health {
+        pub value: f32,
+    }
 }
 
 mod systems {
