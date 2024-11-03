@@ -89,7 +89,7 @@ macro_rules! world {
         }
 
         /// Query for all entities that match the component mask
-        pub fn query_entities(world: &World, mask: u32) -> Vec<EntityId> {
+        pub fn query_entities(world: &$world, mask: u32) -> Vec<EntityId> {
             let mut result = Vec::new();
             for table in &world.tables {
                 if table.mask & mask == mask {
@@ -103,7 +103,7 @@ macro_rules! world {
         /// Returns as soon as a match is found, instead of running for all entities
         /// Useful for components where only one instance exists on any entity at a time,
         /// such as keyboard input / mouse input / controllers.
-        pub fn query_first_entity(world: &World, mask: u32) -> Option<EntityId> {
+        pub fn query_first_entity(world: &$world, mask: u32) -> Option<EntityId> {
             for table in &world.tables {
                 if table.mask & mask == mask {
                     return table.entity_indices.first().copied();
@@ -113,7 +113,7 @@ macro_rules! world {
         }
 
         /// Get a specific component for an entity
-        pub fn get_component<T: 'static>(world: &World, entity: EntityId, mask: u32) -> Option<&T> {
+        pub fn get_component<T: 'static>(world: &$world, entity: EntityId, mask: u32) -> Option<&T> {
            let (table_idx, array_idx) = location_get(&world.entity_locations, entity)?;
            let table = &world.tables[table_idx];
 
@@ -139,7 +139,7 @@ macro_rules! world {
         }
 
         /// Get a mutable reference to a specific component for an entity
-        pub fn get_component_mut<T: 'static>(world: &mut World, entity: EntityId, mask: u32) -> Option<&mut T> {
+        pub fn get_component_mut<T: 'static>(world: &mut $world, entity: EntityId, mask: u32) -> Option<&mut T> {
             let (table_idx, array_idx) = location_get(&world.entity_locations, entity)?;
             let table = &mut world.tables[table_idx];
 
@@ -165,7 +165,7 @@ macro_rules! world {
         }
 
         /// Despawn a batch of entities
-        pub fn despawn_entities(world: &mut World, entities: &[EntityId]) -> Vec<EntityId> {
+        pub fn despawn_entities(world: &mut $world, entities: &[EntityId]) -> Vec<EntityId> {
             use std::collections::{HashMap, HashSet};
 
             // Deduplicate entities to prevent double-removal issues
@@ -242,7 +242,7 @@ macro_rules! world {
         }
 
         /// Add components to an entity
-        pub fn add_components(world: &mut World, entity: EntityId, mask: u32) -> bool {
+        pub fn add_components(world: &mut $world, entity: EntityId, mask: u32) -> bool {
             if let Some((table_idx, array_idx)) = location_get(&world.entity_locations, entity) {
                 let current_mask = world.tables[table_idx].mask;
                 // If entity already has all these components, no need to move
@@ -260,7 +260,7 @@ macro_rules! world {
         }
 
         /// Remove components from an entity
-        pub fn remove_components(world: &mut World, entity: EntityId, mask: u32) -> bool {
+        pub fn remove_components(world: &mut $world, entity: EntityId, mask: u32) -> bool {
             if let Some((table_idx, array_idx)) = location_get(&world.entity_locations, entity) {
                 let current_mask = world.tables[table_idx].mask;
                 // If entity doesn't have any of these components, no need to move
@@ -278,13 +278,13 @@ macro_rules! world {
         }
 
         /// Get the current component mask for an entity
-        pub fn component_mask(world: &World, entity: EntityId) -> Option<u32> {
+        pub fn component_mask(world: &$world, entity: EntityId) -> Option<u32> {
             location_get(&world.entity_locations, entity)
                 .map(|(table_idx, _)| world.tables[table_idx].mask)
         }
 
         /// Merge tables that have the same mask
-        pub fn merge_tables(world: &mut World) {
+        pub fn merge_tables(world: &mut $world) {
             let mut moves = Vec::new();
 
             // Collect all moves first to avoid holding references while mutating
@@ -343,7 +343,7 @@ macro_rules! world {
         }
 
         /// Get the total number of entities in the world
-        pub fn total_entities(world: &World) -> usize {
+        pub fn total_entities(world: &$world) -> usize {
             world.tables.iter().map(|table| table.entity_indices.len()).sum()
         }
 
@@ -359,7 +359,7 @@ macro_rules! world {
         }
 
         fn move_entity(
-            world: &mut World,
+            world: &mut $world,
             entity: EntityId,
             from_table: usize,
             from_index: usize,
@@ -428,7 +428,7 @@ macro_rules! world {
             locations.locations[id] = Some(location);
         }
 
-        fn create_entity(world: &mut World) -> EntityId {
+        fn create_entity(world: &mut $world) -> EntityId {
             let id = world.next_entity_id;
             world.next_entity_id += 1;
 
@@ -457,7 +457,7 @@ macro_rules! world {
             arrays.entity_indices.push(entity);
         }
 
-        fn get_or_create_table(world: &mut World, mask: u32) -> usize {
+        fn get_or_create_table(world: &mut $world, mask: u32) -> usize {
             if let Some(idx) = world.table_registry.iter().position(|(m, _)| *m == mask) {
                 return world.table_registry[idx].1;
             }
