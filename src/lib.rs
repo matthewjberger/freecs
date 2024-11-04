@@ -1,7 +1,7 @@
 //! freecs is a zero-abstraction ECS library for Rust, designed for high performance and simplicity.
 //!
 //! It provides an archetypal table-based storage system for components, allowing for fast queries,
-//! fast system iteration and parallel processing.
+//! fast system iteration, and parallel processing.
 //!
 //! A macro is used to define the world and its components, and generates
 //! the entity component system as part of your source code at compile time. The generated code
