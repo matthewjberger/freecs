@@ -5,11 +5,11 @@ use rayon::prelude::*;
 world! {
     World {
         components {
-            positions: Position3D => POSITION,
-            rotations: Rotation => ROTATION,
-            scales: Scale => SCALE,
-            velocities: Velocity => VELOCITY,
-            gravities: Gravity => GRAVITY,
+            position: Position3D => POSITION,
+            rotation: Rotation => ROTATION,
+            scale: Scale => SCALE,
+            velocity: Velocity => VELOCITY,
+            gravity: Gravity => GRAVITY,
         },
         Resources {
             delta_time: f32
@@ -61,20 +61,20 @@ mod systems {
         let delta_time = world.resources.delta_time;
         world.tables.par_iter_mut().for_each(|table| {
             if has_components!(table, SCALE) {
-                scale_system_parallel(&mut table.scales);
+                scale_system_parallel(&mut table.scale);
             }
 
             if has_components!(table, POSITION | VELOCITY) {
-                movement_system_parallel(&mut table.positions, &table.velocities, delta_time);
-                bounce_system_parallel(&mut table.positions, &mut table.velocities);
+                movement_system_parallel(&mut table.position, &table.velocity, delta_time);
+                bounce_system_parallel(&mut table.position, &mut table.velocity);
             }
 
             if has_components!(table, VELOCITY | GRAVITY) {
-                gravity_system_parallel(&mut table.velocities, &table.gravities, dt);
+                gravity_system_parallel(&mut table.velocity, &table.gravity, dt);
             }
 
             if has_components!(table, ROTATION) {
-                rotation_system_parallel(&mut table.rotations, dt);
+                rotation_system_parallel(&mut table.rotation, dt);
             }
         });
     }
@@ -306,8 +306,8 @@ async fn main() {
         for table in &world.tables {
             if has_components!(table, POSITION | ROTATION | SCALE) {
                 for i in 0..table.entity_indices.len() {
-                    let pos = &table.positions[i];
-                    let scale = &table.scales[i];
+                    let pos = &table.position[i];
+                    let scale = &table.scale[i];
 
                     // Simple distance culling
                     let dx = pos.x - camera.position.x;

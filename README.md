@@ -21,7 +21,7 @@ Add this to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-freecs = "0.1.4"
+freecs = "0.1.5"
 serde = { version = "1.0.214", features = ["derive"] } # or higher
 
 # (optional) add rayon if you want to parallize systems
@@ -37,8 +37,8 @@ use rayon::prelude::*;
 world! {
   World {
       components {
-        positions: Position => POSITION,
-        velocities: Velocity => VELOCITY,
+        position: Position => POSITION,
+        velocity: Velocity => VELOCITY,
         health: Health => HEALTH,
       },
       Resources {
@@ -138,7 +138,7 @@ mod systems {
         let delta_time = world.resources.delta_time;
         world.tables.par_iter_mut().for_each(|table| {
             if has_components!(table, POSITION | VELOCITY | HEALTH) {
-                update_positions_system(&mut table.positions, &table.velocities, delta_time);
+                update_positions_system(&mut table.position, &table.velocity, delta_time);
             }
             if has_components!(table, HEALTH) {
                 health_system(&mut table.health);

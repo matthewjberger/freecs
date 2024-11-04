@@ -37,8 +37,8 @@
 //! world! {
 //!   World {
 //!       components {
-//!         positions: Position => POSITION,
-//!         velocities: Velocity => VELOCITY,
+//!         position: Position => POSITION,
+//!         velocity: Velocity => VELOCITY,
 //!         health: Health => HEALTH,
 //!       },
 //!       Resources {
@@ -87,7 +87,7 @@
 //!     use rayon::prelude::*;
 //!     world.tables.par_iter_mut().for_each(|table| {
 //!         if has_components!(table, POSITION | VELOCITY | HEALTH) {
-//!             update_positions_system(&mut table.positions, &table.velocities, dt);
+//!             update_positions_system(&mut table.position, &table.velocity, dt);
 //!         }
 //!         if has_components!(table, HEALTH) {
 //!             health_system(&mut table.health);
@@ -623,8 +623,8 @@ mod tests {
     world! {
       World {
           components {
-            positions: Position => POSITION,
-            velocities: Velocity => VELOCITY,
+            position: Position => POSITION,
+            velocity: Velocity => VELOCITY,
             health: Health => HEALTH,
           },
           Resources {
@@ -664,7 +664,7 @@ mod tests {
         pub fn run_systems(world: &mut World, dt: f32) {
             world.tables.par_iter_mut().for_each(|table| {
                 if has_components!(table, POSITION | VELOCITY | HEALTH) {
-                    update_positions_system(&mut table.positions, &table.velocities, dt);
+                    update_positions_system(&mut table.position, &table.velocity, dt);
                 }
                 if has_components!(table, HEALTH) {
                     health_system(&mut table.health);
