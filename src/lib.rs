@@ -164,7 +164,7 @@ macro_rules! world {
             pub locations: Vec<Option<(usize, usize)>>,
         }
 
-        /// A collection of component tables
+        /// A collection of component tables and resources
         #[derive(Default, serde::Serialize, serde::Deserialize)]
         pub struct $world {
             pub entity_locations: EntityLocations,
@@ -172,6 +172,7 @@ macro_rules! world {
             pub next_entity_id: u32,
             pub table_registry: Vec<(u32, usize)>,
             #[serde(skip)]
+            #[allow(unused)]
             pub resources: $resources,
         }
 
