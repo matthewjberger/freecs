@@ -150,6 +150,13 @@ macro_rules! world {
             pub generation: u32,
         }
 
+        impl std::fmt::Display for EntityId {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                let Self { id, generation } = self;
+                write!(f, "Id: {id} - Generation: {generation}")
+            }
+        }
+
         /// Entity location cache for quick access
         #[derive(Default, serde::Serialize, serde::Deserialize)]
         pub struct EntityLocations {
