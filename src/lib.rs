@@ -33,7 +33,7 @@
 //! struct Velocity { x: f32, y: f32 }
 //!
 //! // Then, create a world with the `world!` macro.
-//! // Resources are stored independently of component data.
+//! // Resources are stored independently of component data and are not serialized.
 //! world! {
 //!   World {
 //!       components {
@@ -171,6 +171,7 @@ macro_rules! world {
             pub tables: Vec<ComponentArrays>,
             pub next_entity_id: u32,
             pub table_registry: Vec<(u32, usize)>,
+            #[serde(skip)]
             pub resources: $resources,
         }
 
