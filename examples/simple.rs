@@ -3,14 +3,22 @@ use rayon::prelude::*;
 
 world! {
   World {
-      positions: Position => POSITION,
-      velocities: Velocity => VELOCITY,
-      health: Health => HEALTH,
+      components {
+        positions: Position => POSITION,
+        velocities: Velocity => VELOCITY,
+        health: Health => HEALTH,
+      },
+      Resources {
+          delta_time: f32
+      }
   }
 }
 
 pub fn main() {
     let mut world = World::default();
+
+    // Inject resources for systems to use
+    world.resources.delta_time = 0.016;
 
     // Spawn entities with components
     let entity = spawn_entities(&mut world, POSITION | VELOCITY, 1)[0];
@@ -56,7 +64,7 @@ pub fn main() {
 
     // This runs the systems once in parallel
     // Not part of the library's public API, but a demonstration of how to run systems
-    systems::run_systems(&mut world, 0.01);
+    systems::run_systems(&mut world);
 
     // Call this manually to compact tables, ideally periodically (such as every 60 frames).
     // This is a performance benefit and is optional.
@@ -93,10 +101,11 @@ mod systems {
     // the component tables and transform component data.
     // This function invokes two systems in parallel
     // for each table in the world filtered by component mask.
-    pub fn run_systems(world: &mut World, dt: f32) {
+    pub fn run_systems(world: &mut World) {
+        let delta_time = world.resources.delta_time;
         world.tables.par_iter_mut().for_each(|table| {
             if has_components!(table, POSITION | VELOCITY | HEALTH) {
-                update_positions_system(&mut table.positions, &table.velocities, dt);
+                update_positions_system(&mut table.positions, &table.velocities, delta_time);
             }
             if has_components!(table, HEALTH) {
                 health_system(&mut table.health);

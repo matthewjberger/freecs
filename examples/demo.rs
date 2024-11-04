@@ -4,11 +4,16 @@ use rayon::prelude::*;
 
 world! {
     World {
-        positions: Position3D => POSITION,
-        rotations: Rotation => ROTATION,
-        scales: Scale => SCALE,
-        velocities: Velocity => VELOCITY,
-        gravities: Gravity => GRAVITY,
+        components {
+            positions: Position3D => POSITION,
+            rotations: Rotation => ROTATION,
+            scales: Scale => SCALE,
+            velocities: Velocity => VELOCITY,
+            gravities: Gravity => GRAVITY,
+        },
+        Resources {
+            delta_time: f32
+        }
     }
 }
 
@@ -53,13 +58,14 @@ mod systems {
     use freecs::has_components;
 
     pub fn run_systems(world: &mut World, dt: f32) {
+        let delta_time = world.resources.delta_time;
         world.tables.par_iter_mut().for_each(|table| {
             if has_components!(table, SCALE) {
                 scale_system_parallel(&mut table.scales);
             }
 
             if has_components!(table, POSITION | VELOCITY) {
-                movement_system_parallel(&mut table.positions, &table.velocities, dt);
+                movement_system_parallel(&mut table.positions, &table.velocities, delta_time);
                 bounce_system_parallel(&mut table.positions, &mut table.velocities);
             }
 
@@ -143,6 +149,9 @@ mod systems {
 #[macroquad::main("freecs - Free ECS")]
 async fn main() {
     let mut world = World::default();
+
+    // Inject resources for systems to use
+    world.resources.delta_time = 0.016;
 
     // Set up camera with a wider view
     let mut camera = Camera3D {

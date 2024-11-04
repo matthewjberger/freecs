@@ -21,9 +21,11 @@ Add this to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-freecs = "0.1.3"
-rayon = "1.10.0"
-serde = { version = "1.0.214", features = ["derive"] }
+freecs = "0.1.4"
+serde = { version = "1.0.214", features = ["derive"] } # or higher
+
+# (optional) add rayon if you want to parallize systems
+rayon = "1.10.0" # or higher
 ```
 
 And in `main.rs`:
@@ -34,14 +36,22 @@ use rayon::prelude::*;
 
 world! {
   World {
-      positions: Position => POSITION,
-      velocities: Velocity => VELOCITY,
-      health: Health => HEALTH,
+      components {
+        positions: Position => POSITION,
+        velocities: Velocity => VELOCITY,
+        health: Health => HEALTH,
+      },
+      Resources {
+          delta_time: f32
+      }
   }
 }
 
 pub fn main() {
     let mut world = World::default();
+
+    // Inject resources for systems to use
+    world.resources.delta_time = 0.016;
 
     // Spawn entities with components
     let entity = spawn_entities(&mut world, POSITION | VELOCITY, 1)[0];
@@ -124,10 +134,11 @@ mod systems {
     // the component tables and transform component data.
     // This function invokes two systems in parallel
     // for each table in the world filtered by component mask.
-    pub fn run_systems(world: &mut World, dt: f32) {
+    pub fn run_systems(world: &mut World) {
+        let delta_time = world.resources.delta_time;
         world.tables.par_iter_mut().for_each(|table| {
             if has_components!(table, POSITION | VELOCITY | HEALTH) {
-                update_positions_system(&mut table.positions, &table.velocities, dt);
+                update_positions_system(&mut table.positions, &table.velocities, delta_time);
             }
             if has_components!(table, HEALTH) {
                 health_system(&mut table.health);

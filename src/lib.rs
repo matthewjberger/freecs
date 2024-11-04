@@ -9,38 +9,6 @@
 //!
 //! The internal implementation is ~500 loc, and does not use object orientation, generics, traits, or dynamic dispatch.
 //!
-//! # Basic Usage
-//!
-//! ```rust,ignore
-//! use freecs::{world, has_components};
-//! use serde::{Serialize, Deserialize};
-//!
-//! // Define components
-//! #[derive(Default, Clone, Debug, Serialize, Deserialize)]
-//! struct Position { x: f32, y: f32 }
-//!
-//! #[derive(Default, Clone, Debug, Serialize, Deserialize)]
-//! struct Velocity { x: f32, y: f32 }
-//!
-//! // Create a world
-//! world! {
-//!     GameWorld {
-//!         positions: Position => POSITION,
-//!         velocities: Velocity => VELOCITY,
-//!     }
-//! }
-//!
-//! let mut world = GameWorld::default();
-//!
-//! // Spawn entity with components
-//! let entity = spawn_entities(&mut world, POSITION | VELOCITY, 1)[0];
-//!
-//! // Update component
-//! if let Some(pos) = get_component_mut::<Position>(&mut world, entity, POSITION) {
-//!     pos.x += 1.0;
-//! }
-//! ```
-//!
 //! # Key Features
 //!
 //! - **Table-based Storage**: Entities with the same components are stored together in memory
@@ -49,50 +17,119 @@
 //! - **Simple Queries**: Find entities by their components using bit masks
 //! - **Serialization**: Save and load worlds using serde
 //!
-//! # Component Requirements
-//!
-//! Components must implement: `Default + Clone + Serialize + Deserialize`
-//!
-//! # Entity Operations
+//! # Creating a World
 //!
 //! ```rust,ignore
-//! # use freecs::*;
-//! # let mut world = GameWorld::default();
-//! # let entity = EntityId { id: 0, generation: 0 };
-//! // Add/remove components
-//! add_components(&mut world, entity, HEALTH);
-//! remove_components(&mut world, entity, VELOCITY);
+//! use freecs::{world, has_components};
+//! use serde::{Serialize, Deserialize};
 //!
-//! // Query entities
+//! // First, define components.
+//! // They must implement: `Default + Clone + Serialize + Deserialize`
+//!
+//! #[derive(Default, Clone, Debug, Serialize, Deserialize)]
+//! struct Position { x: f32, y: f32 }
+//!
+//! #[derive(Default, Clone, Debug, Serialize, Deserialize)]
+//! struct Velocity { x: f32, y: f32 }
+//!
+//! // Then, create a world with the `world!` macro.
+//! // Resources are stored independently of component data.
+//! world! {
+//!   World {
+//!       components {
+//!         positions: Position => POSITION,
+//!         velocities: Velocity => VELOCITY,
+//!         health: Health => HEALTH,
+//!       },
+//!       Resources {
+//!           delta_time: f32
+//!       }
+//!   }
+//! }
+//! ```
+//!
+//! ## Entity and Component Access
+//!
+//! ```rust
+//! let mut world = World::default();
+//!
+//! // Spawn entities with components by mask
+//! let entity = spawn_entities(&mut world, POSITION | VELOCITY, 1)[0];
+//!
+//! // Lookup and modify a component
+//! if let Some(pos) = get_component_mut::<Position>(&mut world, entity, POSITION) {
+//!     pos.x += 1.0;
+//! }
+//!
+//! // Add new components to an entity by mask
+//! add_components(&mut world, entity, HEALTH | VELOCITY);
+//!
+//! // Remove components from an entity by mask
+//! remove_components(&mut world, entity, VELOCITY | POSITION);
+//!
+//! // Query entities, iterating over all entities matching the component mask
 //! let entities = query_entities(&world, POSITION | VELOCITY);
+//!
+//! // Query for the first entity matching the component mask, returning early when found
 //! let player = query_first_entity(&world, POSITION | VELOCITY);
 //! ```
 //!
-//! # Systems
+//! ## Systems and Parallel Processing
 //!
-//! ```rust,ignore
-//! # use freecs::*;
-//! # use rayon::prelude::*;
-//! # let mut world = GameWorld::default();
-//! # let dt = 0.016f32;
-//! world.tables.par_iter_mut().for_each(|table| {
-//!     if has_components!(table, POSITION | VELOCITY) {
-//!         update_positions(&mut table.positions, &table.velocities, dt);
-//!     }
-//! });
+//! Systems are plain functions that iterate over
+//! the component tables and transform component data.
+//!
+//! The example function below invokes two systems in parallel
+//! for each table in the world, filtered by component mask.
+//!
+//! ```rust
+//! pub fn run_systems(world: &mut World, dt: f32) {
+//!     use rayon::prelude::*;
+//!     world.tables.par_iter_mut().for_each(|table| {
+//!         if has_components!(table, POSITION | VELOCITY | HEALTH) {
+//!             update_positions_system(&mut table.positions, &table.velocities, dt);
+//!         }
+//!         if has_components!(table, HEALTH) {
+//!             health_system(&mut table.health);
+//!         }
+//!     });
+//! }
+//!
+//! // The system itself can also access components in parallel and be inlined for performance.
+//! #[inline]
+//! pub fn update_positions_system(positions: &mut [Position], velocities: &[Velocity], dt: f32) {
+//!     positions
+//!         .par_iter_mut()
+//!         .zip(velocities.par_iter())
+//!         .for_each(|(pos, vel)| {
+//!             pos.x += vel.x * dt;
+//!             pos.y += vel.y * dt;
+//!         });
+//! }
+//!
+//! #[inline]
+//! pub fn health_system(health: &mut [Health]) {
+//!     health.par_iter_mut().for_each(|health| {
+//!         health.value *= 0.98; // gradually decline health value
+//!     });
+//! }
 //! ```
 //!
-//! # Performance Tips
+//! # Optional Performance Tips
 //!
-//! - Call `merge_tables(&mut world)` periodically to combine tables with identical layouts
-//! - Group commonly accessed components at entity creation
-//! - Use `query_first_entity` for singleton components
+//! - Call `merge_tables(&mut world)` periodically to combine tables with identical layouts, boosting iteration performance
+//! - Group commonly accessed components at entity creation, rather than adding them at runtime to reduce copying entities between archtype tables
 //! - Leverage parallel iteration for large datasets
 #[macro_export]
 macro_rules! world {
     (
         $world:ident {
-            $($name:ident: $type:ty => $mask:ident),* $(,)?
+            components {
+                $($name:ident: $type:ty => $mask:ident),* $(,)?
+            }$(,)?
+            $resources:ident {
+                $($resource_name:ident: $resource_type:ty),* $(,)?
+            }
         }
     ) => {
 
@@ -127,6 +164,13 @@ macro_rules! world {
             pub tables: Vec<ComponentArrays>,
             pub next_entity_id: u32,
             pub table_registry: Vec<(u32, usize)>,
+            pub resources: $resources,
+        }
+
+        /// Resources
+        #[derive(Default, serde::Serialize, serde::Deserialize)]
+        pub struct $resources {
+            $(pub $resource_name: $resource_type,)*
         }
 
         /// Component Table
@@ -578,9 +622,14 @@ mod tests {
 
     world! {
       World {
-          positions: Position => POSITION,
-          velocities: Velocity => VELOCITY,
-          health: Health => HEALTH,
+          components {
+            positions: Position => POSITION,
+            velocities: Velocity => VELOCITY,
+            health: Health => HEALTH,
+          },
+          Resources {
+              delta_time: f32
+          }
       }
     }
 
@@ -815,7 +864,6 @@ mod tests {
     fn test_parallel_systems() {
         let mut world = World::default();
 
-        // Spawn entity with all components
         let entity = spawn_entities(&mut world, POSITION | VELOCITY | HEALTH, 1)[0];
 
         // Set initial values
