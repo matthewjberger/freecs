@@ -21,7 +21,7 @@ Add this to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-freecs = "0.2.0"
+freecs = "0.2.1"
 serde = { version = "1.0.214", features = ["derive"] } # or higher
 
 # (optional) add rayon if you want to parallize systems
@@ -98,10 +98,6 @@ pub fn main() {
     // This runs the systems once in parallel
     // Not part of the library's public API, but a demonstration of how to run systems
     systems::run_systems(&mut world, 0.01);
-
-    // Call this manually to compact tables, ideally periodically (such as every 60 frames).
-    // This is a performance benefit and is optional.
-    merge_tables(&mut world);
 
     // Despawn entities, freeing their table slots for reuse
     despawn_entities(&mut world, &[entity]);

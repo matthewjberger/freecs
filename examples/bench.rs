@@ -332,10 +332,6 @@ fn run_stress_test(config: StressTestConfig, metrics: &mut Metrics) {
                 processed
             );
         }
-
-        if frame % 60 == 0 {
-            merge_tables(&mut world);
-        }
     }
 
     // Cleanup

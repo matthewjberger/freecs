@@ -114,13 +114,6 @@
 //!     });
 //! }
 //! ```
-//!
-//! # Optional Performance Tips
-//!
-//! - Call `merge_tables(&mut world)` periodically to combine tables with identical layouts, boosting iteration performance
-//! - Group commonly accessed components at entity creation, rather than adding them at runtime to reduce copying entities between archtype tables
-//! - Below 2 million entities, single-threaded iteration is typically faster due to overhead
-//! - Over 3 million entities, leverage parallel iteration for performance gains
 #[macro_export]
 macro_rules! world {
     (

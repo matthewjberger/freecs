@@ -66,10 +66,6 @@ pub fn main() {
     // Not part of the library's public API, but a demonstration of how to run systems
     systems::run_systems(&mut world);
 
-    // Call this manually to compact tables, ideally periodically (such as every 60 frames).
-    // This is a performance benefit and is optional.
-    merge_tables(&mut world);
-
     // Despawn entities, freeing their table slots for reuse
     despawn_entities(&mut world, &[entity]);
 }
