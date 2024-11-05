@@ -21,10 +21,10 @@ Add this to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-freecs = "0.2.1"
+freecs = "0.2.2"
 serde = { version = "1.0.214", features = ["derive"] } # or higher
 
-# (optional) add rayon if you want to parallize systems
+# (optional) add rayon if you want to parallelize systems
 rayon = "1.10.0" # or higher
 ```
 
