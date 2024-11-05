@@ -178,7 +178,7 @@ macro_rules! world {
         }
 
         /// Resources
-        #[derive(Default, serde::Serialize, serde::Deserialize)]
+        #[derive(Default)]
         pub struct $resources {
             $(pub $resource_name: $resource_type,)*
         }
