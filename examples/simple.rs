@@ -50,6 +50,10 @@ pub fn main() {
         component_mask(&world, entity).unwrap()
     );
 
+    // Query all entities
+    let entities = query_entities(&world, ALL);
+    println!("All entities: {entities:?}");
+
     // Query all entities with a specific component
     let players = query_entities(&world, POSITION | VELOCITY | HEALTH);
     println!("Player entities: {players:?}");

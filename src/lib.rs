@@ -69,6 +69,10 @@
 //! // Remove components from an entity by mask
 //! remove_components(&mut world, entity, VELOCITY | POSITION);
 //!
+//! // Query all entities
+//! let entities = query_entities(&world, ALL);
+//! println!("All entities: {entities:?}");
+//!
 //! // Query entities, iterating over all entities matching the component mask
 //! let entities = query_entities(&world, POSITION | VELOCITY);
 //!
@@ -137,6 +141,7 @@ macro_rules! world {
             $($mask,)*
         }
 
+        pub const ALL: u32 = 0;
         $(pub const $mask: u32 = 1 << (Component::$mask as u32);)*
 
         /// Entity ID, an index into storage and a generation counter to prevent stale references
@@ -1816,6 +1821,75 @@ mod tests {
         assert!(
             get_component::<Position>(&world, entity_max, POSITION).is_none(),
             "Max generation reference should be invalid after wrap"
+        );
+    }
+
+    #[test]
+    fn test_all_entities() {
+        let mut world = World::default();
+
+        // Create entities with different component combinations
+        let e1 = spawn_entities(&mut world, POSITION, 1)[0];
+        let e2 = spawn_entities(&mut world, POSITION | VELOCITY, 1)[0];
+        let e3 = spawn_entities(&mut world, POSITION | HEALTH, 1)[0];
+        let e4 = spawn_entities(&mut world, POSITION | VELOCITY | HEALTH, 1)[0];
+
+        // Get all entities
+        let all = query_entities(&world, ALL);
+
+        // Verify count
+        assert_eq!(all.len(), 4, "Should have 4 total entities");
+
+        // Verify all entities are present
+        assert!(all.contains(&e1), "Missing entity 1");
+        assert!(all.contains(&e2), "Missing entity 2");
+        assert!(all.contains(&e3), "Missing entity 3");
+        assert!(all.contains(&e4), "Missing entity 4");
+
+        // Test after despawning
+        despawn_entities(&mut world, &[e2, e3]);
+        let remaining = query_entities(&world, ALL);
+
+        // Verify count after despawn
+        assert_eq!(remaining.len(), 2, "Should have 2 entities after despawn");
+
+        // Verify correct entities remain
+        assert!(remaining.contains(&e1), "Missing entity 1 after despawn");
+        assert!(remaining.contains(&e4), "Missing entity 4 after despawn");
+        assert!(!remaining.contains(&e2), "Entity 2 should be despawned");
+        assert!(!remaining.contains(&e3), "Entity 3 should be despawned");
+    }
+
+    #[test]
+    fn test_all_entities_empty_world() {
+        assert!(
+            query_entities(&World::default(), ALL).is_empty(),
+            "Empty world should return empty vector"
+        );
+    }
+
+    #[test]
+    fn test_all_entities_after_table_merges() {
+        let mut world = World::default();
+
+        // Create entities that will end up in the same table
+        let e1 = spawn_entities(&mut world, POSITION, 1)[0];
+        let e2 = spawn_entities(&mut world, VELOCITY, 1)[0];
+
+        // Add components to force table merges
+        add_components(&mut world, e1, VELOCITY);
+        add_components(&mut world, e2, POSITION);
+
+        let all = query_entities(&world, ALL);
+        assert_eq!(
+            all.len(),
+            2,
+            "Should maintain all entities through table merges"
+        );
+        assert!(all.contains(&e1), "Should contain first entity after merge");
+        assert!(
+            all.contains(&e2),
+            "Should contain second entity after merge"
         );
     }
 }
