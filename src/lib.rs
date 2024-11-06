@@ -256,8 +256,8 @@ macro_rules! world {
 
         /// Get a specific component for an entity
         pub fn get_component<T: 'static>(world: &$world, entity: EntityId, mask: u32) -> Option<&T> {
-           let (table_idx, array_idx) = location_get(&world.entity_locations, entity)?;
-           let table = &world.tables[table_idx];
+           let (table_index, array_index) = location_get(&world.entity_locations, entity)?;
+           let table = &world.tables[table_index];
 
            if table.mask & mask == 0 {
                return None;
@@ -268,12 +268,12 @@ macro_rules! world {
                    // SAFETY: This operation is safe because:
                    // 1. We verify the component type T exactly matches $type via TypeId
                    // 2. We confirm the table contains this component via mask check
-                   // 3. array_idx is valid from location_get bounds check
+                   // 3. array_index is valid from location_get bounds check
                    // 4. The reference is valid for the lifetime of the return value
                    //    because it's tied to the table reference lifetime
                    // 5. No mutable aliases can exist during the shared borrow
                    // 6. The type cast maintains proper alignment as types are identical
-                   return Some(unsafe { &*(&table.$name[array_idx] as *const $type as *const T) });
+                   return Some(unsafe { &*(&table.$name[array_index] as *const $type as *const T) });
                }
            )*
 
@@ -282,8 +282,8 @@ macro_rules! world {
 
         /// Get a mutable reference to a specific component for an entity
         pub fn get_component_mut<T: 'static>(world: &mut $world, entity: EntityId, mask: u32) -> Option<&mut T> {
-            let (table_idx, array_idx) = location_get(&world.entity_locations, entity)?;
-            let table = &mut world.tables[table_idx];
+            let (table_index, array_index) = location_get(&world.entity_locations, entity)?;
+            let table = &mut world.tables[table_index];
 
             if table.mask & mask == 0 {
                 return None;
@@ -294,12 +294,12 @@ macro_rules! world {
                     // SAFETY: This operation is safe because:
                     // 1. We verify the component type T exactly matches $type via TypeId
                     // 2. We confirm the table contains this component via mask check
-                    // 3. array_idx is valid from location_get bounds check
+                    // 3. array_index is valid from location_get bounds check
                     // 4. We have exclusive access through the mutable borrow
                     // 5. The borrow checker ensures no other references exist
                     // 6. The pointer cast is valid as we verified the types are identical
                     // 7. Proper alignment is maintained as the types are the same
-                    return Some(unsafe { &mut *(&mut table.$name[array_idx] as *mut $type as *mut T) });
+                    return Some(unsafe { &mut *(&mut table.$name[array_index] as *mut $type as *mut T) });
                 }
             )*
 
@@ -316,10 +316,10 @@ macro_rules! world {
 
             // First pass: collect removals
             for &entity in &entities {
-                if let Some((table_idx, array_idx)) = location_get(&world.entity_locations, entity) {
-                    table_removals.entry(table_idx)
+                if let Some((table_index, array_index)) = location_get(&world.entity_locations, entity) {
+                    table_removals.entry(table_index)
                         .or_insert_with(Vec::new)
-                        .push(array_idx);
+                        .push(array_index);
 
                     let id = entity.id as usize;
                     if id < world.entity_locations.locations.len() {
@@ -332,62 +332,62 @@ macro_rules! world {
             }
 
             // Second pass: remove entities and cleanup
-            let mut table_idx = 0;
-            while table_idx < world.tables.len() {
-                if let Some(mut indices) = table_removals.remove(&table_idx) {
+            let mut table_index = 0;
+            while table_index < world.tables.len() {
+                if let Some(mut indices) = table_removals.remove(&table_index) {
                     indices.sort_unstable_by(|a, b| b.cmp(a));
 
                     // Remove entities
-                    for &idx in &indices {
-                        remove_from_table(&mut world.tables[table_idx], idx);
+                    for &index in &indices {
+                        remove_from_table(&mut world.tables[table_index], index);
                     }
 
                     // If table is now empty
-                    if world.tables[table_idx].entity_indices.is_empty() {
-                        let last_idx = world.tables.len() - 1;
+                    if world.tables[table_index].entity_indices.is_empty() {
+                        let last_index = world.tables.len() - 1;
 
-                        if table_idx != last_idx {
+                        if table_index != last_index {
                             // Remember masks before swap
-                            let removed_mask = world.tables[table_idx].mask;
-                            let swapped_mask = world.tables[last_idx].mask;
+                            let removed_mask = world.tables[table_index].mask;
+                            let swapped_mask = world.tables[last_index].mask;
 
                             // Do the swap
-                            world.tables.swap_remove(table_idx);
+                            world.tables.swap_remove(table_index);
 
                             // Update registry for both removed and swapped table
                             world.table_registry.retain(|(mask, _)| *mask != removed_mask);
                             if let Some(entry) = world.table_registry.iter_mut()
                                 .find(|(mask, _)| *mask == swapped_mask) {
-                                entry.1 = table_idx;
+                                entry.1 = table_index;
                             }
 
                             // Critical: Update ALL entity locations for swapped table
                             for loc in world.entity_locations.locations.iter_mut() {
-                                if let Some((ref mut idx, _)) = loc {
-                                    if *idx == last_idx {
-                                        *idx = table_idx;
+                                if let Some((ref mut index, _)) = loc {
+                                    if *index == last_index {
+                                        *index = table_index;
                                     }
                                 }
                             }
 
-                            // Don't increment table_idx since we swapped a new table here
+                            // Don't increment table_index since we swapped a new table here
                             continue;
                         } else {
                             // Just remove the last table and its registry entry
-                            let removed_mask = world.tables[table_idx].mask;
+                            let removed_mask = world.tables[table_index].mask;
                             world.tables.pop();
                             world.table_registry.retain(|(mask, _)| *mask != removed_mask);
                         }
                     } else {
                         // Update indices for remaining entities in non-empty table
-                        for (new_idx, &entity) in world.tables[table_idx].entity_indices.iter().enumerate() {
+                        for (new_index, &entity) in world.tables[table_index].entity_indices.iter().enumerate() {
                             if !entities.contains(&entity) {
-                                location_insert(&mut world.entity_locations, entity, (table_idx, new_idx));
+                                location_insert(&mut world.entity_locations, entity, (table_index, new_index));
                             }
                         }
                     }
                 }
-                table_idx += 1;
+                table_index += 1;
             }
 
             despawned
@@ -395,8 +395,8 @@ macro_rules! world {
 
         /// Add components to an entity
         pub fn add_components(world: &mut World, entity: EntityId, mask: u32) -> bool {
-            if let Some((table_idx, array_idx)) = location_get(&world.entity_locations, entity) {
-                let current_mask = world.tables[table_idx].mask;
+            if let Some((table_index, array_index)) = location_get(&world.entity_locations, entity) {
+                let current_mask = world.tables[table_index].mask;
 
                 // If entity already has all these components, no need to move
                 if current_mask & mask == mask {
@@ -404,13 +404,13 @@ macro_rules! world {
                 }
 
                 let new_mask = current_mask | mask;
-                let new_table_idx = get_or_create_table(world, new_mask);
+                let new_table_index = get_or_create_table(world, new_mask);
 
                 // Move entity to new table
-                move_entity(world, entity, table_idx, array_idx, new_table_idx);
+                move_entity(world, entity, table_index, array_index, new_table_index);
 
                 // If old table is now empty, merge tables
-                if world.tables[table_idx].entity_indices.is_empty() {
+                if world.tables[table_index].entity_indices.is_empty() {
                     merge_tables(world);
                 }
 
@@ -419,49 +419,50 @@ macro_rules! world {
                 false
             }
         }
+
         /// Remove components from an entity
         pub fn remove_components(world: &mut $world, entity: EntityId, mask: u32) -> bool {
-            if let Some((table_idx, array_idx)) = location_get(&world.entity_locations, entity) {
-                let current_mask = world.tables[table_idx].mask;
+            if let Some((table_index, array_index)) = location_get(&world.entity_locations, entity) {
+                let current_mask = world.tables[table_index].mask;
                 // If entity doesn't have any of these components, no need to move
                 if current_mask & mask == 0 {
                     return true;
                 }
 
-                let source_table_idx = table_idx;  // Keep track of source table
+                let source_table_index = table_index;  // Keep track of source table
                 let new_mask = current_mask & !mask;
-                let new_table_idx = get_or_create_table(world, new_mask);
+                let new_table_index = get_or_create_table(world, new_mask);
 
                 // Move entity first
-                move_entity(world, entity, table_idx, array_idx, new_table_idx);
+                move_entity(world, entity, table_index, array_index, new_table_index);
 
                 // Check if source table is now empty
-                if world.tables[source_table_idx].entity_indices.is_empty() {
+                if world.tables[source_table_index].entity_indices.is_empty() {
                     // Remove the empty table using swap_remove
-                    let last_idx = world.tables.len() - 1;
-                    if source_table_idx != last_idx {
-                        let removed_mask = world.tables[source_table_idx].mask;
-                        let swapped_mask = world.tables[last_idx].mask;
+                    let last_index = world.tables.len() - 1;
+                    if source_table_index != last_index {
+                        let removed_mask = world.tables[source_table_index].mask;
+                        let swapped_mask = world.tables[last_index].mask;
 
                         // Update entity locations for the swapped table
                         for loc in world.entity_locations.locations.iter_mut() {
-                            if let Some((ref mut idx, _)) = loc {
-                                if *idx == last_idx {
-                                    *idx = source_table_idx;
+                            if let Some((ref mut index, _)) = loc {
+                                if *index == last_index {
+                                    *index = source_table_index;
                                 }
                             }
                         }
 
                         // Remove table and update registry
-                        world.tables.swap_remove(source_table_idx);
+                        world.tables.swap_remove(source_table_index);
                         world.table_registry.retain(|(mask, _)| *mask != removed_mask);
                         if let Some(entry) = world.table_registry.iter_mut()
                             .find(|(mask, _)| *mask == swapped_mask) {
-                            entry.1 = source_table_idx;
+                            entry.1 = source_table_index;
                         }
                     } else {
                         // Just remove the last table
-                        let removed_mask = world.tables[source_table_idx].mask;
+                        let removed_mask = world.tables[source_table_index].mask;
                         world.tables.pop();
                         world.table_registry.retain(|(mask, _)| *mask != removed_mask);
                     }
@@ -476,43 +477,43 @@ macro_rules! world {
         /// Get the current component mask for an entity
         pub fn component_mask(world: &$world, entity: EntityId) -> Option<u32> {
             location_get(&world.entity_locations, entity)
-                .map(|(table_idx, _)| world.tables[table_idx].mask)
+                .map(|(table_index, _)| world.tables[table_index].mask)
         }
 
         /// Merge tables that have the same mask
         fn merge_tables(world: &mut $world) {
-            let mut i = 0;
-            while i < world.tables.len() {
-                if world.tables[i].entity_indices.is_empty() {
-                    let last_idx = world.tables.len() - 1;
+            let mut index = 0;
+            while index < world.tables.len() {
+                if world.tables[index].entity_indices.is_empty() {
+                    let last_index = world.tables.len() - 1;
 
-                    if i != last_idx {
-                        let removed_mask = world.tables[i].mask;
-                        let swapped_mask = world.tables[last_idx].mask;
+                    if index != last_index {
+                        let removed_mask = world.tables[index].mask;
+                        let swapped_mask = world.tables[last_index].mask;
 
-                        world.tables.swap_remove(i);
+                        world.tables.swap_remove(index);
 
                         world.table_registry.retain(|(mask, _)| *mask != removed_mask);
                         if let Some(entry) = world.table_registry.iter_mut()
                             .find(|(mask, _)| *mask == swapped_mask) {
-                            entry.1 = i;
+                            entry.1 = index;
                         }
 
-                        for loc in world.entity_locations.locations.iter_mut() {
-                            if let Some((ref mut table_idx, _)) = loc {
-                                if *table_idx == last_idx {
-                                    *table_idx = i;
+                        for location in world.entity_locations.locations.iter_mut() {
+                            if let Some((ref mut table_index, _)) = location {
+                                if *table_index == last_index {
+                                    *table_index = index;
                                 }
                             }
                         }
                         // Don't increment i since we have a new table here
                     } else {
-                        let removed_mask = world.tables[i].mask;
+                        let removed_mask = world.tables[index].mask;
                         world.tables.pop();
                         world.table_registry.retain(|(mask, _)| *mask != removed_mask);
                     }
                 } else {
-                    i += 1;
+                    index += 1;
                 }
             }
         }
@@ -656,13 +657,13 @@ macro_rules! world {
             }
 
             // Create new table
-            let table_idx = world.tables.len();
+            let table_index = world.tables.len();
             world.tables.push(ComponentArrays {
                 mask,
                 ..Default::default()
             });
-            world.table_registry.push((mask, table_idx));
-            table_idx
+            world.table_registry.push((mask, table_index));
+            table_index
         }
     };
 }
@@ -1099,41 +1100,41 @@ mod tests {
         }
 
         // Verify all registry entries point to valid tables
-        for (i, (mask, table_idx)) in world.table_registry.iter().enumerate() {
-            if *table_idx >= world.tables.len() {
+        for (i, (mask, table_index)) in world.table_registry.iter().enumerate() {
+            if *table_index >= world.tables.len() {
                 return Err(format!(
                     "Registry entry {} points to invalid table {} (max {})",
                     i,
-                    table_idx,
+                    table_index,
                     world.tables.len() - 1
                 ));
             }
-            if world.tables[*table_idx].mask != *mask {
+            if world.tables[*table_index].mask != *mask {
                 return Err(format!(
                     "Registry mask mismatch at {}: registry={:b}, table={:b}",
-                    i, mask, world.tables[*table_idx].mask
+                    i, mask, world.tables[*table_index].mask
                 ));
             }
         }
 
         // Verify all entity locations point to valid tables
         for (entity_id, location) in world.entity_locations.locations.iter().enumerate() {
-            if let Some((table_idx, array_idx)) = location {
-                if *table_idx >= world.tables.len() {
+            if let Some((table_index, array_index)) = location {
+                if *table_index >= world.tables.len() {
                     return Err(format!(
                         "Entity {} location points to invalid table {} (max {})",
                         entity_id,
-                        table_idx,
+                        table_index,
                         world.tables.len() - 1
                     ));
                 }
-                let table = &world.tables[*table_idx];
-                if *array_idx >= table.entity_indices.len() {
+                let table = &world.tables[*table_index];
+                if *array_index >= table.entity_indices.len() {
                     return Err(format!(
                         "Entity {} location points to invalid index {} in table {} (max {})",
                         entity_id,
-                        array_idx,
-                        table_idx,
+                        array_index,
+                        table_index,
                         table.entity_indices.len() - 1
                     ));
                 }
@@ -1292,9 +1293,9 @@ mod tests {
 
         // Verify registry matches tables
         assert_eq!(world.table_registry.len(), world.tables.len());
-        for (mask, table_idx) in &world.table_registry {
-            assert!(*table_idx < world.tables.len());
-            assert_eq!(world.tables[*table_idx].mask, *mask);
+        for (mask, table_index) in &world.table_registry {
+            assert!(*table_index < world.tables.len());
+            assert_eq!(world.tables[*table_index].mask, *mask);
         }
     }
 
@@ -1357,8 +1358,8 @@ mod tests {
                     );
                 }
                 println!("Registry entries:");
-                for (i, (mask, idx)) in world.table_registry.iter().enumerate() {
-                    println!("Registry {}: mask={:b}, points to table {}", i, mask, idx);
+                for (i, (mask, index)) in world.table_registry.iter().enumerate() {
+                    println!("Registry {}: mask={:b}, points to table {}", i, mask, index);
                 }
             }
             result.expect("World invalid after despawn");
@@ -1391,17 +1392,17 @@ mod tests {
                 world.tables.len()
             );
 
-            for (mask, idx) in &world.table_registry {
+            for (mask, index) in &world.table_registry {
                 assert!(
-                    *idx < world.tables.len(),
+                    *index < world.tables.len(),
                     "Registry points to invalid table {} (max {})",
-                    idx,
+                    index,
                     world.tables.len() - 1
                 );
                 assert_eq!(
-                    world.tables[*idx].mask, *mask,
+                    world.tables[*index].mask, *mask,
                     "Table {} has wrong mask: expected {:b}, got {:b}",
-                    idx, mask, world.tables[*idx].mask
+                    index, mask, world.tables[*index].mask
                 );
             }
         }
@@ -1563,21 +1564,21 @@ mod tests {
                 "Entity {:?} has invalid location",
                 entity
             );
-            let (table_idx, array_idx) = location.unwrap();
+            let (table_index, array_index) = location.unwrap();
             assert!(
-                table_idx < world.tables.len(),
+                table_index < world.tables.len(),
                 "Entity {:?} points to invalid table {} (max {})",
                 entity,
-                table_idx,
+                table_index,
                 world.tables.len() - 1
             );
-            let table = &world.tables[table_idx];
+            let table = &world.tables[table_index];
             assert!(
-                array_idx < table.entity_indices.len(),
+                array_index < table.entity_indices.len(),
                 "Entity {:?} points to invalid index {} in table {} (length {})",
                 entity,
-                array_idx,
-                table_idx,
+                array_index,
+                table_index,
                 table.entity_indices.len()
             );
         }
@@ -1591,17 +1592,17 @@ mod tests {
             world.tables.len()
         );
 
-        for (mask, table_idx) in &world.table_registry {
+        for (mask, table_index) in &world.table_registry {
             assert!(
-                *table_idx < world.tables.len(),
+                *table_index < world.tables.len(),
                 "Registry points to invalid table {} (max {})",
-                table_idx,
+                table_index,
                 world.tables.len() - 1
             );
             assert_eq!(
-                world.tables[*table_idx].mask, *mask,
+                world.tables[*table_index].mask, *mask,
                 "Registry mask mismatch: registry={:b}, table={:b}",
-                mask, world.tables[*table_idx].mask
+                mask, world.tables[*table_index].mask
             );
         }
     }
