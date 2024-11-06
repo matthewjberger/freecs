@@ -166,7 +166,7 @@ impl Metrics {
 
 pub fn main() {
     let config = StressTestConfig {
-        num_entities: 5_000_000,
+        num_entities: 1_000_000,
         num_frames: 1000,
         entity_batch_size: 10_000,
     };
