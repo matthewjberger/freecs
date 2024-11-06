@@ -153,6 +153,13 @@ macro_rules! world {
             }
         }
 
+        // Handles allocation and reuse of entity IDs
+        #[derive(Default, serde::Serialize, serde::Deserialize)]
+        pub struct EntityAllocator {
+            next_id: u32,
+            free_ids: Vec<(u32, u32)>, // (id, next_generation)
+        }
+
         /// Entity location cache for quick access
         #[derive(Default, serde::Serialize, serde::Deserialize)]
         pub struct EntityLocations {
@@ -165,7 +172,7 @@ macro_rules! world {
         pub struct $world {
             pub entity_locations: EntityLocations,
             pub tables: Vec<ComponentArrays>,
-            pub next_entity_id: u32,
+            pub allocator: EntityAllocator,
             pub table_registry: Vec<(u32, usize)>,
             #[serde(skip)]
             #[allow(unused)]
@@ -190,13 +197,6 @@ macro_rules! world {
         pub fn spawn_entities(world: &mut $world, mask: u32, count: usize) -> Vec<EntityId> {
             let mut entities = Vec::with_capacity(count);
             let table_index = get_or_create_table(world, mask);
-
-            // Pre-size entity locations
-            let max_id = (world.next_entity_id + count as u32) as usize;
-            if max_id > world.entity_locations.generations.len() {
-                world.entity_locations.generations.resize(max_id, 0);
-                world.entity_locations.locations.resize(max_id, None);
-            }
 
             // Reserve space in components
             $(
@@ -310,14 +310,13 @@ macro_rules! world {
 
         /// Despawn a batch of entities
         pub fn despawn_entities(world: &mut $world, entities: &[EntityId]) -> Vec<EntityId> {
-            use std::collections::{HashMap, HashSet};
+            use std::collections::HashMap;
 
-            let entities: HashSet<_> = entities.iter().copied().collect();
             let mut despawned = Vec::new();
             let mut table_removals: HashMap<usize, Vec<usize>> = HashMap::new();
 
-            // First pass: collect removals
-            for &entity in &entities {
+            // Process entities in order they were passed in
+            for &entity in entities {
                 if let Some((table_index, array_index)) = location_get(&world.entity_locations, entity) {
                     table_removals.entry(table_index)
                         .or_insert_with(Vec::new)
@@ -326,73 +325,75 @@ macro_rules! world {
                     let id = entity.id as usize;
                     if id < world.entity_locations.locations.len() {
                         world.entity_locations.locations[id] = None;
-                        world.entity_locations.generations[id] =
-                            world.entity_locations.generations[id].wrapping_add(1);
+
+                        let current_generation = world.entity_locations.generations[id];
+                        // Increment generation
+                        let next_generation = if current_generation == u32::MAX {
+                            1  // Skip 0 to avoid ABA issues
+                        } else {
+                            current_generation.wrapping_add(1)
+                        };
+                        world.entity_locations.generations[id] = next_generation;
+
+                        // Push onto free list
+                        world.allocator.free_ids.push((entity.id, next_generation));
+
                         despawned.push(entity);
                     }
                 }
             }
 
-            // Second pass: remove entities and cleanup
-            let mut table_index = 0;
-            while table_index < world.tables.len() {
-                if let Some(mut indices) = table_removals.remove(&table_index) {
-                    indices.sort_unstable_by(|a, b| b.cmp(a));
+        // Rest of the function stays the same...
+        // Handle table removals
+        let mut table_index = 0;
+        while table_index < world.tables.len() {
+            if let Some(mut indices) = table_removals.remove(&table_index) {
+                indices.sort_unstable_by(|a, b| b.cmp(a));
 
-                    // Remove entities
-                    for &index in &indices {
-                        remove_from_table(&mut world.tables[table_index], index);
-                    }
+                for &index in &indices {
+                    remove_from_table(&mut world.tables[table_index], index);
+                }
 
-                    // If table is now empty
-                    if world.tables[table_index].entity_indices.is_empty() {
-                        let last_index = world.tables.len() - 1;
+                if world.tables[table_index].entity_indices.is_empty() {
+                    let last_index = world.tables.len() - 1;
 
-                        if table_index != last_index {
-                            // Remember masks before swap
-                            let removed_mask = world.tables[table_index].mask;
-                            let swapped_mask = world.tables[last_index].mask;
+                    if table_index != last_index {
+                        let removed_mask = world.tables[table_index].mask;
+                        let swapped_mask = world.tables[last_index].mask;
 
-                            // Do the swap
-                            world.tables.swap_remove(table_index);
+                        world.tables.swap_remove(table_index);
 
-                            // Update registry for both removed and swapped table
-                            world.table_registry.retain(|(mask, _)| *mask != removed_mask);
-                            if let Some(entry) = world.table_registry.iter_mut()
-                                .find(|(mask, _)| *mask == swapped_mask) {
-                                entry.1 = table_index;
-                            }
+                        world.table_registry.retain(|(mask, _)| *mask != removed_mask);
+                        if let Some(entry) = world.table_registry.iter_mut()
+                            .find(|(mask, _)| *mask == swapped_mask) {
+                            entry.1 = table_index;
+                        }
 
-                            // Critical: Update ALL entity locations for swapped table
-                            for loc in world.entity_locations.locations.iter_mut() {
-                                if let Some((ref mut index, _)) = loc {
-                                    if *index == last_index {
-                                        *index = table_index;
-                                    }
+                        for location in world.entity_locations.locations.iter_mut() {
+                            if let Some((ref mut index, _)) = location {
+                                if *index == last_index {
+                                    *index = table_index;
                                 }
                             }
-
-                            // Don't increment table_index since we swapped a new table here
-                            continue;
-                        } else {
-                            // Just remove the last table and its registry entry
-                            let removed_mask = world.tables[table_index].mask;
-                            world.tables.pop();
-                            world.table_registry.retain(|(mask, _)| *mask != removed_mask);
                         }
+                        continue;
                     } else {
-                        // Update indices for remaining entities in non-empty table
-                        for (new_index, &entity) in world.tables[table_index].entity_indices.iter().enumerate() {
-                            if !entities.contains(&entity) {
-                                location_insert(&mut world.entity_locations, entity, (table_index, new_index));
-                            }
+                        let removed_mask = world.tables[table_index].mask;
+                        world.tables.pop();
+                        world.table_registry.retain(|(mask, _)| *mask != removed_mask);
+                    }
+                } else {
+                    for (new_index, &entity) in world.tables[table_index].entity_indices.iter().enumerate() {
+                        if !entities.contains(&entity) {
+                            location_insert(&mut world.entity_locations, entity, (table_index, new_index));
                         }
                     }
                 }
-                table_index += 1;
             }
+            table_index += 1;
+        }
 
-            despawned
+        despawned
         }
 
         /// Add components to an entity
@@ -581,19 +582,21 @@ macro_rules! world {
         }
 
         fn location_get(locations: &EntityLocations, entity: EntityId) -> Option<(usize, usize)> {
-            if entity.id as usize >= locations.generations.len() {
+            let id = entity.id as usize;
+            if id >= locations.generations.len() {
                 return None;
             }
 
-            if locations.generations[entity.id as usize] != entity.generation {
+            // Validate generation matches
+            if locations.generations[id] != entity.generation {
                 return None;
             }
 
-            if entity.id as usize >= locations.locations.len() {
-                None
-            } else {
-                locations.locations[entity.id as usize]
+            if id >= locations.locations.len() {
+                return None;
             }
+
+            locations.locations[id]
         }
 
         fn location_insert(
@@ -615,22 +618,38 @@ macro_rules! world {
         }
 
         fn create_entity(world: &mut $world) -> EntityId {
-            let id = world.next_entity_id;
-            let id_usize = id as usize;
+            // Always reuse latest freed id if available through LIFO
+            if let Some((id, next_gen)) = world.allocator.free_ids.pop() {
+                let id_usize = id as usize;
 
-            // CRITICAL: Resize before using the array
-            while id_usize >= world.entity_locations.generations.len() {
-                // Double the size to amortize resize cost
-                let new_size = (world.entity_locations.generations.len() * 2).max(64);
-                world.entity_locations.generations.resize(new_size, 0);
-                world.entity_locations.locations.resize(new_size, None);
+                // Ensure space
+                while id_usize >= world.entity_locations.generations.len() {
+                    let new_size = (world.entity_locations.generations.len() * 2).max(64);
+                    world.entity_locations.generations.resize(new_size, 0);
+                    world.entity_locations.locations.resize(new_size, None);
+                }
+
+                // Update generation
+                world.entity_locations.generations[id_usize] = next_gen;
+                EntityId { id, generation: next_gen }
+            } else {
+                // Allocate new id
+                let id = world.allocator.next_id;
+                world.allocator.next_id += 1;
+                let id_usize = id as usize;
+
+                // Ensure space
+                while id_usize >= world.entity_locations.generations.len() {
+                    let new_size = (world.entity_locations.generations.len() * 2).max(64);
+                    world.entity_locations.generations.resize(new_size, 0);
+                    world.entity_locations.locations.resize(new_size, None);
+                }
+
+                EntityId {
+                    id,
+                    generation: 0,
+                }
             }
-
-            // Now safe to use id_usize since arrays are properly sized
-            let generation = world.entity_locations.generations[id_usize];
-            world.next_entity_id += 1;
-
-            EntityId { id, generation }
         }
 
         fn add_to_table(
@@ -1607,5 +1626,198 @@ mod tests {
                 mask, world.tables[*table_index].mask
             );
         }
+    }
+
+    #[test]
+    fn test_concurrent_entity_references() {
+        let mut world = World::default();
+
+        // Create two entities
+        let entity1 = spawn_entities(&mut world, POSITION | HEALTH, 1)[0];
+        let entity2 = spawn_entities(&mut world, POSITION | HEALTH, 1)[0];
+
+        // Set up some initial data
+        if let Some(pos) = get_component_mut::<Position>(&mut world, entity1, POSITION) {
+            pos.x = 1.0;
+        }
+        if let Some(health) = get_component_mut::<Health>(&mut world, entity1, HEALTH) {
+            health.value = 100.0;
+        }
+
+        // Store entity1's ID for later
+        let id1 = entity1.id;
+
+        // Despawn entity1
+        despawn_entities(&mut world, &[entity1]);
+
+        // Create new entity with same ID but different generation
+        let entity3 = spawn_entities(&mut world, POSITION | HEALTH, 1)[0];
+        assert_eq!(entity3.id, id1, "Should reuse entity1's ID");
+        assert_eq!(
+            entity3.generation,
+            entity1.generation + 1,
+            "Should have incremented generation"
+        );
+
+        // Set different data for entity3
+        if let Some(pos) = get_component_mut::<Position>(&mut world, entity3, POSITION) {
+            pos.x = 3.0;
+        }
+        if let Some(health) = get_component_mut::<Health>(&mut world, entity3, HEALTH) {
+            health.value = 50.0;
+        }
+
+        // Verify entity2 is unaffected by entity1's despawn and entity3's spawn
+        if let Some(pos) = get_component::<Position>(&world, entity2, POSITION) {
+            assert_eq!(pos.x, 0.0, "Entity2's data should be unchanged");
+        }
+
+        // Verify we can't access entity1's old data through entity3's ID
+        if let Some(pos) = get_component::<Position>(&world, entity3, POSITION) {
+            assert_eq!(pos.x, 3.0, "Should get entity3's data, not entity1's");
+        }
+        assert!(
+            get_component::<Position>(&world, entity1, POSITION).is_none(),
+            "Should not be able to access entity1's old data"
+        );
+    }
+
+    #[test]
+    fn test_generational_indices_aba() {
+        let mut world = World::default();
+
+        // Create an initial entity with Position
+        let entity_a1 = spawn_entities(&mut world, POSITION, 1)[0];
+        assert_eq!(
+            entity_a1.generation, 0,
+            "First use of ID should have generation 0"
+        );
+
+        // Set initial position
+        if let Some(pos) = get_component_mut::<Position>(&mut world, entity_a1, POSITION) {
+            pos.x = 1.0;
+            pos.y = 1.0;
+        }
+
+        // Store the ID for later reuse
+        let id = entity_a1.id;
+
+        // Despawn the entity
+        despawn_entities(&mut world, &[entity_a1]);
+
+        // Create a new entity that reuses the same ID (entity A2)
+        let entity_a2 = spawn_entities(&mut world, POSITION, 1)[0];
+        assert_eq!(entity_a2.id, id, "Should reuse the same ID");
+        assert_eq!(
+            entity_a2.generation, 1,
+            "Second use of ID should have generation 1"
+        );
+
+        // Set different position for A2
+        if let Some(pos) = get_component_mut::<Position>(&mut world, entity_a2, POSITION) {
+            pos.x = 2.0;
+            pos.y = 2.0;
+        }
+
+        // Verify that the old reference (A1) is invalid
+        assert!(
+            get_component::<Position>(&world, entity_a1, POSITION).is_none(),
+            "Old reference to entity should be invalid"
+        );
+
+        // Despawn A2
+        despawn_entities(&mut world, &[entity_a2]);
+
+        // Create another entity with the same ID (entity A3)
+        let entity_a3 = spawn_entities(&mut world, POSITION, 1)[0];
+        assert_eq!(entity_a3.id, id, "Should reuse the same ID again");
+        assert_eq!(
+            entity_a3.generation, 2,
+            "Third use of ID should have generation 2"
+        );
+
+        // Set different position for A3
+        if let Some(pos) = get_component_mut::<Position>(&mut world, entity_a3, POSITION) {
+            pos.x = 3.0;
+            pos.y = 3.0;
+        }
+
+        // Verify that both old references are invalid
+        assert!(
+            get_component::<Position>(&world, entity_a1, POSITION).is_none(),
+            "First generation reference should be invalid"
+        );
+        assert!(
+            get_component::<Position>(&world, entity_a2, POSITION).is_none(),
+            "Second generation reference should be invalid"
+        );
+
+        // Verify that the current reference is valid and has the correct data
+        let pos = get_component::<Position>(&world, entity_a3, POSITION);
+        assert!(
+            pos.is_some(),
+            "Current generation reference should be valid"
+        );
+        let pos = pos.unwrap();
+        assert_eq!(pos.x, 3.0, "Should have the current generation's data");
+        assert_eq!(pos.y, 3.0, "Should have the current generation's data");
+    }
+
+    // TODO: Ensure generational indices wrap at u32::MAX
+    #[ignore]
+    #[test]
+    fn test_wrapping_generational_indices_at_u32_max() {
+        let mut world = World::default();
+
+        // Create an initial entity with Position
+        let entity_a1 = spawn_entities(&mut world, POSITION, 1)[0];
+        assert_eq!(
+            entity_a1.generation, 0,
+            "First use of ID should have generation 0"
+        );
+
+        // Store the ID for later reuse
+        let id = entity_a1.id;
+
+        // Create another entity with the same ID (entity A3)
+        let entity_a2 = spawn_entities(&mut world, POSITION, 1)[0];
+        assert_eq!(entity_a2.id, id, "Should reuse the same ID again");
+        assert_eq!(
+            entity_a2.generation, 2,
+            "Third use of ID should have generation 2"
+        );
+
+        // Test wrapping behavior of generations
+        // Force generation to maximum value
+        let max_gen = u32::MAX;
+        for _ in 0..max_gen - 2 {
+            // -2 because we already used 2 generations
+            despawn_entities(&mut world, &[entity_a2]);
+            let entity = spawn_entities(&mut world, POSITION, 1)[0];
+            assert_eq!(entity.id, id, "Should continue to reuse the same ID");
+        }
+
+        // Get the entity with maximum generation
+        let entity_max = spawn_entities(&mut world, POSITION, 1)[0];
+        assert_eq!(
+            entity_max.generation,
+            u32::MAX,
+            "Should reach maximum generation"
+        );
+
+        // Test wrapping to zero
+        despawn_entities(&mut world, &[entity_max]);
+        let entity_wrapped = spawn_entities(&mut world, POSITION, 1)[0];
+        assert_eq!(
+            entity_wrapped.id, id,
+            "Should still use same ID after generation wrap"
+        );
+        assert_eq!(entity_wrapped.generation, 0, "Generation should wrap to 0");
+
+        // Verify that old reference with max generation is invalid
+        assert!(
+            get_component::<Position>(&world, entity_max, POSITION).is_none(),
+            "Max generation reference should be invalid after wrap"
+        );
     }
 }

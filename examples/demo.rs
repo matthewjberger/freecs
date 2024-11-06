@@ -356,13 +356,6 @@ async fn main() {
         set_default_camera();
         draw_text(&format!("FPS: {:.1}", current_fps), 10.0, 30.0, 20.0, GREEN);
         draw_text(
-            &format!("Entities: {}", world.next_entity_id),
-            10.0,
-            70.0,
-            20.0,
-            WHITE,
-        );
-        draw_text(
             &format!("Systems update time: {:.2?}", systems_time),
             10.0,
             90.0,
