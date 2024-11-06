@@ -394,9 +394,10 @@ macro_rules! world {
         }
 
         /// Add components to an entity
-        pub fn add_components(world: &mut $world, entity: EntityId, mask: u32) -> bool {
+        pub fn add_components(world: &mut World, entity: EntityId, mask: u32) -> bool {
             if let Some((table_idx, array_idx)) = location_get(&world.entity_locations, entity) {
                 let current_mask = world.tables[table_idx].mask;
+
                 // If entity already has all these components, no need to move
                 if current_mask & mask == mask {
                     return true;
@@ -404,13 +405,20 @@ macro_rules! world {
 
                 let new_mask = current_mask | mask;
                 let new_table_idx = get_or_create_table(world, new_mask);
+
+                // Move entity to new table
                 move_entity(world, entity, table_idx, array_idx, new_table_idx);
+
+                // If old table is now empty, merge tables
+                if world.tables[table_idx].entity_indices.is_empty() {
+                    merge_tables(world);
+                }
+
                 true
             } else {
                 false
             }
         }
-
         /// Remove components from an entity
         pub fn remove_components(world: &mut $world, entity: EntityId, mask: u32) -> bool {
             if let Some((table_idx, array_idx)) = location_get(&world.entity_locations, entity) {
@@ -420,9 +428,45 @@ macro_rules! world {
                     return true;
                 }
 
+                let source_table_idx = table_idx;  // Keep track of source table
                 let new_mask = current_mask & !mask;
                 let new_table_idx = get_or_create_table(world, new_mask);
+
+                // Move entity first
                 move_entity(world, entity, table_idx, array_idx, new_table_idx);
+
+                // Check if source table is now empty
+                if world.tables[source_table_idx].entity_indices.is_empty() {
+                    // Remove the empty table using swap_remove
+                    let last_idx = world.tables.len() - 1;
+                    if source_table_idx != last_idx {
+                        let removed_mask = world.tables[source_table_idx].mask;
+                        let swapped_mask = world.tables[last_idx].mask;
+
+                        // Update entity locations for the swapped table
+                        for loc in world.entity_locations.locations.iter_mut() {
+                            if let Some((ref mut idx, _)) = loc {
+                                if *idx == last_idx {
+                                    *idx = source_table_idx;
+                                }
+                            }
+                        }
+
+                        // Remove table and update registry
+                        world.tables.swap_remove(source_table_idx);
+                        world.table_registry.retain(|(mask, _)| *mask != removed_mask);
+                        if let Some(entry) = world.table_registry.iter_mut()
+                            .find(|(mask, _)| *mask == swapped_mask) {
+                            entry.1 = source_table_idx;
+                        }
+                    } else {
+                        // Just remove the last table
+                        let removed_mask = world.tables[source_table_idx].mask;
+                        world.tables.pop();
+                        world.table_registry.retain(|(mask, _)| *mask != removed_mask);
+                    }
+                }
+
                 true
             } else {
                 false
@@ -436,7 +480,7 @@ macro_rules! world {
         }
 
         /// Merge tables that have the same mask
-        pub fn merge_tables(world: &mut $world) {
+        fn merge_tables(world: &mut $world) {
             let mut i = 0;
             while i < world.tables.len() {
                 if world.tables[i].entity_indices.is_empty() {
@@ -1128,57 +1172,15 @@ mod tests {
     #[test]
     fn test_table_fragmentation() {
         let mut world = World::default();
-        let mut entities = Vec::new();
+        let mut all_entities = Vec::new();
 
-        // Create entities that will end up with same components through different paths
-        for i in 0..10 {
-            let e = spawn_entities(&mut world, POSITION, 1)[0];
-            validate_world_integrity(&world).expect("World invalid after spawn");
+        println!("\nCreating initial state with multiple tables:");
 
-            println!(
-                "Initial spawn - Tables: {}, Registry: {}",
-                world.tables.len(),
-                world.table_registry.len()
-            );
+        // Create entities in first table (POSITION only)
+        let e1 = spawn_entities(&mut world, POSITION, 3);
+        all_entities.extend(e1.clone());
 
-            if i % 2 == 0 {
-                add_components(&mut world, e, VELOCITY);
-                validate_world_integrity(&world).expect("World invalid after adding VELOCITY");
-                println!(
-                    "Added VELOCITY - Tables: {}, Registry: {}",
-                    world.tables.len(),
-                    world.table_registry.len()
-                );
-
-                add_components(&mut world, e, HEALTH);
-                validate_world_integrity(&world).expect("World invalid after adding HEALTH");
-                println!(
-                    "Added HEALTH - Tables: {}, Registry: {}",
-                    world.tables.len(),
-                    world.table_registry.len()
-                );
-            } else {
-                add_components(&mut world, e, HEALTH);
-                validate_world_integrity(&world).expect("World invalid after adding HEALTH");
-                println!(
-                    "Added HEALTH - Tables: {}, Registry: {}",
-                    world.tables.len(),
-                    world.table_registry.len()
-                );
-
-                add_components(&mut world, e, VELOCITY);
-                validate_world_integrity(&world).expect("World invalid after adding VELOCITY");
-                println!(
-                    "Added VELOCITY - Tables: {}, Registry: {}",
-                    world.tables.len(),
-                    world.table_registry.len()
-                );
-            }
-            entities.push(e);
-        }
-
-        println!("\nBefore merge:");
-        println!("Number of tables: {}", world.tables.len());
+        println!("\nAfter spawning POSITION entities:");
         for (i, table) in world.tables.iter().enumerate() {
             println!(
                 "Table {}: mask={:b}, entities={}",
@@ -1187,16 +1189,63 @@ mod tests {
                 table.entity_indices.len()
             );
         }
-        println!("Registry entries:");
-        for (i, (mask, idx)) in world.table_registry.iter().enumerate() {
-            println!("Registry {}: mask={:b}, points to table {}", i, mask, idx);
+
+        // Create entities in second table (POSITION | VELOCITY)
+        let e2 = spawn_entities(&mut world, POSITION | VELOCITY, 3);
+        all_entities.extend(e2.clone());
+
+        println!("\nAfter spawning POSITION | VELOCITY entities:");
+        for (i, table) in world.tables.iter().enumerate() {
+            println!(
+                "Table {}: mask={:b}, entities={}",
+                i,
+                table.mask,
+                table.entity_indices.len()
+            );
+        }
+
+        // Create entities in third table (POSITION | VELOCITY | HEALTH)
+        let e3 = spawn_entities(&mut world, POSITION | VELOCITY | HEALTH, 3);
+        all_entities.extend(e3.clone());
+
+        println!("\nAfter spawning POSITION | VELOCITY | HEALTH entities:");
+        println!("Number of tables: {}", world.tables.len());
+        for (i, table) in world.tables.iter().enumerate() {
+            println!(
+                "Table {}: mask={:b}, entities={}",
+                i,
+                table.mask,
+                table.entity_indices.len()
+            );
         }
 
         let initial_table_count = world.tables.len();
-        merge_tables(&mut world);
-        validate_world_integrity(&world).expect("World invalid after merge");
+        println!("\nInitial table count: {}", initial_table_count);
 
-        println!("\nAfter merge:");
+        // Remove VELOCITY from e2 entities one by one and verify table cleanup
+        for (i, &entity) in e2.iter().enumerate() {
+            println!("\nRemoving VELOCITY from entity {}", i);
+            remove_components(&mut world, entity, VELOCITY);
+
+            println!("Tables after removal {}:", i);
+            for (j, table) in world.tables.iter().enumerate() {
+                println!(
+                    "Table {}: mask={:b}, entities={}",
+                    j,
+                    table.mask,
+                    table.entity_indices.len()
+                );
+            }
+            // After the last entity is moved, the source table should be gone
+            if i == e2.len() - 1 {
+                assert!(
+                    world.tables.len() < initial_table_count,
+                    "Table count should decrease after moving last entity"
+                );
+            }
+        }
+
+        println!("\nFinal state:");
         println!("Number of tables: {}", world.tables.len());
         for (i, table) in world.tables.iter().enumerate() {
             println!(
@@ -1206,35 +1255,46 @@ mod tests {
                 table.entity_indices.len()
             );
         }
-        println!("Registry entries:");
-        for (i, (mask, idx)) in world.table_registry.iter().enumerate() {
-            println!("Registry {}: mask={:b}, points to table {}", i, mask, idx);
+
+        // Verify no empty tables exist
+        for (i, table) in world.tables.iter().enumerate() {
+            assert!(
+                !table.entity_indices.is_empty(),
+                "Table {} is empty (mask={:b})",
+                i,
+                table.mask
+            );
         }
 
+        // Verify table count decreased
         assert!(
             world.tables.len() < initial_table_count,
-            "Expected table count to decrease from {} but got {}",
+            "Expected fewer than {} tables, got {}",
             initial_table_count,
             world.tables.len()
         );
 
-        // Verify all entities still accessible and have correct components
-        for e in entities {
-            assert!(
-                get_component::<Position>(&world, e, POSITION).is_some(),
-                "Entity {:?} lost Position component",
-                e
-            );
-            assert!(
-                get_component::<Velocity>(&world, e, VELOCITY).is_some(),
-                "Entity {:?} lost Velocity component",
-                e
-            );
-            assert!(
-                get_component::<Health>(&world, e, HEALTH).is_some(),
-                "Entity {:?} lost Health component",
-                e
-            );
+        // Verify components
+        for &entity in &e1 {
+            assert!(get_component::<Position>(&world, entity, POSITION).is_some());
+        }
+
+        for &entity in &e2 {
+            assert!(get_component::<Position>(&world, entity, POSITION).is_some());
+            assert!(get_component::<Velocity>(&world, entity, VELOCITY).is_none());
+        }
+
+        for &entity in &e3 {
+            assert!(get_component::<Position>(&world, entity, POSITION).is_some());
+            assert!(get_component::<Velocity>(&world, entity, VELOCITY).is_some());
+            assert!(get_component::<Health>(&world, entity, HEALTH).is_some());
+        }
+
+        // Verify registry matches tables
+        assert_eq!(world.table_registry.len(), world.tables.len());
+        for (mask, table_idx) in &world.table_registry {
+            assert!(*table_idx < world.tables.len());
+            assert_eq!(world.tables[*table_idx].mask, *mask);
         }
     }
 
@@ -1344,6 +1404,205 @@ mod tests {
                     idx, mask, world.tables[*idx].mask
                 );
             }
+        }
+    }
+
+    #[test]
+    fn test_table_management_during_component_add() {
+        let mut world = World::default();
+
+        println!("\nInitial world state:");
+        println!("Tables: {}", world.tables.len());
+
+        // Create entities with different component combinations
+        let e1 = spawn_entities(&mut world, POSITION, 1)[0];
+        let e2 = spawn_entities(&mut world, POSITION, 1)[0];
+        let e3 = spawn_entities(&mut world, POSITION, 1)[0];
+
+        println!("\nAfter spawning 3 entities with POSITION:");
+        println!("Tables: {}", world.tables.len());
+        for (i, table) in world.tables.iter().enumerate() {
+            println!(
+                "Table {}: mask={:b}, entities={}",
+                i,
+                table.mask,
+                table.entity_indices.len()
+            );
+        }
+
+        // Set initial values to track data preservation
+        if let Some(pos) = get_component_mut::<Position>(&mut world, e1, POSITION) {
+            pos.x = 1.0;
+            pos.y = 2.0;
+        }
+
+        // Initial state checks
+        assert_eq!(world.tables.len(), 1, "Should have one table initially");
+        assert_eq!(
+            world.tables[0].entity_indices.len(),
+            3,
+            "First table should have 3 entities"
+        );
+        assert_eq!(
+            world.tables[0].mask, POSITION,
+            "First table should have POSITION mask"
+        );
+
+        // Add VELOCITY to first entity
+        add_components(&mut world, e1, VELOCITY);
+
+        println!("\nAfter adding VELOCITY to e1:");
+        println!("Tables: {}", world.tables.len());
+        for (i, table) in world.tables.iter().enumerate() {
+            println!(
+                "Table {}: mask={:b}, entities={}",
+                i,
+                table.mask,
+                table.entity_indices.len()
+            );
+        }
+
+        // Verify entity moved to new table
+        assert_eq!(
+            world.tables.len(),
+            2,
+            "Should have two tables after adding VELOCITY"
+        );
+
+        // Find tables with each mask
+        let pos_table = world.tables.iter().find(|t| t.mask == POSITION).unwrap();
+        let pos_vel_table = world
+            .tables
+            .iter()
+            .find(|t| t.mask == (POSITION | VELOCITY))
+            .unwrap();
+
+        assert_eq!(
+            pos_table.entity_indices.len(),
+            2,
+            "POSITION table should have 2 entities"
+        );
+        assert_eq!(
+            pos_vel_table.entity_indices.len(),
+            1,
+            "POSITION|VELOCITY table should have 1 entity"
+        );
+
+        // Verify data preserved
+        let pos = get_component::<Position>(&world, e1, POSITION).unwrap();
+        assert_eq!(pos.x, 1.0);
+        assert_eq!(pos.y, 2.0);
+
+        // Move second entity to same table as first
+        add_components(&mut world, e2, VELOCITY);
+
+        println!("\nAfter adding VELOCITY to e2:");
+        println!("Tables: {}", world.tables.len());
+        for (i, table) in world.tables.iter().enumerate() {
+            println!(
+                "Table {}: mask={:b}, entities={}",
+                i,
+                table.mask,
+                table.entity_indices.len()
+            );
+        }
+
+        // Remove VELOCITY from both entities
+        remove_components(&mut world, e1, VELOCITY);
+        remove_components(&mut world, e2, VELOCITY);
+
+        println!("\nAfter removing VELOCITY from e1 and e2:");
+        println!("Tables: {}", world.tables.len());
+        for (i, table) in world.tables.iter().enumerate() {
+            println!(
+                "Table {}: mask={:b}, entities={}",
+                i,
+                table.mask,
+                table.entity_indices.len()
+            );
+        }
+
+        // Add VELOCITY back to all entities
+        add_components(&mut world, e1, VELOCITY);
+        add_components(&mut world, e2, VELOCITY);
+        add_components(&mut world, e3, VELOCITY);
+
+        println!("\nAfter adding VELOCITY to all entities:");
+        println!("Tables: {}", world.tables.len());
+        for (i, table) in world.tables.iter().enumerate() {
+            println!(
+                "Table {}: mask={:b}, entities={}",
+                i,
+                table.mask,
+                table.entity_indices.len()
+            );
+        }
+
+        // Verify tables merged correctly
+        assert_eq!(
+            world.tables.len(),
+            1,
+            "Should have merged back to one table"
+        );
+        assert_eq!(
+            world.tables[0].entity_indices.len(),
+            3,
+            "All entities should be in the same table"
+        );
+        assert_eq!(
+            world.tables[0].mask,
+            POSITION | VELOCITY,
+            "Table should have both components"
+        );
+
+        // Verify all entity locations are valid
+        for entity in [e1, e2, e3] {
+            let location = world.entity_locations.locations[entity.id as usize];
+            assert!(
+                location.is_some(),
+                "Entity {:?} has invalid location",
+                entity
+            );
+            let (table_idx, array_idx) = location.unwrap();
+            assert!(
+                table_idx < world.tables.len(),
+                "Entity {:?} points to invalid table {} (max {})",
+                entity,
+                table_idx,
+                world.tables.len() - 1
+            );
+            let table = &world.tables[table_idx];
+            assert!(
+                array_idx < table.entity_indices.len(),
+                "Entity {:?} points to invalid index {} in table {} (length {})",
+                entity,
+                array_idx,
+                table_idx,
+                table.entity_indices.len()
+            );
+        }
+
+        // Verify table registry is correct
+        assert_eq!(
+            world.table_registry.len(),
+            world.tables.len(),
+            "Table registry size mismatch: registry={}, tables={}",
+            world.table_registry.len(),
+            world.tables.len()
+        );
+
+        for (mask, table_idx) in &world.table_registry {
+            assert!(
+                *table_idx < world.tables.len(),
+                "Registry points to invalid table {} (max {})",
+                table_idx,
+                world.tables.len() - 1
+            );
+            assert_eq!(
+                world.tables[*table_idx].mask, *mask,
+                "Registry mask mismatch: registry={:b}, table={:b}",
+                mask, world.tables[*table_idx].mask
+            );
         }
     }
 }

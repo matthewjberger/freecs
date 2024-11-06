@@ -177,9 +177,15 @@ async fn main() {
     // Pre-spawn all entities at once
     let entities = spawn_entities(
         &mut world,
-        POSITION | ROTATION | SCALE | VELOCITY | GRAVITY,
+        POSITION | ROTATION | SCALE | VELOCITY,
         TOTAL_ENTITIES as usize,
     );
+
+    // The gravity component is added separately to
+    // demonstrate adding components after initial creation
+    for entity in entities.iter() {
+        add_components(&mut world, *entity, GRAVITY);
+    }
 
     // Initialize all entities in the pre-spawned batch
     for (idx, entity) in entities.iter().enumerate() {
