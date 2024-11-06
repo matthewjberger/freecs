@@ -343,56 +343,56 @@ macro_rules! world {
                 }
             }
 
-        // Handle table removals
-        let mut table_index = 0;
-        while table_index < world.tables.len() {
-            if let Some(mut indices) = table_removals.remove(&table_index) {
-                indices.sort_unstable_by(|a, b| b.cmp(a));
+            // Handle table removals
+            let mut table_index = 0;
+            while table_index < world.tables.len() {
+                if let Some(mut indices) = table_removals.remove(&table_index) {
+                    indices.sort_unstable_by(|a, b| b.cmp(a));
 
-                for &index in &indices {
-                    remove_from_table(&mut world.tables[table_index], index);
-                }
+                    for &index in &indices {
+                        remove_from_table(&mut world.tables[table_index], index);
+                    }
 
-                if world.tables[table_index].entity_indices.is_empty() {
-                    let last_index = world.tables.len() - 1;
+                    if world.tables[table_index].entity_indices.is_empty() {
+                        let last_index = world.tables.len() - 1;
 
-                    if table_index != last_index {
-                        let removed_mask = world.tables[table_index].mask;
-                        let swapped_mask = world.tables[last_index].mask;
+                        if table_index != last_index {
+                            let removed_mask = world.tables[table_index].mask;
+                            let swapped_mask = world.tables[last_index].mask;
 
-                        world.tables.swap_remove(table_index);
+                            world.tables.swap_remove(table_index);
 
-                        world.table_registry.retain(|(mask, _)| *mask != removed_mask);
-                        if let Some(entry) = world.table_registry.iter_mut()
-                            .find(|(mask, _)| *mask == swapped_mask) {
-                            entry.1 = table_index;
-                        }
+                            world.table_registry.retain(|(mask, _)| *mask != removed_mask);
+                            if let Some(entry) = world.table_registry.iter_mut()
+                                .find(|(mask, _)| *mask == swapped_mask) {
+                                entry.1 = table_index;
+                            }
 
-                        for location in world.entity_locations.locations.iter_mut() {
-                            if let Some((ref mut index, _)) = location {
-                                if *index == last_index {
-                                    *index = table_index;
+                            for location in world.entity_locations.locations.iter_mut() {
+                                if let Some((ref mut index, _)) = location {
+                                    if *index == last_index {
+                                        *index = table_index;
+                                    }
                                 }
                             }
+                            continue;
+                        } else {
+                            let removed_mask = world.tables[table_index].mask;
+                            world.tables.pop();
+                            world.table_registry.retain(|(mask, _)| *mask != removed_mask);
                         }
-                        continue;
                     } else {
-                        let removed_mask = world.tables[table_index].mask;
-                        world.tables.pop();
-                        world.table_registry.retain(|(mask, _)| *mask != removed_mask);
-                    }
-                } else {
-                    for (new_index, &entity) in world.tables[table_index].entity_indices.iter().enumerate() {
-                        if !entities.contains(&entity) {
-                            location_insert(&mut world.entity_locations, entity, (table_index, new_index));
+                        for (new_index, &entity) in world.tables[table_index].entity_indices.iter().enumerate() {
+                            if !entities.contains(&entity) {
+                                location_insert(&mut world.entity_locations, entity, (table_index, new_index));
+                            }
                         }
                     }
                 }
+                table_index += 1;
             }
-            table_index += 1;
-        }
 
-        despawned
+            despawned
         }
 
         /// Add components to an entity
