@@ -13,7 +13,7 @@ A macro is used to define the world and its components, and generates
 the entity component system as part of your source code at compile time. The generated code
 contains only plain data structures (no methods) and free functions that transform them, achieving static dispatch.
 
-The internal implementation is ~500 loc, and does not use object orientation, generics, traits, or dynamic dispatch.
+The internal implementation is ~600 loc, and does not use object orientation, generics, traits, or dynamic dispatch.
 
 ## Quick Start
 
@@ -21,7 +21,7 @@ Add this to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-freecs = "0.2.6"
+freecs = "0.2.7"
 serde = { version = "1.0.214", features = ["derive"] } # or higher
 
 # (optional) add rayon if you want to parallelize systems
