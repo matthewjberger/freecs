@@ -3,7 +3,7 @@ use macroquad::prelude::*;
 use rayon::prelude::*;
 
 world! {
-    World {
+    World2 {
         components {
             position: Position3D => POSITION,
             rotation: Rotation => ROTATION,
@@ -57,7 +57,7 @@ mod systems {
     use super::*;
     use freecs::has_components;
 
-    pub fn run_systems(world: &mut World, dt: f32) {
+    pub fn run_systems(world: &mut World2, dt: f32) {
         let delta_time = world.resources.delta_time;
         world.tables.par_iter_mut().for_each(|table| {
             if has_components!(table, SCALE) {
@@ -148,7 +148,7 @@ mod systems {
 
 #[macroquad::main("freecs - Free ECS")]
 async fn main() {
-    let mut world = World::default();
+    let mut world = World2::default();
 
     // Inject resources for systems to use
     world.resources.delta_time = 0.016;

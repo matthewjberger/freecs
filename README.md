@@ -21,7 +21,7 @@ Add this to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-freecs = "0.2.4"
+freecs = "0.2.5"
 serde = { version = "1.0.214", features = ["derive"] } # or higher
 
 # (optional) add rayon if you want to parallelize systems
@@ -34,6 +34,7 @@ And in `main.rs`:
 use freecs::{has_components, world};
 use rayon::prelude::*;
 
+// The `World` and `Resources` type names can be customized.
 world! {
   World {
       components {

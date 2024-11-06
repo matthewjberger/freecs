@@ -34,6 +34,7 @@
 //!
 //! // Then, create a world with the `world!` macro.
 //! // Resources are stored independently of component data and are not serialized.
+//! // The `World` and `Resources` type names can be customized.
 //! world! {
 //!   World {
 //!       components {
@@ -59,6 +60,7 @@
 //! // Lookup and modify a component
 //! if let Some(pos) = get_component_mut::<Position>(&mut world, entity, POSITION) {
 //!     pos.x += 1.0;
+//!
 //! }
 //!
 //! // Add new components to an entity by mask
@@ -394,7 +396,7 @@ macro_rules! world {
         }
 
         /// Add components to an entity
-        pub fn add_components(world: &mut World, entity: EntityId, mask: u32) -> bool {
+        pub fn add_components(world: &mut $world, entity: EntityId, mask: u32) -> bool {
             if let Some((table_index, array_index)) = location_get(&world.entity_locations, entity) {
                 let current_mask = world.tables[table_index].mask;
 
@@ -535,7 +537,7 @@ macro_rules! world {
         }
 
         fn move_entity(
-            world: &mut World,
+            world: &mut $world,
             entity: EntityId,
             from_table: usize,
             from_index: usize,
@@ -612,7 +614,7 @@ macro_rules! world {
             locations.locations[id] = Some(location);
         }
 
-        fn create_entity(world: &mut World) -> EntityId {
+        fn create_entity(world: &mut $world) -> EntityId {
             let id = world.next_entity_id;
             let id_usize = id as usize;
 
