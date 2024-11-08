@@ -139,11 +139,13 @@ macro_rules! world {
         #[allow(non_camel_case_types)]
         pub enum Component {
             $($mask,)*
+            All,
         }
 
         pub const ALL: u32 = 0;
         $(pub const $mask: u32 = 1 << (Component::$mask as u32);)*
-        const COMPONENT_COUNT: usize = 3; // TODO (MATT) DON'T HARDCODE THIS
+
+        pub const COMPONENT_COUNT: usize = { Component::All as usize };
 
         /// Entity ID, an index into storage and a generation counter to prevent stale references
         #[derive(Default, Clone, Copy, Debug, Eq, PartialEq, Hash, serde::Serialize, serde::Deserialize)]
@@ -216,7 +218,7 @@ macro_rules! world {
 
         fn get_component_index(mask: u32) -> Option<usize> {
             match mask {
-                $($mask => Some($mask as _),)*
+                $($mask => Some(Component::$mask as _),)*
                 _ => None,
             }
         }
@@ -645,7 +647,7 @@ macro_rules! world {
             world.table_edges.push(TableEdges::default());
 
             for comp_mask in [
-                $( $mask, )*
+                $( $mask,)*
             ] {
                 if let Some(comp_idx) = get_component_index(comp_mask) {
                     for (idx, table) in world.tables.iter().enumerate() {
@@ -719,7 +721,7 @@ mod tests {
         // This function invokes two systems in parallel
         // for each table in the world filtered by component mask.
         pub fn run_systems(world: &mut World, dt: f32) {
-            world.tables.par_iter_mut().for_each(|table| {
+            world.tables.iter_mut().for_each(|table| {
                 if has_components!(table, POSITION | VELOCITY | HEALTH) {
                     update_positions_system(&mut table.position, &table.velocity, dt);
                 }
@@ -737,8 +739,8 @@ mod tests {
             dt: f32,
         ) {
             positions
-                .par_iter_mut()
-                .zip(velocities.par_iter())
+                .iter_mut()
+                .zip(velocities.iter())
                 .for_each(|(pos, vel)| {
                     pos.x += vel.x * dt;
                     pos.y += vel.y * dt;
@@ -747,7 +749,7 @@ mod tests {
 
         #[inline]
         pub fn health_system(health: &mut [Health]) {
-            health.par_iter_mut().for_each(|health| {
+            health.iter_mut().for_each(|health| {
                 health.value *= 0.98; // gradually decline health value
             });
         }
