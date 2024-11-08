@@ -298,11 +298,21 @@ macro_rules! world {
         /// Query for the first entity that matches the component mask
         /// Returns as soon as a match is found, instead of running for all entities
         pub fn query_first_entity(world: &$world, mask: u32) -> Option<EntityId> {
-            world
-                .tables
-                .iter()
-                .find(|table| table.mask & mask == mask)
-                .and_then(|table| table.entity_indices.first().copied())
+            for table in &world.tables {
+                if !has_components!(table, mask) {
+                    continue;
+                }
+                let indices = table
+                    .entity_indices
+                    .iter()
+                    .copied()
+                    .filter(|&e| world.entity_locations.locations[e.id as usize].allocated)
+                    .collect::<Vec<_>>();
+                if let Some(entity) = indices.first() {
+                    return Some(*entity);
+                }
+            }
+            None
         }
 
         /// Get a specific component for an entity
@@ -1320,6 +1330,190 @@ mod tests {
         assert!(
             all.contains(&e2),
             "Should contain second entity after merge"
+        );
+    }
+
+    #[test]
+    fn test_table_transitions() {
+        let mut world = World::default();
+
+        // Create entity with 3 components
+        let entity = spawn_entities(&mut world, POSITION | VELOCITY | HEALTH, 1)[0];
+
+        println!(
+            "Initial mask: {:b}",
+            component_mask(&world, entity).unwrap()
+        );
+
+        // Get indices before transition
+        let (old_table_idx, _) = location_get(&world.entity_locations, entity).unwrap();
+
+        // Add new component
+        add_components(&mut world, entity, POSITION); // Try to add one we already have
+
+        let final_mask = component_mask(&world, entity).unwrap();
+        println!("Final mask: {:b}", final_mask);
+        let (new_table_idx, _) = location_get(&world.entity_locations, entity).unwrap();
+
+        // Print the table info
+        println!(
+            "Old table index: {}, New table index: {}",
+            old_table_idx, new_table_idx
+        );
+        println!("Tables after operation:");
+        for (i, table) in world.tables.iter().enumerate() {
+            println!("Table {}: mask={:b}", i, table.mask);
+        }
+
+        // Verify the entity still has all its components
+        assert_eq!(
+            final_mask & (POSITION | VELOCITY | HEALTH),
+            POSITION | VELOCITY | HEALTH,
+            "Entity should still have all original components"
+        );
+    }
+
+    #[test]
+    fn test_real_camera_scenario() {
+        let mut world = World::default();
+
+        // Create camera entity with same components as in your app
+        let entity = spawn_entities(
+            &mut world,
+            POSITION | VELOCITY | HEALTH, // Simulating your camera's many components
+            1,
+        )[0];
+
+        // Basic query should work
+        let query_results = query_entities(&world, POSITION | VELOCITY);
+        assert!(
+            query_results.contains(&entity),
+            "Initial query should match\n\
+                Entity mask: {:b}\n\
+                Query mask: {:b}",
+            component_mask(&world, entity).unwrap(),
+            POSITION | VELOCITY
+        );
+
+        // Add another component (like LIGHT in your case)
+        add_components(&mut world, entity, HEALTH);
+
+        // Query should still work
+        let query_results = query_entities(&world, POSITION | VELOCITY);
+        assert!(
+            query_results.contains(&entity),
+            "Query should still match after adding component\n\
+                Entity mask: {:b}\n\
+                Query mask: {:b}",
+            component_mask(&world, entity).unwrap(),
+            POSITION | VELOCITY
+        );
+    }
+
+    #[test]
+    fn test_table_transitions_with_light() {
+        let mut world = World::default();
+
+        // Create entity with camera-like setup (multiple components)
+        let entity = spawn_entities(&mut world, POSITION | VELOCITY | HEALTH, 1)[0];
+        println!(
+            "Initial mask: {:b}",
+            component_mask(&world, entity).unwrap()
+        );
+
+        // Verify query works pre-transition
+        let query_mask = POSITION | VELOCITY; // Like ACTIVE_CAMERA | LOCAL_TRANSFORM | PLAYER
+        let results = query_entities(&world, query_mask);
+        assert!(
+            results.contains(&entity),
+            "Pre-transition query should work"
+        );
+
+        // Add a new component (like LIGHT)
+        println!("Before adding new component...");
+        println!(
+            "Entity components: {:b}",
+            component_mask(&world, entity).unwrap()
+        );
+        println!(
+            "Current table mask: {:b}",
+            world.tables[location_get(&world.entity_locations, entity).unwrap().0].mask
+        );
+
+        add_components(&mut world, entity, HEALTH); // Like adding LIGHT
+
+        println!("After adding new component...");
+        println!(
+            "Entity components: {:b}",
+            component_mask(&world, entity).unwrap()
+        );
+        let (table_idx, _) = location_get(&world.entity_locations, entity).unwrap();
+        println!("New table mask: {:b}", world.tables[table_idx].mask);
+
+        // Query should still work post-transition
+        let results = query_entities(&world, query_mask);
+        assert!(
+            results.contains(&entity),
+            "Post-transition query should still work\nQuery mask: {:b}\nEntity mask: {:b}",
+            query_mask,
+            component_mask(&world, entity).unwrap()
+        );
+    }
+
+    #[test]
+    fn test_query_consistency() {
+        let mut world = World::default();
+
+        // Create entity with extra components beyond what we'll query for
+        let entity = spawn_entities(&mut world, POSITION | VELOCITY | HEALTH, 1)[0];
+
+        // Query for subset of components
+        let query_mask = POSITION | VELOCITY;
+
+        // Normal query should work
+        let query_results = query_entities(&world, query_mask);
+        assert!(
+            query_results.contains(&entity),
+            "query_entities should find entity with mask {:b} when querying for {:b}",
+            component_mask(&world, entity).unwrap(),
+            query_mask
+        );
+
+        // First entity query should also work
+        let first_result = query_first_entity(&world, query_mask);
+        assert!(
+            first_result.is_some(),
+            "query_first_entity should find entity with mask {:b} when querying for {:b}",
+            component_mask(&world, entity).unwrap(),
+            query_mask
+        );
+        assert_eq!(
+            first_result.unwrap(),
+            entity,
+            "query_first_entity should find same entity as query_entities"
+        );
+
+        // Add another component and test again
+        add_components(&mut world, entity, HEALTH);
+
+        let query_results = query_entities(&world, query_mask);
+        assert!(
+            query_results.contains(&entity),
+            "query_entities should still find entity after adding component\n\
+            Entity mask: {:b}\n\
+            Query mask: {:b}",
+            component_mask(&world, entity).unwrap(),
+            query_mask
+        );
+
+        let first_result = query_first_entity(&world, query_mask);
+        assert!(
+            first_result.is_some(),
+            "query_first_entity should still find entity after adding component\n\
+            Entity mask: {:b}\n\
+            Query mask: {:b}",
+            component_mask(&world, entity).unwrap(),
+            query_mask
         );
     }
 }
