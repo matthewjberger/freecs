@@ -264,7 +264,7 @@ fn run_benchmark_suite(world: &mut World) -> BenchmarkResults {
     {
         // Mass spawn test
         let start = Instant::now();
-        let new_entities = spawn_entities(world, POSITION | VELOCITY | HEALTH, 10_000);
+        let new_entities = spawn_entities(world, POSITION | VELOCITY | HEALTH, 1_000_000);
         results.mass_spawn_time = start.elapsed();
 
         // Mass modify test

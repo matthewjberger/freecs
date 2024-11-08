@@ -13,7 +13,7 @@ A macro is used to define the world and its components, and generates
 the entity component system as part of your source code at compile time. The generated code
 contains only plain data structures (no methods) and free functions that transform them, achieving static dispatch.
 
-The internal implementation is ~600 loc, and does not use object orientation, generics, traits, or dynamic dispatch.
+The internal implementation is ~500 loc, and does not use object orientation, generics, traits, or dynamic dispatch.
 
 ## Quick Start
 
@@ -21,7 +21,7 @@ Add this to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-freecs = "0.2.9"
+freecs = "0.2.10"
 serde = { version = "1.0.214", features = ["derive"] } # or higher
 
 # (optional) add rayon if you want to parallelize systems
@@ -127,12 +127,17 @@ mod components {
 mod systems {
     use super::*;
 
-    // Systems are functions that iterate over
-    // the component tables and transform component data.
+    // Systems are functions that iterate over the component tables
+    // and transform component data.
     // This function invokes two systems in parallel
     // for each table in the world filtered by component mask.
     pub fn run_systems(world: &mut World) {
         let delta_time = world.resources.delta_time;
+
+        // Parallelization of systems can be done with Rayon, which is useful when working with more than 3 million entities.
+        //
+        // In practice, you should use `.iter_mut()` instead of `.par_iter_mut()` unless you have a large number of entities,
+        // because sequential access is more performant until you are working with extreme numbers of entities.
         world.tables.par_iter_mut().for_each(|table| {
             if has_components!(table, POSITION | VELOCITY | HEALTH) {
                 update_positions_system(&mut table.position, &table.velocity, delta_time);
@@ -162,6 +167,14 @@ mod systems {
         });
     }
 }
+```
+
+## Examples
+
+Run the examples with:
+
+```rust
+cargo run -r --example cubes
 ```
 
 ## License

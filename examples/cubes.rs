@@ -1,6 +1,5 @@
 use freecs::{has_components, world};
 use macroquad::prelude::*;
-use rayon::prelude::*;
 
 world! {
     World2 {
@@ -59,30 +58,30 @@ mod systems {
 
     pub fn run_systems(world: &mut World2, dt: f32) {
         let delta_time = world.resources.delta_time;
-        world.tables.par_iter_mut().for_each(|table| {
+        world.tables.iter_mut().for_each(|table| {
             if has_components!(table, SCALE) {
-                scale_system_parallel(&mut table.scale);
+                scale_system(&mut table.scale);
             }
 
             if has_components!(table, POSITION | VELOCITY) {
-                movement_system_parallel(&mut table.position, &table.velocity, delta_time);
-                bounce_system_parallel(&mut table.position, &mut table.velocity);
+                movement_system(&mut table.position, &table.velocity, delta_time);
+                bounce_system(&mut table.position, &mut table.velocity);
             }
 
             if has_components!(table, VELOCITY | GRAVITY) {
-                gravity_system_parallel(&mut table.velocity, &table.gravity, dt);
+                gravity_system(&mut table.velocity, &table.gravity, dt);
             }
 
             if has_components!(table, ROTATION) {
-                rotation_system_parallel(&mut table.rotation, dt);
+                rotation_system(&mut table.rotation, dt);
             }
         });
     }
 
     #[inline]
-    fn scale_system_parallel(scales: &mut [Scale]) {
+    fn scale_system(scales: &mut [Scale]) {
         let time = macroquad::time::get_time() as f32;
-        scales.par_iter_mut().for_each(|scale| {
+        scales.iter_mut().for_each(|scale| {
             scale.x = (4.0 * time).sin() + 2.0;
             scale.y = (4.0 * time).sin() + 2.0;
             scale.z = (4.0 * time).sin() + 2.0;
@@ -90,10 +89,10 @@ mod systems {
     }
 
     #[inline]
-    fn movement_system_parallel(positions: &mut [Position3D], velocities: &[Velocity], dt: f32) {
+    fn movement_system(positions: &mut [Position3D], velocities: &[Velocity], dt: f32) {
         positions
-            .par_iter_mut()
-            .zip(velocities.par_iter())
+            .iter_mut()
+            .zip(velocities.iter())
             .for_each(|(pos, vel)| {
                 pos.x += vel.x * dt;
                 pos.y += vel.y * dt;
@@ -102,18 +101,18 @@ mod systems {
     }
 
     #[inline]
-    fn gravity_system_parallel(velocities: &mut [Velocity], gravities: &[Gravity], dt: f32) {
+    fn gravity_system(velocities: &mut [Velocity], gravities: &[Gravity], dt: f32) {
         velocities
-            .par_iter_mut()
-            .zip(gravities.par_iter())
+            .iter_mut()
+            .zip(gravities.iter())
             .for_each(|(vel, gravity)| {
                 vel.y -= gravity.0 * dt;
             });
     }
 
     #[inline]
-    fn rotation_system_parallel(rotations: &mut [Rotation], dt: f32) {
-        rotations.par_iter_mut().for_each(|rot| {
+    fn rotation_system(rotations: &mut [Rotation], dt: f32) {
+        rotations.iter_mut().for_each(|rot| {
             rot.y += dt * 0.5;
             rot.x += dt * 0.3;
             rot.z += dt * 0.2;
@@ -121,10 +120,10 @@ mod systems {
     }
 
     #[inline]
-    fn bounce_system_parallel(positions: &mut [Position3D], velocities: &mut [Velocity]) {
+    fn bounce_system(positions: &mut [Position3D], velocities: &mut [Velocity]) {
         positions
-            .par_iter_mut()
-            .zip(velocities.par_iter_mut())
+            .iter_mut()
+            .zip(velocities.iter_mut())
             .for_each(|(pos, vel)| {
                 // Ground bounce
                 if pos.y < 0.0 {
@@ -162,7 +161,7 @@ async fn main() {
     };
 
     // Configure lattice with wider distribution
-    const LATTICE_SIZE: i32 = 10;
+    const LATTICE_SIZE: i32 = 20;
     const GRID_SIZE: f32 = 40.0; // Total size of the grid
     const START_HEIGHT: f32 = 50.0;
     const TOTAL_ENTITIES: i32 = LATTICE_SIZE * LATTICE_SIZE * LATTICE_SIZE;
