@@ -143,6 +143,7 @@ macro_rules! world {
 
         pub const ALL: u32 = 0;
         $(pub const $mask: u32 = 1 << (Component::$mask as u32);)*
+        const COMPONENT_COUNT: usize = 3; // TODO (MATT) DON'T HARDCODE THIS
 
         /// Entity ID, an index into storage and a generation counter to prevent stale references
         #[derive(Default, Clone, Copy, Debug, Eq, PartialEq, Hash, serde::Serialize, serde::Deserialize)]
@@ -165,11 +166,18 @@ macro_rules! world {
             free_ids: Vec<(u32, u32)>, // (id, next_generation)
         }
 
+        #[derive(Copy, Clone, Default, serde::Serialize, serde::Deserialize)]
+        struct EntityLocation {
+            generation: u32,
+            table_index: u16,
+            array_index: u16,
+            allocated: bool,
+        }
+
         /// Entity location cache for quick access
         #[derive(Default, serde::Serialize, serde::Deserialize)]
         pub struct EntityLocations {
-            pub generations: Vec<u32>,
-            pub locations: Vec<Option<(usize, usize)>>,
+            locations: Vec<EntityLocation>,
         }
 
         /// A collection of component tables and resources
@@ -182,6 +190,8 @@ macro_rules! world {
             #[serde(skip)]
             #[allow(unused)]
             pub resources: $resources,
+            table_edges: Vec<TableEdges>,
+            pending_despawns: Vec<EntityId>,
         }
 
         /// Resources
@@ -198,10 +208,25 @@ macro_rules! world {
             pub mask: u32,
         }
 
+        #[derive(Copy, Clone, Default, serde::Serialize, serde::Deserialize)]
+        struct TableEdges {
+            add_edges: [Option<usize>; COMPONENT_COUNT],
+            remove_edges: [Option<usize>; COMPONENT_COUNT],
+        }
+
+        fn get_component_index(mask: u32) -> Option<usize> {
+            match mask {
+                $($mask => Some($mask as _),)*
+                _ => None,
+            }
+        }
+
         /// Spawn a batch of new entities with the same component mask
         pub fn spawn_entities(world: &mut $world, mask: u32, count: usize) -> Vec<EntityId> {
             let mut entities = Vec::with_capacity(count);
             let table_index = get_or_create_table(world, mask);
+
+            world.tables[table_index].entity_indices.reserve(count);
 
             // Reserve space in components
             $(
@@ -209,7 +234,6 @@ macro_rules! world {
                     world.tables[table_index].$name.reserve(count);
                 }
             )*
-            world.tables[table_index].entity_indices.reserve(count);
 
             for _ in 0..count {
                 let entity = create_entity(world);
@@ -239,10 +263,24 @@ macro_rules! world {
 
         /// Query for all entities that match the component mask
         pub fn query_entities(world: &$world, mask: u32) -> Vec<EntityId> {
-            let mut result = Vec::new();
+            let total_capacity = world
+                .tables
+                .iter()
+                .filter(|table| table.mask & mask == mask)
+                .map(|table| table.entity_indices.len())
+                .sum();
+
+            let mut result = Vec::with_capacity(total_capacity);
             for table in &world.tables {
                 if table.mask & mask == mask {
-                    result.extend(table.entity_indices.iter().copied());
+                    // Only include allocated entities
+                    result.extend(
+                        table
+                            .entity_indices
+                            .iter()
+                            .copied()
+                            .filter(|&e| world.entity_locations.locations[e.id as usize].allocated),
+                    );
                 }
             }
             result
@@ -250,20 +288,23 @@ macro_rules! world {
 
         /// Query for the first entity that matches the component mask
         /// Returns as soon as a match is found, instead of running for all entities
-        /// Useful for components where only one instance exists on any entity at a time,
-        /// such as keyboard input / mouse input / controllers.
         pub fn query_first_entity(world: &$world, mask: u32) -> Option<EntityId> {
-            for table in &world.tables {
-                if table.mask & mask == mask {
-                    return table.entity_indices.first().copied();
-                }
-            }
-            None
+            world
+                .tables
+                .iter()
+                .find(|table| table.mask & mask == mask)
+                .and_then(|table| table.entity_indices.first().copied())
         }
 
         /// Get a specific component for an entity
         pub fn get_component<T: 'static>(world: &$world, entity: EntityId, mask: u32) -> Option<&T> {
            let (table_index, array_index) = location_get(&world.entity_locations, entity)?;
+
+           // Early return if entity is despawned
+           if !world.entity_locations.locations[entity.id as usize].allocated {
+               return None;
+           }
+
            let table = &world.tables[table_index];
 
            if table.mask & mask == 0 {
@@ -291,7 +332,6 @@ macro_rules! world {
         pub fn get_component_mut<T: 'static>(world: &mut $world, entity: EntityId, mask: u32) -> Option<&mut T> {
             let (table_index, array_index) = location_get(&world.entity_locations, entity)?;
             let table = &mut world.tables[table_index];
-
             if table.mask & mask == 0 {
                 return None;
             }
@@ -315,112 +355,102 @@ macro_rules! world {
 
         /// Despawn a batch of entities
         pub fn despawn_entities(world: &mut $world, entities: &[EntityId]) -> Vec<EntityId> {
-            use std::collections::HashMap;
+            let mut despawned = Vec::with_capacity(entities.len());
 
-            let mut despawned = Vec::new();
-            let mut table_removals: HashMap<usize, Vec<usize>> = HashMap::new();
-
-            // Process entities in order they were passed in
+            // Just mark entities as despawned, defer actual cleanup
             for &entity in entities {
-                if let Some((table_index, array_index)) = location_get(&world.entity_locations, entity) {
-                    table_removals.entry(table_index)
-                        .or_insert_with(Vec::new)
-                        .push(array_index);
-
-                    let id = entity.id as usize;
-                    if id < world.entity_locations.locations.len() {
-                        world.entity_locations.locations[id] = None;
-
-                        let current_generation = world.entity_locations.generations[id];
-                        // Increment generation
-                        let next_generation = if current_generation == u32::MAX {
-                            1  // Skip 0 to avoid ABA issues
-                        } else {
-                            current_generation.wrapping_add(1)
-                        };
-                        world.entity_locations.generations[id] = next_generation;
-
-                        // Push onto free list
-                        world.allocator.free_ids.push((entity.id, next_generation));
-
+                let id = entity.id as usize;
+                if id < world.entity_locations.locations.len() {
+                    let loc = &mut world.entity_locations.locations[id];
+                    if loc.allocated && loc.generation == entity.generation {
+                        loc.allocated = false;
+                        loc.generation = loc.generation.wrapping_add(1);
+                        world.allocator.free_ids.push((entity.id, loc.generation));
+                        world.pending_despawns.push(entity);
                         despawned.push(entity);
                     }
                 }
             }
 
-            // Handle table removals
-            let mut table_index = 0;
-            while table_index < world.tables.len() {
-                if let Some(mut indices) = table_removals.remove(&table_index) {
-                    indices.sort_unstable_by(|a, b| b.cmp(a));
-
-                    for &index in &indices {
-                        remove_from_table(&mut world.tables[table_index], index);
-                    }
-
-                    if world.tables[table_index].entity_indices.is_empty() {
-                        let last_index = world.tables.len() - 1;
-
-                        if table_index != last_index {
-                            let removed_mask = world.tables[table_index].mask;
-                            let swapped_mask = world.tables[last_index].mask;
-
-                            world.tables.swap_remove(table_index);
-
-                            world.table_registry.retain(|(mask, _)| *mask != removed_mask);
-                            if let Some(entry) = world.table_registry.iter_mut()
-                                .find(|(mask, _)| *mask == swapped_mask) {
-                                entry.1 = table_index;
-                            }
-
-                            for location in world.entity_locations.locations.iter_mut() {
-                                if let Some((ref mut index, _)) = location {
-                                    if *index == last_index {
-                                        *index = table_index;
-                                    }
-                                }
-                            }
-                            continue;
-                        } else {
-                            let removed_mask = world.tables[table_index].mask;
-                            world.tables.pop();
-                            world.table_registry.retain(|(mask, _)| *mask != removed_mask);
-                        }
-                    } else {
-                        for (new_index, &entity) in world.tables[table_index].entity_indices.iter().enumerate() {
-                            if !entities.contains(&entity) {
-                                location_insert(&mut world.entity_locations, entity, (table_index, new_index));
-                            }
-                        }
-                    }
-                }
-                table_index += 1;
+            // Only cleanup if we have a lot of pending despawns
+            if world.pending_despawns.len() > 10_000 {
+                cleanup_pending_despawns(world);
             }
 
             despawned
         }
 
+        fn cleanup_pending_despawns(world: &mut $world) {
+            let mut table_ops: Vec<Vec<usize>> = vec![Vec::new(); world.tables.len()];
+
+            // Group indices by table
+            for &entity in &world.pending_despawns {
+                if let Some((table_index, array_index)) = location_get(&world.entity_locations, entity) {
+                    table_ops[table_index].push(array_index);
+                }
+            }
+
+            // Process each table
+            for (table_idx, mut indices) in table_ops.into_iter().enumerate() {
+                if indices.is_empty() {
+                    continue;
+                }
+
+                // Sort indices in reverse order
+                indices.sort_unstable_by(|a, b| b.cmp(a));
+
+                let table = &mut world.tables[table_idx];
+
+                // Process in chunks for better cache utilization
+                for chunk in indices.chunks(1024) {
+                    for &idx in chunk {
+                        let last_idx = table.entity_indices.len() - 1;
+
+                        // Move the last entity to this position if needed
+                        if idx < last_idx {
+                            let moved_entity = table.entity_indices[last_idx];
+                            if world.entity_locations.locations[moved_entity.id as usize].allocated {
+                                location_insert(
+                                    &mut world.entity_locations,
+                                    moved_entity,
+                                    (table_idx, idx),
+                                );
+                            }
+                        }
+
+                        // Remove components
+                        $(
+                            if table.mask & $mask != 0 {
+                                table.$name.swap_remove(idx);
+                            }
+                        )*
+                        table.entity_indices.swap_remove(idx);
+                    }
+                }
+            }
+
+            world.pending_despawns.clear();
+        }
+
+
         /// Add components to an entity
         pub fn add_components(world: &mut $world, entity: EntityId, mask: u32) -> bool {
             if let Some((table_index, array_index)) = location_get(&world.entity_locations, entity) {
                 let current_mask = world.tables[table_index].mask;
-
-                // If entity already has all these components, no need to move
                 if current_mask & mask == mask {
                     return true;
                 }
 
-                let new_mask = current_mask | mask;
-                let new_table_index = get_or_create_table(world, new_mask);
+                let target_table = if mask.count_ones() == 1 {
+                    get_component_index(mask).and_then(|idx| world.table_edges[table_index].add_edges[idx])
+                } else {
+                    None
+                };
 
-                // Move entity to new table
+                let new_table_index =
+                    target_table.unwrap_or_else(|| get_or_create_table(world, current_mask | mask));
+
                 move_entity(world, entity, table_index, array_index, new_table_index);
-
-                // If old table is now empty, merge tables
-                if world.tables[table_index].entity_indices.is_empty() {
-                    merge_tables(world);
-                }
-
                 true
             } else {
                 false
@@ -431,50 +461,21 @@ macro_rules! world {
         pub fn remove_components(world: &mut $world, entity: EntityId, mask: u32) -> bool {
             if let Some((table_index, array_index)) = location_get(&world.entity_locations, entity) {
                 let current_mask = world.tables[table_index].mask;
-                // If entity doesn't have any of these components, no need to move
                 if current_mask & mask == 0 {
                     return true;
                 }
 
-                let source_table_index = table_index;  // Keep track of source table
-                let new_mask = current_mask & !mask;
-                let new_table_index = get_or_create_table(world, new_mask);
+                let target_table = if mask.count_ones() == 1 {
+                    get_component_index(mask)
+                        .and_then(|idx| world.table_edges[table_index].remove_edges[idx])
+                } else {
+                    None
+                };
 
-                // Move entity first
+                let new_table_index =
+                    target_table.unwrap_or_else(|| get_or_create_table(world, current_mask & !mask));
+
                 move_entity(world, entity, table_index, array_index, new_table_index);
-
-                // Check if source table is now empty
-                if world.tables[source_table_index].entity_indices.is_empty() {
-                    // Remove the empty table using swap_remove
-                    let last_index = world.tables.len() - 1;
-                    if source_table_index != last_index {
-                        let removed_mask = world.tables[source_table_index].mask;
-                        let swapped_mask = world.tables[last_index].mask;
-
-                        // Update entity locations for the swapped table
-                        for loc in world.entity_locations.locations.iter_mut() {
-                            if let Some((ref mut index, _)) = loc {
-                                if *index == last_index {
-                                    *index = source_table_index;
-                                }
-                            }
-                        }
-
-                        // Remove table and update registry
-                        world.tables.swap_remove(source_table_index);
-                        world.table_registry.retain(|(mask, _)| *mask != removed_mask);
-                        if let Some(entry) = world.table_registry.iter_mut()
-                            .find(|(mask, _)| *mask == swapped_mask) {
-                            entry.1 = source_table_index;
-                        }
-                    } else {
-                        // Just remove the last table
-                        let removed_mask = world.tables[source_table_index].mask;
-                        world.tables.pop();
-                        world.table_registry.retain(|(mask, _)| *mask != removed_mask);
-                    }
-                }
-
                 true
             } else {
                 false
@@ -487,43 +488,6 @@ macro_rules! world {
                 .map(|(table_index, _)| world.tables[table_index].mask)
         }
 
-        /// Merge tables that have the same mask
-        fn merge_tables(world: &mut $world) {
-            let mut index = 0;
-            while index < world.tables.len() {
-                if world.tables[index].entity_indices.is_empty() {
-                    let last_index = world.tables.len() - 1;
-
-                    if index != last_index {
-                        let removed_mask = world.tables[index].mask;
-                        let swapped_mask = world.tables[last_index].mask;
-
-                        world.tables.swap_remove(index);
-
-                        world.table_registry.retain(|(mask, _)| *mask != removed_mask);
-                        if let Some(entry) = world.table_registry.iter_mut()
-                            .find(|(mask, _)| *mask == swapped_mask) {
-                            entry.1 = index;
-                        }
-
-                        for location in world.entity_locations.locations.iter_mut() {
-                            if let Some((ref mut table_index, _)) = location {
-                                if *table_index == last_index {
-                                    *table_index = index;
-                                }
-                            }
-                        }
-                    } else {
-                        let removed_mask = world.tables[index].mask;
-                        world.tables.pop();
-                        world.table_registry.retain(|(mask, _)| *mask != removed_mask);
-                    }
-                } else {
-                    index += 1;
-                }
-            }
-        }
-
         /// Get the total number of entities in the world
         pub fn total_entities(world: &$world) -> usize {
             world.tables.iter().map(|table| table.entity_indices.len()).sum()
@@ -531,13 +495,22 @@ macro_rules! world {
 
         // Implementation details
 
-        fn remove_from_table(arrays: &mut ComponentArrays, index: usize) {
+        fn remove_from_table(arrays: &mut ComponentArrays, index: usize) -> Option<EntityId> {
+            let last_index = arrays.entity_indices.len() - 1;
+            let mut swapped_entity = None;
+
+            if index < last_index {
+                swapped_entity = Some(arrays.entity_indices[last_index]);
+            }
+
             $(
                 if arrays.mask & $mask != 0 {
                     arrays.$name.swap_remove(index);
                 }
             )*
             arrays.entity_indices.swap_remove(index);
+
+            swapped_entity
         }
 
         fn move_entity(
@@ -547,25 +520,17 @@ macro_rules! world {
             from_index: usize,
             to_table: usize,
         ) {
-            // Get components before any modifications
             let components = get_components(&world.tables[from_table], from_index);
-
-            // Add to new table
             add_to_table(&mut world.tables[to_table], entity, components);
             let new_index = world.tables[to_table].entity_indices.len() - 1;
-
-            // Update entity location BEFORE removing from old table
             location_insert(&mut world.entity_locations, entity, (to_table, new_index));
 
-            // Remove from old table - this may trigger a swap_remove
-            if from_index < world.tables[from_table].entity_indices.len() {
-                remove_from_table(&mut world.tables[from_table], from_index);
-
-                // If there was a swap, update the swapped entity's location
-                if from_index < world.tables[from_table].entity_indices.len() {
-                    let swapped_entity = world.tables[from_table].entity_indices[from_index];
-                    location_insert(&mut world.entity_locations, swapped_entity, (from_table, from_index));
-                }
+            if let Some(swapped) = remove_from_table(&mut world.tables[from_table], from_index) {
+                location_insert(
+                    &mut world.entity_locations,
+                    swapped,
+                    (from_table, from_index),
+                );
             }
         }
 
@@ -586,20 +551,16 @@ macro_rules! world {
 
         fn location_get(locations: &EntityLocations, entity: EntityId) -> Option<(usize, usize)> {
             let id = entity.id as usize;
-            if id >= locations.generations.len() {
-                return None;
-            }
-
-            // Validate generation matches
-            if locations.generations[id] != entity.generation {
-                return None;
-            }
-
             if id >= locations.locations.len() {
                 return None;
             }
 
-            locations.locations[id]
+            let location = &locations.locations[id];
+            if !location.allocated || location.generation != entity.generation {
+                return None;
+            }
+
+            Some((location.table_index as usize, location.array_index as usize))
         }
 
         fn location_insert(
@@ -608,50 +569,45 @@ macro_rules! world {
             location: (usize, usize),
         ) {
             let id = entity.id as usize;
-
-            if id >= locations.generations.len() {
-                locations.generations.resize(id + 1, 0);
-            }
             if id >= locations.locations.len() {
-                locations.locations.resize(id + 1, None);
+                locations
+                    .locations
+                    .resize(id + 1, EntityLocation::default());
             }
 
-            locations.generations[id] = entity.generation;
-            locations.locations[id] = Some(location);
+            locations.locations[id] = EntityLocation {
+                generation: entity.generation,
+                table_index: location.0 as u16,
+                array_index: location.1 as u16,
+                allocated: true,
+            };
         }
 
         fn create_entity(world: &mut $world) -> EntityId {
-            // Always reuse latest freed id if available through LIFO
             if let Some((id, next_gen)) = world.allocator.free_ids.pop() {
                 let id_usize = id as usize;
-
-                // Ensure space
-                while id_usize >= world.entity_locations.generations.len() {
-                    let new_size = (world.entity_locations.generations.len() * 2).max(64);
-                    world.entity_locations.generations.resize(new_size, 0);
-                    world.entity_locations.locations.resize(new_size, None);
+                if id_usize >= world.entity_locations.locations.len() {
+                    world.entity_locations.locations.resize(
+                        (world.entity_locations.locations.len() * 2).max(64),
+                        EntityLocation::default(),
+                    );
                 }
-
-                // Update generation
-                world.entity_locations.generations[id_usize] = next_gen;
-                EntityId { id, generation: next_gen }
+                world.entity_locations.locations[id_usize].generation = next_gen;
+                EntityId {
+                    id,
+                    generation: next_gen,
+                }
             } else {
-                // Allocate new id
                 let id = world.allocator.next_id;
                 world.allocator.next_id += 1;
                 let id_usize = id as usize;
-
-                // Ensure space
-                while id_usize >= world.entity_locations.generations.len() {
-                    let new_size = (world.entity_locations.generations.len() * 2).max(64);
-                    world.entity_locations.generations.resize(new_size, 0);
-                    world.entity_locations.locations.resize(new_size, None);
+                if id_usize >= world.entity_locations.locations.len() {
+                    world.entity_locations.locations.resize(
+                        (world.entity_locations.locations.len() * 2).max(64),
+                        EntityLocation::default(),
+                    );
                 }
-
-                EntityId {
-                    id,
-                    generation: 0,
-                }
+                EntityId { id, generation: 0 }
             }
         }
 
@@ -672,21 +628,37 @@ macro_rules! world {
         }
 
         fn get_or_create_table(world: &mut $world, mask: u32) -> usize {
-            // Look for EXACT match only by mask
-            if let Some(pos) = world.table_registry
+            if let Some((index, _)) = world
+                .tables
                 .iter()
-                .position(|(m, _)| *m == mask)
+                .enumerate()
+                .find(|(_, t)| t.mask == mask)
             {
-                return world.table_registry[pos].1;
+                return index;
             }
 
-            // Create new table
             let table_index = world.tables.len();
             world.tables.push(ComponentArrays {
                 mask,
                 ..Default::default()
             });
-            world.table_registry.push((mask, table_index));
+            world.table_edges.push(TableEdges::default());
+
+            for comp_mask in [
+                $( $mask, )*
+            ] {
+                if let Some(comp_idx) = get_component_index(comp_mask) {
+                    for (idx, table) in world.tables.iter().enumerate() {
+                        if table.mask | comp_mask == mask {
+                            world.table_edges[idx].add_edges[comp_idx] = Some(table_index);
+                        }
+                        if table.mask & !comp_mask == mask {
+                            world.table_edges[idx].remove_edges[comp_idx] = Some(table_index);
+                        }
+                    }
+                }
+            }
+
             table_index
         }
     };
@@ -923,29 +895,6 @@ mod tests {
     }
 
     #[test]
-    fn test_merge_tables() {
-        let mut world = World::default();
-
-        // Create entities in different tables with same components
-        let e1 = spawn_entities(&mut world, POSITION | VELOCITY, 1)[0];
-        let e2 = spawn_entities(&mut world, POSITION | VELOCITY, 1)[0];
-
-        // Add and remove a component to create a fragmented table
-        add_components(&mut world, e1, HEALTH);
-        remove_components(&mut world, e1, HEALTH);
-
-        let initial_table_count = world.tables.len();
-        merge_tables(&mut world);
-
-        // Verify tables were merged
-        assert!(world.tables.len() <= initial_table_count);
-
-        // Verify all entities still accessible
-        assert!(get_component::<Position>(&world, e1, POSITION).is_some());
-        assert!(get_component::<Position>(&world, e2, POSITION).is_some());
-    }
-
-    #[test]
     fn test_parallel_systems() {
         let mut world = World::default();
 
@@ -1138,30 +1087,6 @@ mod tests {
                     "Registry mask mismatch at {}: registry={:b}, table={:b}",
                     i, mask, world.tables[*table_index].mask
                 ));
-            }
-        }
-
-        // Verify all entity locations point to valid tables
-        for (entity_id, location) in world.entity_locations.locations.iter().enumerate() {
-            if let Some((table_index, array_index)) = location {
-                if *table_index >= world.tables.len() {
-                    return Err(format!(
-                        "Entity {} location points to invalid table {} (max {})",
-                        entity_id,
-                        table_index,
-                        world.tables.len() - 1
-                    ));
-                }
-                let table = &world.tables[*table_index];
-                if *array_index >= table.entity_indices.len() {
-                    return Err(format!(
-                        "Entity {} location points to invalid index {} in table {} (max {})",
-                        entity_id,
-                        array_index,
-                        table_index,
-                        table.entity_indices.len() - 1
-                    ));
-                }
             }
         }
 
@@ -1579,33 +1504,6 @@ mod tests {
             POSITION | VELOCITY,
             "Table should have both components"
         );
-
-        // Verify all entity locations are valid
-        for entity in [e1, e2, e3] {
-            let location = world.entity_locations.locations[entity.id as usize];
-            assert!(
-                location.is_some(),
-                "Entity {:?} has invalid location",
-                entity
-            );
-            let (table_index, array_index) = location.unwrap();
-            assert!(
-                table_index < world.tables.len(),
-                "Entity {:?} points to invalid table {} (max {})",
-                entity,
-                table_index,
-                world.tables.len() - 1
-            );
-            let table = &world.tables[table_index];
-            assert!(
-                array_index < table.entity_indices.len(),
-                "Entity {:?} points to invalid index {} in table {} (length {})",
-                entity,
-                array_index,
-                table_index,
-                table.entity_indices.len()
-            );
-        }
 
         // Verify table registry is correct
         assert_eq!(

@@ -127,6 +127,19 @@ fn get_or_create_table(world: &mut World, mask: u32) -> usize {
     table_index
 }
 
+pub fn component_mask(world: &World, entity: EntityId) -> Option<u32> {
+    location_get(&world.entity_locations, entity)
+        .map(|(table_index, _)| world.tables[table_index].mask)
+}
+
+pub fn total_entities(world: &World) -> usize {
+    world
+        .tables
+        .iter()
+        .map(|table| table.entity_indices.len())
+        .sum()
+}
+
 fn move_entity(
     world: &mut World,
     entity: EntityId,
@@ -269,10 +282,9 @@ pub fn remove_components(world: &mut World, entity: EntityId, mask: u32) -> bool
 }
 
 pub fn query_entities(world: &World, mask: u32) -> Vec<EntityId> {
-    use rayon::prelude::*;
     let total_capacity = world
         .tables
-        .par_iter()
+        .iter()
         .filter(|table| table.mask & mask == mask)
         .map(|table| table.entity_indices.len())
         .sum();
@@ -699,4 +711,731 @@ fn print_results(results: &BenchmarkResults) {
     );
     println!("Final table count: {}", results.final_table_count);
     println!("Final entity count: {}", results.final_entity_count);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rayon::*;
+    use std::collections::HashSet;
+
+    // Helper function to create a test world with some entities
+    fn setup_test_world() -> (World, EntityId) {
+        let mut world = World::default();
+        let entity = spawn_entities(&mut world, POSITION | VELOCITY, 1)[0];
+
+        // Set initial component values
+        if let Some(pos) = get_component_mut::<Position>(&mut world, entity, POSITION) {
+            pos.x = 1.0;
+            pos.y = 2.0;
+        }
+        if let Some(vel) = get_component_mut::<Velocity>(&mut world, entity, VELOCITY) {
+            vel.x = 3.0;
+            vel.y = 4.0;
+        }
+
+        (world, entity)
+    }
+
+    #[test]
+    fn test_spawn_entities() {
+        let mut world = World::default();
+        let entities = spawn_entities(&mut world, POSITION | VELOCITY, 3);
+
+        assert_eq!(entities.len(), 3);
+        assert_eq!(total_entities(&world), 3);
+
+        // Verify each entity has the correct components
+        for entity in entities {
+            assert!(get_component::<Position>(&world, entity, POSITION).is_some());
+            assert!(get_component::<Velocity>(&world, entity, VELOCITY).is_some());
+            assert!(get_component::<Health>(&world, entity, HEALTH).is_none());
+        }
+    }
+
+    #[test]
+    fn test_component_access() {
+        let (mut world, entity) = setup_test_world();
+
+        // Test reading components
+        let pos = get_component::<Position>(&world, entity, POSITION).unwrap();
+        assert_eq!(pos.x, 1.0);
+        assert_eq!(pos.y, 2.0);
+
+        // Test mutating components
+        if let Some(pos) = get_component_mut::<Position>(&mut world, entity, POSITION) {
+            pos.x = 5.0;
+        }
+
+        let pos = get_component::<Position>(&world, entity, POSITION).unwrap();
+        assert_eq!(pos.x, 5.0);
+    }
+
+    #[test]
+    fn test_add_remove_components() {
+        let (mut world, entity) = setup_test_world();
+
+        // Initial state
+        assert!(get_component::<Health>(&world, entity, HEALTH).is_none());
+
+        // Add component
+        add_components(&mut world, entity, HEALTH);
+        assert!(get_component::<Health>(&world, entity, HEALTH).is_some());
+
+        // Remove component
+        remove_components(&mut world, entity, HEALTH);
+        assert!(get_component::<Health>(&world, entity, HEALTH).is_none());
+    }
+
+    #[test]
+    fn test_component_mask() {
+        let (mut world, entity) = setup_test_world();
+
+        // Check initial mask
+        let mask = component_mask(&world, entity).unwrap();
+        assert_eq!(mask, POSITION | VELOCITY);
+
+        // Check mask after adding component
+        add_components(&mut world, entity, HEALTH);
+        let mask = component_mask(&world, entity).unwrap();
+        assert_eq!(mask, POSITION | VELOCITY | HEALTH);
+    }
+
+    #[test]
+    fn test_query_entities() {
+        let mut world = World::default();
+
+        // Create entities with different component combinations
+        let e1 = spawn_entities(&mut world, POSITION | VELOCITY, 1)[0];
+        let _e2 = spawn_entities(&mut world, POSITION | HEALTH, 1)[0];
+        let e3 = spawn_entities(&mut world, POSITION | VELOCITY | HEALTH, 1)[0];
+
+        // Test queries
+        let pos_vel = query_entities(&world, POSITION | VELOCITY);
+        let pos_health = query_entities(&world, POSITION | HEALTH);
+        let all = query_entities(&world, POSITION | VELOCITY | HEALTH);
+
+        assert_eq!(pos_vel.len(), 2);
+        assert_eq!(pos_health.len(), 2);
+        assert_eq!(all.len(), 1);
+
+        let pos_vel: HashSet<_> = pos_vel.into_iter().collect();
+        assert!(pos_vel.contains(&e1));
+        assert!(pos_vel.contains(&e3));
+
+        assert_eq!(all[0], e3);
+    }
+
+    #[test]
+    fn test_query_first_entity() {
+        let mut world = World::default();
+
+        let e1 = spawn_entities(&mut world, POSITION | VELOCITY, 1)[0];
+        let e2 = spawn_entities(&mut world, POSITION | VELOCITY | HEALTH, 1)[0];
+
+        let first = query_first_entity(&world, POSITION | VELOCITY).unwrap();
+        assert!(first == e1 || first == e2);
+
+        assert!(query_first_entity(&world, HEALTH).is_some());
+        assert!(query_first_entity(&world, POSITION | VELOCITY | HEALTH).is_some());
+    }
+
+    #[test]
+    fn test_despawn_entities() {
+        let mut world = World::default();
+
+        // Spawn multiple entities
+        let entities = spawn_entities(&mut world, POSITION | VELOCITY, 3);
+        assert_eq!(total_entities(&world), 3);
+
+        // Despawn one entity
+        let despawned = despawn_entities(&mut world, &[entities[1]]);
+        assert_eq!(despawned.len(), 1);
+        assert_eq!(total_entities(&world), 2);
+
+        // Verify the entity is truly despawned
+        assert!(get_component::<Position>(&world, entities[1], POSITION).is_none());
+
+        // Verify other entities still exist
+        assert!(get_component::<Position>(&world, entities[0], POSITION).is_some());
+        assert!(get_component::<Position>(&world, entities[2], POSITION).is_some());
+    }
+
+    #[test]
+    fn test_parallel_systems() {
+        let mut world = World::default();
+
+        let entity = spawn_entities(&mut world, POSITION | VELOCITY | HEALTH, 1)[0];
+
+        // Set initial values
+        if let Some(pos) = get_component_mut::<Position>(&mut world, entity, POSITION) {
+            pos.x = 0.0;
+            pos.y = 0.0;
+        }
+        if let Some(vel) = get_component_mut::<Velocity>(&mut world, entity, VELOCITY) {
+            vel.x = 1.0;
+            vel.y = 1.0;
+        }
+        if let Some(health) = get_component_mut::<Health>(&mut world, entity, HEALTH) {
+            health.value = 100.0;
+        }
+
+        // Run systems
+        systems::run_systems(&mut world);
+
+        // Verify system effects
+        let pos = get_component::<Position>(&world, entity, POSITION).unwrap();
+        let health = get_component::<Health>(&world, entity, HEALTH).unwrap();
+
+        assert_eq!(pos.x, 1.0);
+        assert_eq!(pos.y, 1.0);
+        assert!(health.value < 100.0); // Health should have decreased
+    }
+
+    #[test]
+    fn test_add_components() {
+        let (mut world, entity) = setup_test_world();
+
+        // Initial state
+        assert!(get_component::<Health>(&world, entity, HEALTH).is_none());
+
+        // Add component
+        add_components(&mut world, entity, HEALTH);
+        assert!(get_component::<Health>(&world, entity, HEALTH).is_some());
+
+        // Remove component
+        remove_components(&mut world, entity, HEALTH);
+        assert!(get_component::<Health>(&world, entity, HEALTH).is_none());
+    }
+
+    #[test]
+    fn test_multiple_component_addition() {
+        let mut world = World::default();
+        let entity = spawn_entities(&mut world, POSITION, 1)[0];
+
+        // Add multiple components at once
+        add_components(&mut world, entity, VELOCITY | HEALTH);
+
+        // Verify all components exist and are accessible
+        assert!(get_component::<Position>(&world, entity, POSITION).is_some());
+        assert!(get_component::<Velocity>(&world, entity, VELOCITY).is_some());
+        assert!(get_component::<Health>(&world, entity, HEALTH).is_some());
+
+        // Verify component data persists through moves
+        if let Some(pos) = get_component_mut::<Position>(&mut world, entity, POSITION) {
+            pos.x = 1.0;
+        }
+        add_components(&mut world, entity, VELOCITY); // Should be no-op
+        assert_eq!(
+            get_component::<Position>(&world, entity, POSITION)
+                .unwrap()
+                .x,
+            1.0
+        );
+    }
+
+    #[test]
+    fn test_component_chain_addition() {
+        let mut world = World::default();
+        let entity = spawn_entities(&mut world, POSITION, 1)[0];
+
+        // Set initial value
+        if let Some(pos) = get_component_mut::<Position>(&mut world, entity, POSITION) {
+            pos.x = 1.0;
+        }
+
+        // Add components one at a time to force multiple table moves
+        add_components(&mut world, entity, VELOCITY);
+        add_components(&mut world, entity, HEALTH);
+
+        // Verify original data survived multiple moves
+        assert_eq!(
+            get_component::<Position>(&world, entity, POSITION)
+                .unwrap()
+                .x,
+            1.0
+        );
+    }
+
+    #[test]
+    fn test_component_removal_order() {
+        let mut world = World::default();
+        let entity = spawn_entities(&mut world, POSITION | VELOCITY | HEALTH, 1)[0];
+
+        // Remove in different orders to test table transitions
+        remove_components(&mut world, entity, VELOCITY);
+        remove_components(&mut world, entity, HEALTH);
+        assert!(get_component::<Position>(&world, entity, POSITION).is_some());
+        assert!(get_component::<Velocity>(&world, entity, VELOCITY).is_none());
+        assert!(get_component::<Health>(&world, entity, HEALTH).is_none());
+    }
+
+    #[test]
+    fn test_edge_cases() {
+        let mut world = World::default();
+
+        // Test empty entity
+        let empty = spawn_entities(&mut world, 0, 1)[0];
+
+        // Add to empty
+        add_components(&mut world, empty, POSITION);
+        assert!(get_component::<Position>(&world, empty, POSITION).is_some());
+
+        // Add same component multiple times
+        add_components(&mut world, empty, POSITION);
+        add_components(&mut world, empty, POSITION);
+
+        // Remove non-existent component
+        remove_components(&mut world, empty, VELOCITY);
+
+        // Remove all components
+        remove_components(&mut world, empty, POSITION);
+        assert_eq!(component_mask(&world, empty).unwrap(), 0);
+
+        // Test invalid entity
+        let invalid = EntityId {
+            id: 9999,
+            generation: 0,
+        };
+        assert!(!add_components(&mut world, invalid, POSITION));
+    }
+
+    #[test]
+    fn test_component_data_integrity() {
+        let mut world = World::default();
+        let entity = spawn_entities(&mut world, POSITION | VELOCITY, 1)[0];
+
+        // Set initial values
+        {
+            let pos = get_component_mut::<Position>(&mut world, entity, POSITION).unwrap();
+            pos.x = 1.0;
+            pos.y = 2.0;
+            let vel = get_component_mut::<Velocity>(&mut world, entity, VELOCITY).unwrap();
+            vel.x = 3.0;
+            vel.y = 4.0;
+        }
+
+        // Add/remove other components
+        add_components(&mut world, entity, HEALTH);
+        remove_components(&mut world, entity, HEALTH);
+        add_components(&mut world, entity, HEALTH);
+
+        // Verify original values maintained
+        let pos = get_component::<Position>(&world, entity, POSITION).unwrap();
+        let vel = get_component::<Velocity>(&world, entity, VELOCITY).unwrap();
+        assert_eq!(pos.x, 1.0);
+        assert_eq!(pos.y, 2.0);
+        assert_eq!(vel.x, 3.0);
+        assert_eq!(vel.y, 4.0);
+    }
+
+    #[test]
+    fn test_entity_references_through_moves() {
+        let mut world = World::default();
+
+        // Create entities with references to each other
+        let entity1 = spawn_entities(&mut world, POSITION, 1)[0];
+        let entity2 = spawn_entities(&mut world, POSITION, 1)[0];
+
+        // Store reference to entity2 in entity1
+        add_components(&mut world, entity1, VELOCITY);
+        if let Some(vel) = get_component_mut::<Velocity>(&mut world, entity1, VELOCITY) {
+            vel.x = entity2.id as f32; // Store reference
+        }
+
+        // Move referenced entity
+        add_components(&mut world, entity2, VELOCITY | HEALTH);
+
+        // Verify reference still works
+        let stored_id = get_component::<Velocity>(&world, entity1, VELOCITY)
+            .unwrap()
+            .x as u32;
+        let entity2_loc = location_get(&world.entity_locations, entity2);
+        assert!(entity2_loc.is_some());
+        assert_eq!(stored_id, entity2.id);
+    }
+
+    #[test]
+    fn test_table_fragmentation() {
+        let mut world = World::default();
+        let mut all_entities = Vec::new();
+
+        println!("\nCreating initial state with multiple tables:");
+
+        // Create entities in first table (POSITION only)
+        let e1 = spawn_entities(&mut world, POSITION, 3);
+        all_entities.extend(e1.clone());
+
+        println!("\nAfter spawning POSITION entities:");
+        for (i, table) in world.tables.iter().enumerate() {
+            println!(
+                "Table {}: mask={:b}, entities={}",
+                i,
+                table.mask,
+                table.entity_indices.len()
+            );
+        }
+
+        // Create entities in second table (POSITION | VELOCITY)
+        let e2 = spawn_entities(&mut world, POSITION | VELOCITY, 3);
+        all_entities.extend(e2.clone());
+
+        println!("\nAfter spawning POSITION | VELOCITY entities:");
+        for (i, table) in world.tables.iter().enumerate() {
+            println!(
+                "Table {}: mask={:b}, entities={}",
+                i,
+                table.mask,
+                table.entity_indices.len()
+            );
+        }
+
+        // Create entities in third table (POSITION | VELOCITY | HEALTH)
+        let e3 = spawn_entities(&mut world, POSITION | VELOCITY | HEALTH, 3);
+        all_entities.extend(e3.clone());
+
+        println!("\nAfter spawning POSITION | VELOCITY | HEALTH entities:");
+        println!("Number of tables: {}", world.tables.len());
+        for (i, table) in world.tables.iter().enumerate() {
+            println!(
+                "Table {}: mask={:b}, entities={}",
+                i,
+                table.mask,
+                table.entity_indices.len()
+            );
+        }
+
+        let initial_table_count = world.tables.len();
+        println!("\nInitial table count: {}", initial_table_count);
+
+        // Remove VELOCITY from e2 entities one by one and verify table cleanup
+        for (i, &entity) in e2.iter().enumerate() {
+            println!("\nRemoving VELOCITY from entity {}", i);
+            remove_components(&mut world, entity, VELOCITY);
+
+            println!("Tables after removal {}:", i);
+            for (j, table) in world.tables.iter().enumerate() {
+                println!(
+                    "Table {}: mask={:b}, entities={}",
+                    j,
+                    table.mask,
+                    table.entity_indices.len()
+                );
+            }
+            // After the last entity is moved, the source table should be gone
+            if i == e2.len() - 1 {
+                assert!(
+                    world.tables.len() < initial_table_count,
+                    "Table count should decrease after moving last entity"
+                );
+            }
+        }
+
+        println!("\nFinal state:");
+        println!("Number of tables: {}", world.tables.len());
+        for (i, table) in world.tables.iter().enumerate() {
+            println!(
+                "Table {}: mask={:b}, entities={}",
+                i,
+                table.mask,
+                table.entity_indices.len()
+            );
+        }
+
+        // Verify no empty tables exist
+        for (i, table) in world.tables.iter().enumerate() {
+            assert!(
+                !table.entity_indices.is_empty(),
+                "Table {} is empty (mask={:b})",
+                i,
+                table.mask
+            );
+        }
+
+        // Verify table count decreased
+        assert!(
+            world.tables.len() < initial_table_count,
+            "Expected fewer than {} tables, got {}",
+            initial_table_count,
+            world.tables.len()
+        );
+
+        // Verify components
+        for &entity in &e1 {
+            assert!(get_component::<Position>(&world, entity, POSITION).is_some());
+        }
+
+        for &entity in &e2 {
+            assert!(get_component::<Position>(&world, entity, POSITION).is_some());
+            assert!(get_component::<Velocity>(&world, entity, VELOCITY).is_none());
+        }
+
+        for &entity in &e3 {
+            assert!(get_component::<Position>(&world, entity, POSITION).is_some());
+            assert!(get_component::<Velocity>(&world, entity, VELOCITY).is_some());
+            assert!(get_component::<Health>(&world, entity, HEALTH).is_some());
+        }
+    }
+
+    #[test]
+    fn test_concurrent_entity_references() {
+        let mut world = World::default();
+
+        // Create two entities
+        let entity1 = spawn_entities(&mut world, POSITION | HEALTH, 1)[0];
+        let entity2 = spawn_entities(&mut world, POSITION | HEALTH, 1)[0];
+
+        // Set up some initial data
+        if let Some(pos) = get_component_mut::<Position>(&mut world, entity1, POSITION) {
+            pos.x = 1.0;
+        }
+        if let Some(health) = get_component_mut::<Health>(&mut world, entity1, HEALTH) {
+            health.value = 100.0;
+        }
+
+        // Store entity1's ID for later
+        let id1 = entity1.id;
+
+        // Despawn entity1
+        despawn_entities(&mut world, &[entity1]);
+
+        // Create new entity with same ID but different generation
+        let entity3 = spawn_entities(&mut world, POSITION | HEALTH, 1)[0];
+        assert_eq!(entity3.id, id1, "Should reuse entity1's ID");
+        assert_eq!(
+            entity3.generation,
+            entity1.generation + 1,
+            "Should have incremented generation"
+        );
+
+        // Set different data for entity3
+        if let Some(pos) = get_component_mut::<Position>(&mut world, entity3, POSITION) {
+            pos.x = 3.0;
+        }
+        if let Some(health) = get_component_mut::<Health>(&mut world, entity3, HEALTH) {
+            health.value = 50.0;
+        }
+
+        // Verify entity2 is unaffected by entity1's despawn and entity3's spawn
+        if let Some(pos) = get_component::<Position>(&world, entity2, POSITION) {
+            assert_eq!(pos.x, 0.0, "Entity2's data should be unchanged");
+        }
+
+        // Verify we can't access entity1's old data through entity3's ID
+        if let Some(pos) = get_component::<Position>(&world, entity3, POSITION) {
+            assert_eq!(pos.x, 3.0, "Should get entity3's data, not entity1's");
+        }
+        assert!(
+            get_component::<Position>(&world, entity1, POSITION).is_none(),
+            "Should not be able to access entity1's old data"
+        );
+    }
+
+    #[test]
+    fn test_generational_indices_aba() {
+        let mut world = World::default();
+
+        // Create an initial entity with Position
+        let entity_a1 = spawn_entities(&mut world, POSITION, 1)[0];
+        assert_eq!(
+            entity_a1.generation, 0,
+            "First use of ID should have generation 0"
+        );
+
+        // Set initial position
+        if let Some(pos) = get_component_mut::<Position>(&mut world, entity_a1, POSITION) {
+            pos.x = 1.0;
+            pos.y = 1.0;
+        }
+
+        // Store the ID for later reuse
+        let id = entity_a1.id;
+
+        // Despawn the entity
+        despawn_entities(&mut world, &[entity_a1]);
+
+        // Create a new entity that reuses the same ID (entity A2)
+        let entity_a2 = spawn_entities(&mut world, POSITION, 1)[0];
+        assert_eq!(entity_a2.id, id, "Should reuse the same ID");
+        assert_eq!(
+            entity_a2.generation, 1,
+            "Second use of ID should have generation 1"
+        );
+
+        // Set different position for A2
+        if let Some(pos) = get_component_mut::<Position>(&mut world, entity_a2, POSITION) {
+            pos.x = 2.0;
+            pos.y = 2.0;
+        }
+
+        // Verify that the old reference (A1) is invalid
+        assert!(
+            get_component::<Position>(&world, entity_a1, POSITION).is_none(),
+            "Old reference to entity should be invalid"
+        );
+
+        // Despawn A2
+        despawn_entities(&mut world, &[entity_a2]);
+
+        // Create another entity with the same ID (entity A3)
+        let entity_a3 = spawn_entities(&mut world, POSITION, 1)[0];
+        assert_eq!(entity_a3.id, id, "Should reuse the same ID again");
+        assert_eq!(
+            entity_a3.generation, 2,
+            "Third use of ID should have generation 2"
+        );
+
+        // Set different position for A3
+        if let Some(pos) = get_component_mut::<Position>(&mut world, entity_a3, POSITION) {
+            pos.x = 3.0;
+            pos.y = 3.0;
+        }
+
+        // Verify that both old references are invalid
+        assert!(
+            get_component::<Position>(&world, entity_a1, POSITION).is_none(),
+            "First generation reference should be invalid"
+        );
+        assert!(
+            get_component::<Position>(&world, entity_a2, POSITION).is_none(),
+            "Second generation reference should be invalid"
+        );
+
+        // Verify that the current reference is valid and has the correct data
+        let pos = get_component::<Position>(&world, entity_a3, POSITION);
+        assert!(
+            pos.is_some(),
+            "Current generation reference should be valid"
+        );
+        let pos = pos.unwrap();
+        assert_eq!(pos.x, 3.0, "Should have the current generation's data");
+        assert_eq!(pos.y, 3.0, "Should have the current generation's data");
+    }
+
+    // TODO: Ensure generational indices wrap at u32::MAX
+    #[ignore]
+    #[test]
+    fn test_wrapping_generational_indices_at_u32_max() {
+        let mut world = World::default();
+
+        // Create an initial entity with Position
+        let entity_a1 = spawn_entities(&mut world, POSITION, 1)[0];
+        assert_eq!(
+            entity_a1.generation, 0,
+            "First use of ID should have generation 0"
+        );
+
+        // Store the ID for later reuse
+        let id = entity_a1.id;
+
+        // Create another entity with the same ID (entity A3)
+        let entity_a2 = spawn_entities(&mut world, POSITION, 1)[0];
+        assert_eq!(entity_a2.id, id, "Should reuse the same ID again");
+        assert_eq!(
+            entity_a2.generation, 2,
+            "Third use of ID should have generation 2"
+        );
+
+        // Test wrapping behavior of generations
+        // Force generation to maximum value
+        let max_gen = u32::MAX;
+        for _ in 0..max_gen - 2 {
+            // -2 because we already used 2 generations
+            despawn_entities(&mut world, &[entity_a2]);
+            let entity = spawn_entities(&mut world, POSITION, 1)[0];
+            assert_eq!(entity.id, id, "Should continue to reuse the same ID");
+        }
+
+        // Get the entity with maximum generation
+        let entity_max = spawn_entities(&mut world, POSITION, 1)[0];
+        assert_eq!(
+            entity_max.generation,
+            u32::MAX,
+            "Should reach maximum generation"
+        );
+
+        // Test wrapping to zero
+        despawn_entities(&mut world, &[entity_max]);
+        let entity_wrapped = spawn_entities(&mut world, POSITION, 1)[0];
+        assert_eq!(
+            entity_wrapped.id, id,
+            "Should still use same ID after generation wrap"
+        );
+        assert_eq!(entity_wrapped.generation, 0, "Generation should wrap to 0");
+
+        // Verify that old reference with max generation is invalid
+        assert!(
+            get_component::<Position>(&world, entity_max, POSITION).is_none(),
+            "Max generation reference should be invalid after wrap"
+        );
+    }
+
+    #[test]
+    fn test_all_entities() {
+        let mut world = World::default();
+
+        // Create entities with different component combinations
+        let e1 = spawn_entities(&mut world, POSITION, 1)[0];
+        let e2 = spawn_entities(&mut world, POSITION | VELOCITY, 1)[0];
+        let e3 = spawn_entities(&mut world, POSITION | HEALTH, 1)[0];
+        let e4 = spawn_entities(&mut world, POSITION | VELOCITY | HEALTH, 1)[0];
+
+        // Get all entities
+        let all = query_entities(&world, ALL);
+
+        // Verify count
+        assert_eq!(all.len(), 4, "Should have 4 total entities");
+
+        // Verify all entities are present
+        assert!(all.contains(&e1), "Missing entity 1");
+        assert!(all.contains(&e2), "Missing entity 2");
+        assert!(all.contains(&e3), "Missing entity 3");
+        assert!(all.contains(&e4), "Missing entity 4");
+
+        // Test after despawning
+        despawn_entities(&mut world, &[e2, e3]);
+        let remaining = query_entities(&world, ALL);
+
+        // Verify count after despawn
+        assert_eq!(remaining.len(), 2, "Should have 2 entities after despawn");
+
+        // Verify correct entities remain
+        assert!(remaining.contains(&e1), "Missing entity 1 after despawn");
+        assert!(remaining.contains(&e4), "Missing entity 4 after despawn");
+        assert!(!remaining.contains(&e2), "Entity 2 should be despawned");
+        assert!(!remaining.contains(&e3), "Entity 3 should be despawned");
+    }
+
+    #[test]
+    fn test_all_entities_empty_world() {
+        assert!(
+            query_entities(&World::default(), ALL).is_empty(),
+            "Empty world should return empty vector"
+        );
+    }
+
+    #[test]
+    fn test_all_entities_after_table_merges() {
+        let mut world = World::default();
+
+        // Create entities that will end up in the same table
+        let e1 = spawn_entities(&mut world, POSITION, 1)[0];
+        let e2 = spawn_entities(&mut world, VELOCITY, 1)[0];
+
+        // Add components to force table merges
+        add_components(&mut world, e1, VELOCITY);
+        add_components(&mut world, e2, POSITION);
+
+        let all = query_entities(&world, ALL);
+        assert_eq!(
+            all.len(),
+            2,
+            "Should maintain all entities through table merges"
+        );
+        assert!(all.contains(&e1), "Should contain first entity after merge");
+        assert!(
+            all.contains(&e2),
+            "Should contain second entity after merge"
+        );
+    }
 }
