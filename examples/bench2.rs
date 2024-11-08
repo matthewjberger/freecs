@@ -24,7 +24,7 @@ world! {
     }
 }
 
-const ENTITY_COUNT: usize = 100_000;
+const ENTITY_COUNT: usize = 10_000_000;
 const OPERATIONS_PER_FRAME: usize = 10_000;
 const FRAMES_TO_SIMULATE: usize = 100;
 
