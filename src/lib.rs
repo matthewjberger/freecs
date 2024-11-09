@@ -97,7 +97,7 @@
 //! ```rust
 //! pub fn run_systems(world: &mut World, dt: f32) {
 //!     use rayon::prelude::*;
-
+//!
 //!     world.tables.par_iter_mut().for_each(|table| {
 //!         if has_components!(table, POSITION | VELOCITY | HEALTH) {
 //!             update_positions_system(&mut table.position, &table.velocity, dt);
@@ -139,7 +139,6 @@ macro_rules! world {
             }
         }
     ) => {
-
         /// Component masks
         #[repr(u32)]
         #[allow(clippy::upper_case_acronyms)]
