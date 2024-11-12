@@ -27,14 +27,13 @@ and does not use object orientation, generics, traits, or dynamic dispatch.
 - **Zero Overhead**: No dynamic dispatch, traits, or runtime abstractions
 - **Data Oriented**: Plain structs transformed by free functions
 
-
 ## Quick Start
 
 Add this to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-freecs = "0.2.13"
+freecs = "0.2.14"
 serde = { version = "1.0.214", features = ["derive"] } # or higher
 
 # (optional) add rayon if you want to parallelize systems

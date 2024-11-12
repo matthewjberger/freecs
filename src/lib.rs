@@ -233,30 +233,6 @@
 //! - No additional overhead beyond the new entities and temporary mapping table
 
 #[macro_export]
-macro_rules! remap {
-    // Base case for single field
-    ($mapping:expr, $comp:expr, $field:tt) => {
-        if let Some(new_id) = remap_entity($mapping, $comp.$field) {
-            $comp.$field = new_id;
-        }
-    };
-
-    // Base case for Vec<EntityId>
-    ($mapping:expr, $comp:expr, $field:tt[]) => {
-        for entity_ref in &mut $comp.$field {
-            if let Some(new_id) = remap_entity($mapping, *entity_ref) {
-                *entity_ref = new_id;
-            }
-        }
-    };
-
-    // Nested fields
-    ($mapping:expr, $comp:expr, $field:tt . $($rest:tt)+) => {
-        remap!($mapping, $comp.$field, $($rest)+);
-    };
-}
-
-#[macro_export]
 macro_rules! world {
     (
         $world:ident {
