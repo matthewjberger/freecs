@@ -269,7 +269,10 @@ fn draw_ui(params: &mut BoidParams, world: &mut World) {
         draw_text(text, x, y, 20.0, WHITE);
     };
 
-    draw_param(y, &format!("Entities: {}", total_entities(world)));
+    draw_param(
+        y,
+        &format!("Entities: {}", query_entities(world, ALL).len()),
+    );
     y += step;
     draw_param(y, &format!("FPS: {:.1}", get_fps()));
     y += step;

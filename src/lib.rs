@@ -484,13 +484,6 @@ macro_rules! world {
                 .map(|(table_index, _)| world.tables[table_index].mask)
         }
 
-        /// Get the total number of entities in the world
-        pub fn total_entities(world: &$world) -> usize {
-            world.tables.iter().map(|table| table.entity_indices.len()).sum()
-        }
-
-        // Implementation details
-
         fn remove_from_table(arrays: &mut ComponentArrays, index: usize) -> Option<EntityId> {
             let last_index = arrays.entity_indices.len() - 1;
             let mut swapped_entity = None;
@@ -772,7 +765,7 @@ mod tests {
         let entities = spawn_entities(&mut world, POSITION | VELOCITY, 3);
 
         assert_eq!(entities.len(), 3);
-        assert_eq!(total_entities(&world), 3);
+        assert_eq!(query_entities(&world, ALL).len(), 3);
 
         // Verify each entity has the correct components
         for entity in entities {
@@ -875,12 +868,12 @@ mod tests {
 
         // Spawn multiple entities
         let entities = spawn_entities(&mut world, POSITION | VELOCITY, 3);
-        assert_eq!(total_entities(&world), 3);
+        assert_eq!(query_entities(&world, ALL).len(), 3);
 
         // Despawn one entity
         let despawned = despawn_entities(&mut world, &[entities[1]]);
         assert_eq!(despawned.len(), 1);
-        assert_eq!(total_entities(&world), 2);
+        assert_eq!(query_entities(&world, ALL).len(), 2);
 
         // Verify the entity is truly despawned
         assert!(get_component::<Position>(&world, entities[1], POSITION).is_none());

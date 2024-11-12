@@ -58,7 +58,7 @@ pub fn main() {
     let entity = spawn_entities(&mut world, POSITION | VELOCITY, 1)[0];
     println!(
         "Spawned {} with position and velocity",
-        total_entities(&world)
+        query_entities(&world, ALL).len(),
     );
 
     // Read a component
