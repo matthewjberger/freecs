@@ -1,25 +1,19 @@
-//! freecs is a zero-abstraction ECS library for Rust, designed for high performance and simplicity.
+//! freecs is an abstraction-free ECS library for Rust, designed for high performance and simplicity.
 //!
 //! It provides an archetypal table-based storage system for components, allowing for fast queries,
-//! fast system iteration, and parallel processing.
+//! fast system iteration, and parallel processing. Entities with the same components are stored together
+//! in contiguous memory, optimizing for cache coherency and SIMD operations.
 //!
-//! A macro is used to define the world and its components, and generates
-//! the entity component system as part of your source code at compile time. The generated code
-//! contains only plain data structures (no methods) and free functions that transform them, achieving static dispatch.
+//! A macro is used to define the world and its components, generating the entire entity component system
+//! at compile time. The generated code contains only plain data structures and free functions that
+//! transform them.
 //!
-//! The internal implementation is ~500 loc, and does not use object orientation, generics, traits, or dynamic dispatch.
-//!
-//! # Key Features
-//!
-//! - **Table-based Storage**: Entities with the same components are stored together in memory
-//! - **Raw Access**: Functions work directly on the underlying vectors of components
-//! - **Parallel Processing**: Built-in support for processing tables in parallel with rayon
-//! - **Simple Queries**: Find entities by their components using bit masks
-//! - **Serialization**: Save and load worlds using serde
+//! The core implementation is ~500 loc, is fully statically dispatched and
+//! does not use object orientation, generics, or traits.
 //!
 //! # Creating a World
 //!
-//! ```rust,ignore
+//! ```rust
 //! use freecs::{world, has_components};
 //! use serde::{Serialize, Deserialize};
 //!
@@ -127,6 +121,141 @@
 //!     });
 //! }
 //! ```
+//!
+//! # World Merging
+//!
+//! The ECS supports cloning entities from one world to another while maintaining their relationships.
+//! This is useful for implementing prefabs, prototypes, and scene loading.
+//!
+//! ```rust
+//! let mut source = World::default();
+//! let mut game_world = World::default();
+//!
+//! // Spawn a hierarchy of entities
+//! let [root, child1, child2] = spawn_entities(&mut source, POSITION | NODE, 3)[..] else {
+//!     panic!("Failed to spawn entities");
+//! };
+//!
+//! // Set up entity references
+//! if let Some(node) = get_component_mut::<Node>(&mut source, root, NODE) {
+//!     node.id = root;
+//!     node.children = vec![child1, child2];
+//! }
+//!
+//! // Copy entities to game world and get mapping of old->new IDs
+//! let mapping = merge_worlds(&mut game_world, &source);
+//! ```
+//!
+//! ## Remapping Entity References
+//!
+//! When components contain EntityIds (for parent-child relationships, inventories, etc),
+//! these need to be updated to point to the newly spawned entities:
+//!
+//! ```rust
+//! #[derive(Default, Clone)]
+//! struct Node {
+//!     id: EntityId,
+//!     parent: Option<EntityId>,
+//!     children: Vec<EntityId>,
+//! }
+//!
+//! // Update references
+//! remap_entity_refs(&mut game_world, &mapping, |mapping, table| {
+//!     if table.mask & NODE != 0 {
+//!         for node in &mut table.node {
+//!             // Remap simple field
+//!             if let Some(new_id) = remap_entity(mapping, node.id) {
+//!                 node.id = new_id;
+//!             }
+//!
+//!             // Remap Option<EntityId>
+//!             if let Some(ref mut parent_id) = node.parent {
+//!                 if let Some(new_id) = remap_entity(mapping, *parent_id) {
+//!                     *parent_id = new_id;
+//!                 }
+//!             }
+//!
+//!             // Remap Vec<EntityId>
+//!             for child_id in &mut node.children {
+//!                 if let Some(new_id) = remap_entity(mapping, *child_id) {
+//!                     *child_id = new_id;
+//!                 }
+//!             }
+//!         }
+//!     }
+//! });
+//! ```
+//!
+//! ## Example: Character Prefab
+//!
+//! ```rust
+//! fn spawn_character(world: &mut World, position: Vec2) -> EntityId {
+//!     // Create prefab hierarchy
+//!     let mut prefab = World::default();
+//!     let [root, weapon, effects] = spawn_entities(&mut prefab, MODEL | NODE, 3)[..] else {
+//!         panic!("Failed to spawn prefab");
+//!     };
+//!
+//!     // Set up components and relationships
+//!     if let Some(root_node) = get_component_mut::<Node>(&mut prefab, root, NODE) {
+//!         root_node.id = root;
+//!         root_node.children = vec![weapon, effects];
+//!     }
+//!
+//!     // Copy to game world and update references
+//!     let mapping = merge_worlds(world, &prefab);
+//!
+//!     remap_entity_refs(world, &mapping, |mapping, table| {
+//!         if table.mask & NODE != 0 {
+//!             for node in &mut table.node {
+//!                 if let Some(new_id) = remap_entity(mapping, node.id) {
+//!                     node.id = new_id;
+//!                 }
+//!                 for child_id in &mut node.children {
+//!                     if let Some(new_id) = remap_entity(mapping, *child_id) {
+//!                         *child_id = new_id;
+//!                     }
+//!                 }
+//!             }
+//!         }
+//!     });
+//!
+//!     // Return the new root entity
+//!     remap_entity(&mapping, root).unwrap()
+//! }
+//! ```
+//!
+//! ## Performance Notes
+//!
+//! - Entities and components are copied in bulk using table-based storage
+//! - Component data is copied directly with no individual allocations
+//! - Entity remapping is O(n) where n is the number of references
+//! - No additional overhead beyond the new entities and temporary mapping table
+
+#[macro_export]
+macro_rules! remap {
+    // Base case for single field
+    ($mapping:expr, $comp:expr, $field:tt) => {
+        if let Some(new_id) = remap_entity($mapping, $comp.$field) {
+            $comp.$field = new_id;
+        }
+    };
+
+    // Base case for Vec<EntityId>
+    ($mapping:expr, $comp:expr, $field:tt[]) => {
+        for entity_ref in &mut $comp.$field {
+            if let Some(new_id) = remap_entity($mapping, *entity_ref) {
+                *entity_ref = new_id;
+            }
+        }
+    };
+
+    // Nested fields
+    ($mapping:expr, $comp:expr, $field:tt . $($rest:tt)+) => {
+        remap!($mapping, $comp.$field, $($rest)+);
+    };
+}
+
 #[macro_export]
 macro_rules! world {
     (
@@ -484,6 +613,64 @@ macro_rules! world {
                 .map(|(table_index, _)| world.tables[table_index].mask)
         }
 
+        /// Convert an old entity ID to its new ID after merging
+        pub fn remap_entity(entity_mapping: &[(EntityId, EntityId)], old_entity: EntityId) -> Option<EntityId> {
+            entity_mapping
+                .iter()
+                .find(|(old, _)| *old == old_entity)
+                .map(|(_, new)| *new)
+        }
+
+        /// Copy entities from source world to destination world
+        pub fn merge_worlds(dest: &mut $world, source: &$world) -> Vec<(EntityId, EntityId)> {
+            let mut entity_mapping = Vec::with_capacity(query_entities(source, ALL).len());
+
+            // First pass: copy all entities and build mapping
+            for source_table in &source.tables {
+                if source_table.entity_indices.is_empty() {
+                    continue;
+                }
+
+                let entities_to_spawn = source_table.entity_indices.len();
+                let entity_mask = source_table.mask;
+
+                // Spawn new entities and copy component data
+                let new_entities = spawn_entities(dest, entity_mask, entities_to_spawn);
+
+                // Record old->new entity mappings
+                for (i, &old_entity) in source_table.entity_indices.iter().enumerate() {
+                    entity_mapping.push((old_entity, new_entities[i]));
+                }
+
+                // Copy component data
+                let index = dest.tables.len() - 1;
+                let dest_table = &mut dest.tables[index];
+                let start_idx = dest_table.entity_indices.len() - entities_to_spawn;
+
+                // Copy all components that exist in this table
+                $(
+                    if entity_mask & $mask != 0 {
+                        for (i, component) in source_table.$name.iter().enumerate() {
+                            dest_table.$name[start_idx + i] = component.clone();
+                        }
+                    }
+                )*
+            }
+
+            entity_mapping
+        }
+
+        /// Update entity references in components after merging
+        pub fn remap_entity_refs<T: FnMut(&[(EntityId, EntityId)], &mut ComponentArrays)>(
+            world: &mut $world,
+            entity_mapping: &[(EntityId, EntityId)],
+            mut remap: T
+        ) {
+            for table in &mut world.tables {
+                remap(entity_mapping, table);
+            }
+        }
+
         fn remove_from_table(arrays: &mut ComponentArrays, index: usize) -> Option<EntityId> {
             let last_index = arrays.entity_indices.len() - 1;
             let mut swapped_entity = None;
@@ -673,6 +860,8 @@ mod tests {
             position: Position => POSITION,
             velocity: Velocity => VELOCITY,
             health: Health => HEALTH,
+            parent: Parent => PARENT,
+            node: Node => NODE,
           },
           Resources {
               _delta_time: f32
@@ -682,6 +871,18 @@ mod tests {
 
     use components::*;
     mod components {
+        use super::*;
+
+        #[derive(Default, Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
+        pub struct Node {
+            pub id: EntityId,
+            pub parent: Option<EntityId>,
+            pub children: Vec<EntityId>,
+        }
+
+        #[derive(Default, Debug, Copy, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
+        pub struct Parent(pub EntityId);
+
         #[derive(Default, Debug, Clone, serde::Serialize, serde::Deserialize)]
         pub struct Position {
             pub x: f32,
@@ -697,6 +898,12 @@ mod tests {
         #[derive(Default, Debug, Clone, serde::Serialize, serde::Deserialize)]
         pub struct Health {
             pub value: f32,
+        }
+
+        #[derive(Default, Debug, Clone, serde::Serialize, serde::Deserialize)]
+        pub struct EntityRefs {
+            pub parent: EntityId,
+            pub children: Vec<EntityId>,
         }
     }
 
@@ -1507,5 +1714,84 @@ mod tests {
             component_mask(&world, entity).unwrap(),
             query_mask
         );
+    }
+
+    #[test]
+    fn test_merge_worlds() {
+        let mut source = World::default();
+        let mut dest = World::default();
+
+        // Spawn all entities at once
+        let [root, child1, child2] = spawn_entities(&mut source, POSITION | NODE, 3)[..] else {
+            panic!("Failed to spawn entities");
+        };
+
+        // Set up hierarchy
+        if let Some(root_node) = get_component_mut::<Node>(&mut source, root, NODE) {
+            root_node.id = root;
+            root_node.parent = None;
+            root_node.children = vec![child1, child2];
+        }
+
+        if let Some(child1_node) = get_component_mut::<Node>(&mut source, child1, NODE) {
+            child1_node.id = child1;
+            child1_node.parent = Some(root);
+            child1_node.children = vec![child2];
+        }
+
+        if let Some(child2_node) = get_component_mut::<Node>(&mut source, child2, NODE) {
+            child2_node.id = child2;
+            child2_node.parent = Some(child1);
+            child2_node.children = vec![];
+        }
+
+        // Merge worlds
+        let mapping = merge_worlds(&mut dest, &source);
+
+        // Update references with explicit remapping
+        remap_entity_refs(&mut dest, &mapping, |mapping, table| {
+            if table.mask & NODE != 0 {
+                for node in &mut table.node {
+                    if let Some(new_id) = remap_entity(mapping, node.id) {
+                        node.id = new_id;
+                    }
+
+                    if let Some(ref mut parent_id) = node.parent {
+                        if let Some(new_id) = remap_entity(mapping, *parent_id) {
+                            *parent_id = new_id;
+                        }
+                    }
+
+                    for child_id in &mut node.children {
+                        if let Some(new_id) = remap_entity(mapping, *child_id) {
+                            *child_id = new_id;
+                        }
+                    }
+                }
+            }
+        });
+
+        // Get new IDs
+        let [new_root, new_child1, new_child2] =
+            [root, child1, child2].map(|e| remap_entity(&mapping, e).unwrap());
+
+        // Verify hierarchy is preserved
+        if let Some(root_node) = get_component::<Node>(&dest, new_root, NODE) {
+            assert_eq!(root_node.id, new_root);
+            assert!(root_node.parent.is_none());
+            assert_eq!(root_node.children, vec![new_child1, new_child2]);
+        }
+
+        if let Some(child1_node) = get_component::<Node>(&dest, new_child1, NODE) {
+            assert_eq!(child1_node.id, new_child1);
+            assert_eq!(child1_node.parent, Some(new_root));
+            assert_eq!(child1_node.children, vec![new_child2]);
+        }
+
+        if let Some(child2_node) = get_component::<Node>(&dest, new_child2, NODE) {
+            assert_eq!(child2_node.id, new_child2);
+            assert_eq!(child2_node.parent, Some(new_child1));
+            assert!(child2_node.children.is_empty());
+        }
     }
 }
