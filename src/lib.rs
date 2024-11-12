@@ -489,7 +489,57 @@ macro_rules! world {
             world.tables.iter().map(|table| table.entity_indices.len()).sum()
         }
 
-        // Implementation details
+        /// Merge entities from source world into destination world.
+        /// Returns a mapping of old entity IDs to new entity IDs or an error.
+        pub fn merge_worlds(dest: &mut $world, source: &$world) -> Result<Vec<(EntityId, EntityId)>, &'static str> {
+            let mut entity_mapping = Vec::with_capacity(total_entities(source));
+
+            // Process each table in source world
+            for source_table in &source.tables {
+                // Skip empty tables
+                if source_table.entity_indices.is_empty() {
+                    continue;
+                }
+
+                let entities_to_spawn = source_table.entity_indices.len();
+                let entity_mask = source_table.mask;
+
+                // Spawn new batch of entities
+                let new_entities = spawn_entities(dest, entity_mask, entities_to_spawn);
+
+                // Find matching destination table
+                let dest_table = dest.tables.iter_mut()
+                    .find(|t| t.mask == entity_mask)
+                    .ok_or("Failed to find destination table after spawning")?;
+
+                // Calculate start index for new entities
+                let start_idx = dest_table.entity_indices.len() - entities_to_spawn;
+
+                // Copy component data
+                $(
+                    if entity_mask & $mask != 0 {
+                        for (i, component) in source_table.$name.iter().enumerate() {
+                            dest_table.$name[start_idx + i] = component.clone();
+                        }
+                    }
+                )*
+
+                // Record entity mappings
+                for (i, &old_entity) in source_table.entity_indices.iter().enumerate() {
+                    entity_mapping.push((old_entity, new_entities[i]));
+                }
+            }
+
+            Ok(entity_mapping)
+        }
+
+        /// Convert an old entity ID to its new ID after merging
+        pub fn remap_entity(entity_mapping: &[(EntityId, EntityId)], old_entity: EntityId) -> Option<EntityId> {
+            entity_mapping
+                .iter()
+                .find(|(old, _)| *old == old_entity)
+                .map(|(_, new)| *new)
+        }
 
         fn remove_from_table(arrays: &mut ComponentArrays, index: usize) -> Option<EntityId> {
             let last_index = arrays.entity_indices.len() - 1;
@@ -1514,5 +1564,122 @@ mod tests {
             component_mask(&world, entity).unwrap(),
             query_mask
         );
+    }
+
+    #[test]
+    fn test_merge_worlds_basic() {
+        let mut source = World::default();
+        let mut dest = World::default();
+
+        // Create test entities in source
+        let e1 = spawn_entities(&mut source, POSITION | VELOCITY, 1)[0];
+        let e2 = spawn_entities(&mut source, POSITION | HEALTH, 1)[0];
+        let e3 = spawn_entities(&mut source, POSITION | VELOCITY | HEALTH, 1)[0];
+
+        // Set test data
+        if let Some(pos) = get_component_mut::<Position>(&mut source, e1, POSITION) {
+            pos.x = 1.0;
+            pos.y = 2.0;
+        }
+        if let Some(vel) = get_component_mut::<Velocity>(&mut source, e1, VELOCITY) {
+            vel.x = 3.0;
+            vel.y = 4.0;
+        }
+
+        // Create existing entity in dest
+        let existing = spawn_entities(&mut dest, POSITION, 1)[0];
+
+        // Perform merge
+        let entity_mapping = merge_worlds(&mut dest, &source).unwrap();
+
+        // Verify total entities
+        assert_eq!(total_entities(&dest), 4);
+
+        // Check component data transfer
+        let new_e1 = remap_entity(&entity_mapping, e1).unwrap();
+        if let Some(pos) = get_component::<Position>(&dest, new_e1, POSITION) {
+            assert_eq!(pos.x, 1.0);
+            assert_eq!(pos.y, 2.0);
+        }
+        if let Some(vel) = get_component::<Velocity>(&dest, new_e1, VELOCITY) {
+            assert_eq!(vel.x, 3.0);
+            assert_eq!(vel.y, 4.0);
+        }
+
+        // Verify mapping count
+        assert_eq!(entity_mapping.len(), 3);
+
+        // Check existing entities preserved
+        assert!(get_component::<Position>(&dest, existing, POSITION).is_some());
+    }
+
+    #[test]
+    fn test_merge_empty_worlds() {
+        let mut dest = World::default();
+        let source = World::default();
+
+        let entity_mapping = merge_worlds(&mut dest, &source).unwrap();
+        assert_eq!(entity_mapping.len(), 0);
+        assert_eq!(total_entities(&dest), 0);
+    }
+
+    #[test]
+    fn test_merge_multiple_entities_same_table() {
+        let mut source = World::default();
+        let mut dest = World::default();
+
+        // Create test entities
+        let test_entities = spawn_entities(&mut source, POSITION | VELOCITY, 3);
+
+        // Set unique values
+        for (i, &entity) in test_entities.iter().enumerate() {
+            if let Some(pos) = get_component_mut::<Position>(&mut source, entity, POSITION) {
+                pos.x = i as f32;
+                pos.y = i as f32 * 2.0;
+            }
+        }
+
+        // Merge and verify
+        let entity_mapping = merge_worlds(&mut dest, &source).unwrap();
+        assert_eq!(entity_mapping.len(), 3);
+
+        // Check component values maintained
+        for (i, &(old_entity, new_entity)) in entity_mapping.iter().enumerate() {
+            if let Some(pos) = get_component::<Position>(&dest, new_entity, POSITION) {
+                assert_eq!(pos.x, i as f32);
+                assert_eq!(pos.y, i as f32 * 2.0);
+            }
+        }
+    }
+
+    #[test]
+    fn test_merge_all_component_combinations() {
+        let mut source = World::default();
+        let mut dest = World::default();
+
+        // Test all possible component combinations
+        let masks = [
+            POSITION,
+            VELOCITY,
+            HEALTH,
+            POSITION | VELOCITY,
+            POSITION | HEALTH,
+            VELOCITY | HEALTH,
+            POSITION | VELOCITY | HEALTH,
+        ];
+
+        // Create entity for each combination
+        for &mask in &masks {
+            spawn_entities(&mut source, mask, 1);
+        }
+
+        // Merge and verify
+        let entity_mapping = merge_worlds(&mut dest, &source).unwrap();
+        assert_eq!(entity_mapping.len(), masks.len());
+
+        // Verify all component combinations exist
+        for &mask in &masks {
+            assert!(!query_entities(&dest, mask).is_empty());
+        }
     }
 }
