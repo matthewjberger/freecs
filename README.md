@@ -25,7 +25,7 @@ and does not use object orientation, generics, traits, or dynamic dispatch.
 - **Serialization**: Save and load worlds using serde
 - **World Merging**: Clone and remap entity hierarchies between worlds
 - **Zero Overhead**: No dynamic dispatch, traits, or runtime abstractions
-- **Data Oriented**: Plain structs transformed by free functions
+- **Data Oriented**: Focus on cache coherence and performance
 
 ## Quick Start
 
@@ -33,8 +33,8 @@ Add this to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-freecs = "0.2.14"
-serde = { version = "1.0.214", features = ["derive"] } # or higher
+freecs = "0.2.15"
+serde = { version = "1.0", features = ["derive"] }
 
 # (optional) add rayon if you want to parallelize systems
 rayon = "1.10.0" # or higher
@@ -229,26 +229,26 @@ struct Node {
 // Update references
 remap_entity_refs(&mut game_world, &mapping, |mapping, table| {
     if table.mask & NODE != 0 {
-    for node in &mut table.node {
-        // Remap simple field
-        if let Some(new_id) = remap_entity(mapping, node.id) {
-            node.id = new_id;
-        }
+        for node in &mut table.node {
+            // Remap simple field
+            if let Some(new_id) = remap_entity(mapping, node.id) {
+                node.id = new_id;
+            }
 
-        // Remap Option<EntityId>
-        if let Some(ref mut parent_id) = node.parent {
-            if let Some(new_id) = remap_entity(mapping, *parent_id) {
-                *parent_id = new_id;
+            // Remap Option<EntityId>
+            if let Some(ref mut parent_id) = node.parent {
+                if let Some(new_id) = remap_entity(mapping, *parent_id) {
+                    *parent_id = new_id;
+                }
+            }
+
+            // Remap Vec<EntityId>
+            for child_id in &mut node.children {
+                if let Some(new_id) = remap_entity(mapping, *child_id) {
+                    *child_id = new_id;
+                }
             }
         }
-
-        // Remap Vec<EntityId>
-        for child_id in &mut node.children {
-            if let Some(new_id) = remap_entity(mapping, *child_id) {
-                *child_id = new_id;
-            }
-        }
-    }
     }
 });
 ```
