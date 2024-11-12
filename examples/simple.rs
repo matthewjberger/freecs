@@ -7,6 +7,7 @@ world! {
         position: Position => POSITION,
         velocity: Velocity => VELOCITY,
         health: Health => HEALTH,
+        node: Node => NODE,
       },
       Resources {
           delta_time: f32
@@ -72,10 +73,72 @@ pub fn main() {
 
     // Despawn entities, freeing their table slots for reuse
     despawn_entities(&mut world, &[entity]);
+
+    // Create a new world to populate and merge
+    let mut new_world = World::default();
+
+    // Spawn all entities at once
+    let [root, child1, child2] = spawn_entities(&mut new_world, POSITION | NODE, 3)[..] else {
+        panic!("Failed to spawn entities");
+    };
+
+    // Set up hierarchy
+    if let Some(root_node) = get_component_mut::<Node>(&mut new_world, root, NODE) {
+        root_node.id = root;
+        root_node.parent = None;
+        root_node.children = vec![child1, child2];
+    }
+
+    if let Some(child1_node) = get_component_mut::<Node>(&mut new_world, child1, NODE) {
+        child1_node.id = child1;
+        child1_node.parent = Some(root);
+        child1_node.children = vec![child2];
+    }
+
+    if let Some(child2_node) = get_component_mut::<Node>(&mut new_world, child2, NODE) {
+        child2_node.id = child2;
+        child2_node.parent = Some(child1);
+        child2_node.children = vec![];
+    }
+
+    // Merge entities from new_world into the world
+    let mapping = merge_worlds(&mut world, &new_world);
+
+    // Update references with explicit remapping
+    remap_entity_refs(&mut world, &mapping, |mapping, table| {
+        if table.mask & NODE != 0 {
+            for node in &mut table.node {
+                if let Some(new_id) = remap_entity(mapping, node.id) {
+                    node.id = new_id;
+                }
+
+                if let Some(ref mut parent_id) = node.parent {
+                    if let Some(new_id) = remap_entity(mapping, *parent_id) {
+                        *parent_id = new_id;
+                    }
+                }
+
+                for child_id in &mut node.children {
+                    if let Some(new_id) = remap_entity(mapping, *child_id) {
+                        *child_id = new_id;
+                    }
+                }
+            }
+        }
+    });
 }
 
 use components::*;
 mod components {
+    use super::*;
+
+    #[derive(Default, Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
+    pub struct Node {
+        pub id: EntityId,
+        pub parent: Option<EntityId>,
+        pub children: Vec<EntityId>,
+    }
+
     #[derive(Default, Debug, Clone, serde::Serialize, serde::Deserialize)]
     pub struct Position {
         pub x: f32,
