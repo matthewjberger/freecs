@@ -31,7 +31,7 @@ Add this to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-freecs = "0.2.19"
+freecs = "0.2.20"
 serde = { version = "1.0", features = ["derive"] }
 
 # (optional) add rayon if you want to parallelize systems
