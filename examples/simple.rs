@@ -100,6 +100,32 @@ pub fn main() {
         child2_node.parent = Some(child1);
         child2_node.children = vec![];
     }
+
+    // Merge entities from new_world into the world
+    let mapping = merge_worlds(&mut world, &new_world);
+
+    // Update references with explicit remapping
+    remap_entity_refs(&mut world, &mapping, |mapping, table| {
+        if table.mask & NODE != 0 {
+            for node in &mut table.node {
+                if let Some(new_id) = remap_entity(mapping, node.id) {
+                    node.id = new_id;
+                }
+
+                if let Some(ref mut parent_id) = node.parent {
+                    if let Some(new_id) = remap_entity(mapping, *parent_id) {
+                        *parent_id = new_id;
+                    }
+                }
+
+                for child_id in &mut node.children {
+                    if let Some(new_id) = remap_entity(mapping, *child_id) {
+                        *child_id = new_id;
+                    }
+                }
+            }
+        }
+    });
 }
 
 use components::*;

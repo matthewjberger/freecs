@@ -23,6 +23,7 @@ and does not use object orientation, generics, traits, or dynamic dispatch.
 - **Parallel Processing**: Built-in support for processing tables in parallel with rayon
 - **Simple Queries**: Find entities by their components using bit masks
 - **Serialization**: Save and load worlds using serde
+- **World Merging**: Clone and remap entity hierarchies between worlds
 - **Zero Overhead**: No dynamic dispatch, traits, or runtime abstractions
 - **Data Oriented**: Focus on cache coherence and performance
 
@@ -32,7 +33,7 @@ Add this to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-freecs = "0.2.16"
+freecs = "0.2.15"
 serde = { version = "1.0", features = ["derive"] }
 
 # (optional) add rayon if you want to parallelize systems
@@ -186,6 +187,109 @@ Run the examples with:
 
 ```rust
 cargo run -r --example cubes
+```
+
+# World Merging
+
+The ECS supports cloning entities from one world to another while maintaining their relationships.
+This is useful for implementing prefabs, prototypes, and scene loading.
+
+```rust
+let mut source = World::default();
+let mut game_world = World::default();
+
+// Spawn a hierarchy of entities
+let [root, child1, child2] = spawn_entities(&mut source, POSITION | NODE, 3)[..] else {
+panic!("Failed to spawn entities");
+};
+
+// Set up entity references
+if let Some(node) = get_component_mut::<Node>(&mut source, root, NODE) {
+node.id = root;
+node.children = vec![child1, child2];
+}
+
+// Copy entities to game world and get mapping of old->new IDs
+let mapping = merge_worlds(&mut game_world, &source);
+```
+
+## Remapping Entity References
+
+When components contain EntityIds (for parent-child relationships, inventories, etc),
+these need to be updated to point to the newly spawned entities:
+
+```rust
+#[derive(Default, Clone)]
+struct Node {
+    id: EntityId,
+    parent: Option<EntityId>,
+    children: Vec<EntityId>,
+}
+
+// Update references
+remap_entity_refs(&mut game_world, &mapping, |mapping, table| {
+    if table.mask & NODE != 0 {
+        for node in &mut table.node {
+            // Remap simple field
+            if let Some(new_id) = remap_entity(mapping, node.id) {
+                node.id = new_id;
+            }
+
+            // Remap Option<EntityId>
+            if let Some(ref mut parent_id) = node.parent {
+                if let Some(new_id) = remap_entity(mapping, *parent_id) {
+                    *parent_id = new_id;
+                }
+            }
+
+            // Remap Vec<EntityId>
+            for child_id in &mut node.children {
+                if let Some(new_id) = remap_entity(mapping, *child_id) {
+                    *child_id = new_id;
+                }
+            }
+        }
+    }
+});
+```
+
+## Example: Character Prefab
+
+```rust
+fn spawn_character(world: &mut World, position: Vec2) -> EntityId {
+    // Create prefab hierarchy
+    let mut prefab = World::default();
+    let [root, weapon, effects] = spawn_entities(&mut prefab, MODEL | NODE, 3)[..] else {
+        panic!("Failed to spawn prefab");
+    };
+
+    // Set up components and relationships
+    if let Some(root_node) = get_component_mut::<Node>(&mut prefab, root, NODE) {
+        root_node.id = root;
+        root_node.children = vec![weapon, effects];
+    }
+
+    // Copy to game world and update references
+    let mapping = merge_worlds(world, &prefab);
+
+    remap_entity_refs(world, &mapping, |mapping, table| {
+        if table.mask & NODE != 0 {
+            for node in &mut table.node {
+                if let Some(new_id) = remap_entity(mapping, node.id) {
+                    node.id = new_id;
+                }
+                for child_id in &mut node.children {
+                    if let Some(new_id) = remap_entity(mapping, *child_id) {
+                        *child_id = new_id;
+                    }
+                }
+            }
+        }
+    });
+
+    // Return the new root entity
+    remap_entity(&mapping, root).unwrap()
+}
 ```
 
 ## Performance Notes
