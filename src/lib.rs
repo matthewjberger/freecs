@@ -521,88 +521,94 @@ macro_rules! world {
 
         /// Copy entities from source world to destination world
         pub fn copy_entities<T: FnMut(&[(EntityId, EntityId)], &ComponentArrays, &mut ComponentArrays)>(
-           dest: &mut $world,
-           source: &$world,
-           entities: &[EntityId],
-           mut remap: T
+            dest: &mut $world,
+            source: &$world,
+            entities: &[EntityId],
+            mut remap: T
         ) -> Vec<(EntityId, EntityId)> {
-           let mut entity_mapping = Vec::with_capacity(entities.len());
-           let mut table_groups: std::collections::HashMap<usize, Vec<(EntityId, usize)>> = std::collections::HashMap::new();
+            let mut entity_mapping = Vec::with_capacity(entities.len());
+            let mut table_groups: std::collections::HashMap<usize, Vec<(EntityId, usize)>> = std::collections::HashMap::new();
 
-           for &entity in entities {
-               if let Some((table_idx, array_idx)) = location_get(&source.entity_locations, entity) {
-                   if table_idx < source.tables.len() {
-                       table_groups.entry(table_idx)
-                           .or_default()
-                           .push((entity, array_idx));
-                   }
-               }
-           }
+            // Group entities by table
+            for &entity in entities {
+                if let Some((table_idx, array_idx)) = location_get(&source.entity_locations, entity) {
+                    if table_idx < source.tables.len() {
+                        table_groups.entry(table_idx)
+                            .or_default()
+                            .push((entity, array_idx));
+                    }
+                }
+            }
 
-           // Create all entities first to build complete mapping table
-           for (source_table_idx, entities_to_copy) in &table_groups {
-               let source_table = &source.tables[*source_table_idx];
-               let entity_mask = source_table.mask;
-               let count = entities_to_copy.len();
-               let new_entities = spawn_entities(dest, entity_mask, count);
+            // For each source table, compute valid mask before spawning entities
+            for (source_table_idx, entities_to_copy) in &table_groups {
+                let source_table = &source.tables[*source_table_idx];
+                let entity_mask = source_table.mask;
 
-               for ((old_entity, _), new_entity) in entities_to_copy.iter().zip(new_entities) {
-                   entity_mapping.push((*old_entity, new_entity));
-               }
-           }
+                // Validate component array lengths
+                let valid_mask = {
+                    let mut mask = entity_mask;
+                    $(
+                        if mask & $mask != 0 && source_table.$name.len() != source_table.entity_indices.len() {
+                            mask &= !$mask;
+                        }
+                    )*
+                    mask
+                };
 
-           // Process tables and remap with complete mapping table
-           for (source_table_idx, entities_to_copy) in table_groups {
-               let source_table = &source.tables[source_table_idx];
-               let entity_mask = source_table.mask;
+                let count = entities_to_copy.len();
+                let new_entities = spawn_entities(dest, valid_mask, count);
 
-               // Create temp table and copy valid components
-               let mut temp_table = ComponentArrays {
-                   mask: entity_mask,
-                   ..Default::default()
-               };
+                for ((old_entity, _), new_entity) in entities_to_copy.iter().zip(new_entities) {
+                    entity_mapping.push((*old_entity, new_entity));
+                }
+            }
 
-               // Determine valid components by checking array lengths
-               let valid_mask = {
-                   let mut mask = entity_mask;
-                   $(
-                       if mask & $mask != 0 && source_table.$name.len() != source_table.entity_indices.len() {
-                           mask &= !$mask;
-                       }
-                   )*
-                   mask
-               };
+            // Copy components using the same valid mask check
+            for (source_table_idx, entities_to_copy) in table_groups {
+                let source_table = &source.tables[source_table_idx];
 
-               // Copy data using valid mask
-               for (_, source_idx) in &entities_to_copy {
-                   if *source_idx < source_table.entity_indices.len() {
-                       $(
-                           if valid_mask & $mask != 0 {
-                               temp_table.$name.push(source_table.$name[*source_idx].clone());
-                           }
-                       )*
-                   }
-               }
+                let valid_mask = {
+                    let mut mask = source_table.mask;
+                    $(
+                        if mask & $mask != 0 && source_table.$name.len() != source_table.entity_indices.len() {
+                            mask &= !$mask;
+                        }
+                    )*
+                    mask
+                };
 
-               // Remap references using complete mapping table
-               remap(&entity_mapping, source_table, &mut temp_table);
+                let mut temp_table = ComponentArrays {
+                    mask: valid_mask,
+                    ..Default::default()
+                };
 
-               // Copy remapped data to destination
-               if let Some(dest_table) = dest.tables.last_mut() {
-                   let start_idx = dest_table.entity_indices.len() - entities_to_copy.len();
+                // Only copy valid components
+                for (_, source_idx) in &entities_to_copy {
+                    if *source_idx < source_table.entity_indices.len() {
+                        $(
+                            if valid_mask & $mask != 0 {
+                                temp_table.$name.push(source_table.$name[*source_idx].clone());
+                            }
+                        )*
+                    }
+                }
 
-                   // Copy components
-                   for i in 0..entities_to_copy.len() {
-                       $(
-                           if valid_mask & $mask != 0 {
-                               dest_table.$name[start_idx + i] = temp_table.$name[i].clone();
-                           }
-                       )*
-                   }
-               }
-           }
+                remap(&entity_mapping, source_table, &mut temp_table);
 
-           entity_mapping
+                if let Some(dest_table) = dest.tables.last_mut() {
+                    let start_idx = dest_table.entity_indices.len() - entities_to_copy.len();
+                    for i in 0..entities_to_copy.len() {
+                        $(
+                            if valid_mask & $mask != 0 {
+                                dest_table.$name[start_idx + i] = temp_table.$name[i].clone();
+                            }
+                        )*
+                    }
+                }
+            }
+
+            entity_mapping
         }
 
         fn remove_from_table(arrays: &mut ComponentArrays, index: usize) -> Option<EntityId> {
@@ -2074,45 +2080,34 @@ mod tests {
     }
 
     #[test]
-    fn test_copy_entities_component_array_bounds() {
+    fn test_copy_entities_array_corruptions() {
         let mut source = World::default();
         let mut dest = World::default();
-
         let e1 = spawn_entities(&mut source, POSITION | PARENT, 1)[0];
 
-        // Print initial state
         if let Some((table_idx, _)) = location_get(&source.entity_locations, e1) {
             let table = &mut source.tables[table_idx];
-            println!(
-                "Before clear: position len={}, parent len={}",
-                table.position.len(),
-                table.parent.len()
-            );
 
-            table.parent.clear();
+            println!("Before corruption:");
+            println!("entity_indices len: {}", table.entity_indices.len());
+            println!("position len: {}", table.position.len());
+            println!("parent len: {}", table.parent.len());
 
-            println!(
-                "After clear: position len={}, parent len={}",
-                table.position.len(),
-                table.parent.len()
-            );
+            // Corrupt arrays
+            table.parent.extend(vec![Parent(EntityId::default()); 2]);
+
+            println!("\nAfter corruption:");
+            println!("entity_indices len: {}", table.entity_indices.len());
+            println!("position len: {}", table.position.len());
+            println!("parent len: {}", table.parent.len());
         }
 
-        println!("Entity to copy: {:?}", e1);
+        // We shouldn't copy the Parent component since its array length doesn't match
+        copy_entities(&mut dest, &source, &[e1], |_, _, _| {});
 
-        let mapping = copy_entities(&mut dest, &source, &[e1], |_, _, _| {});
-        println!("Mapping: {:?}", mapping);
-
-        // Check resulting entities
-        let dest_entities = query_entities(&dest, ALL);
-        println!("Destination entities: {:?}", dest_entities);
-
-        for e in dest_entities {
-            println!(
-                "Entity {:?} components: mask={:?}",
-                e,
-                component_mask(&dest, e)
-            );
-        }
+        // Position should copy, Parent should be skipped
+        let copied = query_entities(&dest, ALL)[0];
+        assert!(get_component::<Position>(&dest, copied, POSITION).is_some());
+        assert!(get_component::<Parent>(&dest, copied, PARENT).is_none());
     }
 }
