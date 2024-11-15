@@ -2003,4 +2003,63 @@ mod tests {
             "New child entity should exist in destination world"
         );
     }
+
+    #[test]
+    fn test_deep_hierarchy_copy() {
+        let mut source = World::default();
+        let mut dest = World::default();
+
+        // Create a very deep hierarchy in source world
+        let mut prev_entity = None;
+        let mut all_entities = Vec::new();
+
+        // Create 10000 nested entities with parent references
+        for _ in 0..10000 {
+            let entity = spawn_entities(&mut source, PARENT | NODE, 1)[0];
+
+            if let Some(prev) = prev_entity {
+                if let Some(parent) = get_component_mut::<Parent>(&mut source, entity, PARENT) {
+                    parent.0 = prev;
+                }
+            }
+
+            all_entities.push(entity);
+            prev_entity = Some(entity);
+        }
+
+        // Copy the entire hierarchy
+        let mapping = copy_entities(
+            &mut dest,
+            &source,
+            &all_entities,
+            |mapping, source_table, dest_table| {
+                if source_table.mask & PARENT != 0 {
+                    for i in 0..dest_table.parent.len() {
+                        if let Some((_, new_id)) = mapping
+                            .iter()
+                            .find(|(old_id, _)| *old_id == source_table.parent[i].0)
+                        {
+                            dest_table.parent[i].0 = *new_id;
+                        }
+                    }
+                }
+            },
+        );
+
+        assert_eq!(mapping.len(), 10000);
+
+        // Verify parent relationships were maintained
+        for (old_id, new_id) in mapping.iter().skip(1) {
+            let old_parent = get_component::<Parent>(&source, *old_id, PARENT).unwrap();
+            let new_parent = get_component::<Parent>(&dest, *new_id, PARENT).unwrap();
+
+            let expected_new_parent = mapping
+                .iter()
+                .find(|(old, _)| *old == old_parent.0)
+                .unwrap()
+                .1;
+
+            assert_eq!(new_parent.0, expected_new_parent);
+        }
+    }
 }
