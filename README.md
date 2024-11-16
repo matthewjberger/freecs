@@ -31,7 +31,7 @@ Add this to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-freecs = "0.2.24"
+freecs = "0.2.25"
 serde = { version = "1.0", features = ["derive"] }
 
 # (optional) add rayon if you want to parallelize systems
@@ -41,11 +41,10 @@ rayon = "1.10.0" # or higher
 And in `main.rs`:
 
 ```rust
-use freecs::{has_components, world};
+use freecs::{has_components, ecs};
 use rayon::prelude::*;
 
-// The `World` and `Resources` type names can be customized.
-world! {
+ecs! {
     World {
         position: Position => POSITION,
         velocity: Velocity => VELOCITY,
@@ -59,7 +58,7 @@ world! {
 pub fn main() {
     let mut world = World::default();
 
-    // Inject resources for systems to use
+    // Add resources for systems to use
     world.resources.delta_time = 0.016;
 
     // Spawn entities with components

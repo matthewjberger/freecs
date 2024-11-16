@@ -14,7 +14,7 @@
 //! # Creating a World
 //!
 //! ```rust
-//! use freecs::{world, has_components};
+//! use freecs::{ecs, has_components};
 //! use serde::{Serialize, Deserialize};
 //!
 //! // First, define components.
@@ -26,10 +26,10 @@
 //! #[derive(Default, Clone, Debug, Serialize, Deserialize)]
 //! struct Velocity { x: f32, y: f32 }
 //!
-//! // Then, create a world with the `world!` macro.
+//! // Then, create a world with the `ecs!` macro.
 //! // Resources are stored independently of component data and are not serialized.
 //! // The `World` and `Resources` type names can be customized.
-//! world! {
+//! ecs! {
 //!   World {
 //!     position: Position => POSITION,
 //!     velocity: Velocity => VELOCITY,
