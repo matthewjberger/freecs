@@ -16,6 +16,12 @@ ecs! {
         visual_range: f32,
         min_speed: f32,
         max_speed: f32,
+        mouse_attraction_weight: f32,
+        mouse_repulsion_weight: f32,
+        mouse_influence_range: f32,
+        mouse_pos: Vec2,
+        mouse_attract: bool,
+        mouse_repel: bool,
     }
 }
 
@@ -51,6 +57,9 @@ struct BoidParams {
     show_debug: bool,
     paused: bool,
     spawn_count: usize,
+    mouse_attraction_weight: f32,
+    mouse_repulsion_weight: f32,
+    mouse_influence_range: f32,
 }
 
 impl Default for BoidParams {
@@ -65,6 +74,9 @@ impl Default for BoidParams {
             show_debug: false,
             paused: false,
             spawn_count: 1000,
+            mouse_attraction_weight: 0.96,
+            mouse_repulsion_weight: 1.2,
+            mouse_influence_range: 150.0,
         }
     }
 }
@@ -108,7 +120,7 @@ mod systems {
                 let mut separation = Velocity::default();
                 let mut neighbors = 0;
 
-                // Only check nearby boids using spatial grid
+                // Existing flocking behavior...
                 for (other_entity, other_pos, other_vel) in
                     grid.get_nearby_boids(pos, resources.visual_range)
                 {
@@ -137,7 +149,30 @@ mod systems {
                     }
                 }
 
-                // Rest of the boid logic remains the same...
+                // Apply mouse influence
+                let mouse_dx = resources.mouse_pos.x - pos.x;
+                let mouse_dy = resources.mouse_pos.y - pos.y;
+                let mouse_dist_sq = mouse_dx * mouse_dx + mouse_dy * mouse_dy;
+                let mouse_range_sq =
+                    resources.mouse_influence_range * resources.mouse_influence_range;
+
+                if mouse_dist_sq < mouse_range_sq {
+                    let mouse_influence = 1.0 - (mouse_dist_sq / mouse_range_sq).sqrt();
+
+                    if resources.mouse_attract {
+                        // Attraction - move towards mouse
+                        vel.x += mouse_dx * mouse_influence * resources.mouse_attraction_weight;
+                        vel.y += mouse_dy * mouse_influence * resources.mouse_attraction_weight;
+                    }
+
+                    if resources.mouse_repel {
+                        // Repulsion - move away from mouse
+                        vel.x -= mouse_dx * mouse_influence * resources.mouse_repulsion_weight;
+                        vel.y -= mouse_dy * mouse_influence * resources.mouse_repulsion_weight;
+                    }
+                }
+
+                // Apply flocking behaviors if we have neighbors
                 if neighbors > 0 {
                     let inv_neighbors = 1.0 / neighbors as f32;
 
@@ -149,17 +184,18 @@ mod systems {
 
                     vel.x += alignment.x + cohesion.x + separation.x * resources.separation_weight;
                     vel.y += alignment.y + cohesion.y + separation.y * resources.separation_weight;
+                }
 
-                    let speed = (vel.x * vel.x + vel.y * vel.y).sqrt();
-                    if speed > resources.max_speed {
-                        let factor = resources.max_speed / speed;
-                        vel.x *= factor;
-                        vel.y *= factor;
-                    } else if speed < resources.min_speed {
-                        let factor = resources.min_speed / speed;
-                        vel.x *= factor;
-                        vel.y *= factor;
-                    }
+                // Enforce speed limits
+                let speed = (vel.x * vel.x + vel.y * vel.y).sqrt();
+                if speed > resources.max_speed {
+                    let factor = resources.max_speed / speed;
+                    vel.x *= factor;
+                    vel.y *= factor;
+                } else if speed < resources.min_speed {
+                    let factor = resources.min_speed / speed;
+                    vel.x *= factor;
+                    vel.y *= factor;
                 }
             });
     }
@@ -267,10 +303,9 @@ fn draw_ui(params: &mut BoidParams, world: &mut World) {
         draw_text(text, x, y, 20.0, WHITE);
     };
 
-    draw_param(
-        y,
-        &format!("Entities: {}", query_entities(world, ALL).len()),
-    );
+    // Get current entity count
+    let entity_count = query_entities(world, ALL).len();
+    draw_param(y, &format!("Entities: {}", entity_count));
     y += step;
     draw_param(y, &format!("FPS: {:.1}", get_fps()));
     y += step;
@@ -297,6 +332,39 @@ fn draw_ui(params: &mut BoidParams, world: &mut World) {
         y,
         &format!("Speed: {:.0}-{:.0}", params.min_speed, params.max_speed),
     );
+    y += step;
+
+    draw_param(y, "[Left Mouse] Attract boids");
+    y += step;
+
+    draw_param(y, "[Right Mouse] Repel boids");
+
+    // Update mouse state
+    let mouse_pos = Vec2::new(mouse_position().0, mouse_position().1);
+    world.resources.mouse_pos = mouse_pos;
+    world.resources.mouse_attract = is_mouse_button_down(MouseButton::Left);
+    world.resources.mouse_repel = is_mouse_button_down(MouseButton::Right);
+
+    // Add mouse influence parameters to resources
+    world.resources.mouse_attraction_weight = params.mouse_attraction_weight;
+    world.resources.mouse_repulsion_weight = params.mouse_repulsion_weight;
+    world.resources.mouse_influence_range = params.mouse_influence_range;
+
+    // Draw mouse influence range if active
+    if world.resources.mouse_attract || world.resources.mouse_repel {
+        let color = if world.resources.mouse_attract {
+            Color::new(0.0, 1.0, 0.0, 0.2)
+        } else {
+            Color::new(1.0, 0.0, 0.0, 0.2)
+        };
+        draw_circle_lines(
+            mouse_pos.x,
+            mouse_pos.y,
+            params.mouse_influence_range,
+            10.0,
+            color,
+        );
+    }
 
     if is_key_pressed(KeyCode::Space) {
         params.paused = !params.paused;
@@ -324,13 +392,27 @@ fn draw_ui(params: &mut BoidParams, world: &mut World) {
         params.cohesion_weight = (params.cohesion_weight + speed).min(1.0);
     }
 
+    // Handle spawning and despawning
     if is_key_pressed(KeyCode::Equal) {
         params.spawn_count += 1000;
         spawn_boids(world, 1000);
     }
     if is_key_pressed(KeyCode::Minus) {
-        params.spawn_count = params.spawn_count.saturating_sub(1000);
-        // Note: Currently no despawn functionality
+        let despawn_count = entity_count.min(1000);
+        if despawn_count > 0 {
+            params.spawn_count = params.spawn_count.saturating_sub(despawn_count);
+
+            // Get entities from the front instead of the back to avoid swap_remove issues
+            let to_despawn: Vec<_> = query_entities(world, ALL)
+                .into_iter()
+                .take(despawn_count)
+                .collect();
+
+            // Despawn in chunks to avoid potential index issues
+            for chunk in to_despawn.chunks(100) {
+                despawn_entities(world, chunk);
+            }
+        }
     }
 }
 
