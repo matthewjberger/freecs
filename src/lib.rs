@@ -31,14 +31,12 @@
 //! // The `World` and `Resources` type names can be customized.
 //! world! {
 //!   World {
-//!       components {
-//!         position: Position => POSITION,
-//!         velocity: Velocity => VELOCITY,
-//!         health: Health => HEALTH,
-//!       },
-//!       Resources {
-//!           delta_time: f32
-//!       }
+//!     position: Position => POSITION,
+//!     velocity: Velocity => VELOCITY,
+//!     health: Health => HEALTH,
+//!   }
+//!   Resources {
+//!     delta_time: f32
 //!   }
 //! }
 //! ```
@@ -128,15 +126,13 @@
 //! memory, maximizing cache utilization. Component access and queries are O(1), with table transitions
 //! being the only O(n) operations.
 #[macro_export]
-macro_rules! world {
+macro_rules! ecs {
     (
         $world:ident {
-            components {
-                $($name:ident: $type:ty => $mask:ident),* $(,)?
-            }$(,)?
-            $resources:ident {
-                $($resource_name:ident: $resource_type:ty),* $(,)?
-            }
+            $($name:ident: $type:ty => $mask:ident),* $(,)?
+        }
+        $resources:ident {
+            $($resource_name:ident: $resource_type:ty),* $(,)?
         }
     ) => {
         /// Component masks
@@ -666,19 +662,17 @@ mod tests {
     use rayon::*;
     use std::collections::HashSet;
 
-    world! {
-      World {
-          components {
+    ecs! {
+        World {
             position: Position => POSITION,
             velocity: Velocity => VELOCITY,
             health: Health => HEALTH,
             parent: Parent => PARENT,
             node: Node => NODE,
-          },
-          Resources {
-              _delta_time: f32
-          }
-      }
+        }
+        Resources {
+            _delta_time: f32
+        }
     }
 
     use components::*;

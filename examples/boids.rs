@@ -1,23 +1,21 @@
-use freecs::{has_components, world};
+use freecs::{ecs, has_components};
 use macroquad::prelude::*;
 
-world! {
+ecs! {
     World {
-        components {
-            position: Position => POSITION,
-            velocity: Velocity => VELOCITY,
-            boid: Boid => BOID,
-            color: BoidColor => COLOR,
-        },
-        Resources {
-            delta_time: f32,
-            alignment_weight: f32,
-            cohesion_weight: f32,
-            separation_weight: f32,
-            visual_range: f32,
-            min_speed: f32,
-            max_speed: f32,
-        }
+        position: Position => POSITION,
+        velocity: Velocity => VELOCITY,
+        boid: Boid => BOID,
+        color: BoidColor => COLOR,
+    }
+    Resources {
+        delta_time: f32,
+        alignment_weight: f32,
+        cohesion_weight: f32,
+        separation_weight: f32,
+        visual_range: f32,
+        min_speed: f32,
+        max_speed: f32,
     }
 }
 

@@ -1,24 +1,22 @@
-use freecs::{has_components, world};
+use freecs::{ecs, has_components};
 use macroquad::prelude::*;
 
-world! {
+ecs! {
     World {
-        components {
-            position: Position => POSITION,
-            rotation: Rotation => ROTATION,
-            velocity: Velocity => VELOCITY,
-            player: Player => PLAYER,
-            thrust: Thrust => THRUST,
-            projectile: Projectile => PROJECTILE,
-            asteroid: Asteroid => ASTEROID,
-            radius: Radius => RADIUS,
-            lifetime: Lifetime => LIFETIME,
-        },
-        Resources {
-            delta_time: f32,
-            last_shot_time: f32,
-            score: u32
-        }
+        position: Position => POSITION,
+        rotation: Rotation => ROTATION,
+        velocity: Velocity => VELOCITY,
+        player: Player => PLAYER,
+        thrust: Thrust => THRUST,
+        projectile: Projectile => PROJECTILE,
+        asteroid: Asteroid => ASTEROID,
+        radius: Radius => RADIUS,
+        lifetime: Lifetime => LIFETIME,
+    }
+    Resources {
+        delta_time: f32,
+        last_shot_time: f32,
+        score: u32
     }
 }
 

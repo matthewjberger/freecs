@@ -1,18 +1,16 @@
-use freecs::{has_components, world};
+use freecs::{ecs, has_components};
 use macroquad::prelude::*;
 
-world! {
+ecs! {
     World2 {
-        components {
-            position: Position3D => POSITION,
-            rotation: Rotation => ROTATION,
-            scale: Scale => SCALE,
-            velocity: Velocity => VELOCITY,
-            gravity: Gravity => GRAVITY,
-        },
-        Resources {
-            delta_time: f32
-        }
+        position: Position3D => POSITION,
+        rotation: Rotation => ROTATION,
+        scale: Scale => SCALE,
+        velocity: Velocity => VELOCITY,
+        gravity: Gravity => GRAVITY,
+    }
+    Resources {
+        delta_time: f32
     }
 }
 

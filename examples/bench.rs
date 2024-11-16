@@ -1,17 +1,15 @@
-use freecs::{has_components, world};
+use freecs::{ecs, has_components};
 use rayon::prelude::*;
 use std::time::{Duration, Instant};
 
-world! {
+ecs! {
     World {
-        components {
-            position: Position => POSITION,
-            velocity: Velocity => VELOCITY,
-            health: Health => HEALTH,
-        },
-        Resources {
-            delta_time: f32
-        }
+        position: Position => POSITION,
+        velocity: Velocity => VELOCITY,
+        health: Health => HEALTH,
+    }
+    Resources {
+        delta_time: f32
     }
 }
 

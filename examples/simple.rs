@@ -1,18 +1,16 @@
-use freecs::{has_components, world};
+use freecs::{ecs, has_components};
 use rayon::prelude::*;
 
-world! {
-  World {
-      components {
+ecs! {
+    World {
         position: Position => POSITION,
         velocity: Velocity => VELOCITY,
         health: Health => HEALTH,
         node: Node => NODE,
-      },
-      Resources {
-          delta_time: f32
-      }
-  }
+    }
+    Resources {
+        delta_time: f32
+    }
 }
 
 pub fn main() {
@@ -74,7 +72,7 @@ pub fn main() {
     // Despawn entities, freeing their table slots for reuse
     despawn_entities(&mut world, &[entity]);
 
-    // Create a new world to populate and merge
+    // Create a new world to populate
     let mut new_world = World::default();
 
     // Spawn all entities at once

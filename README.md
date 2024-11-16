@@ -31,7 +31,7 @@ Add this to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-freecs = "0.2.23"
+freecs = "0.2.24"
 serde = { version = "1.0", features = ["derive"] }
 
 # (optional) add rayon if you want to parallelize systems
@@ -46,16 +46,14 @@ use rayon::prelude::*;
 
 // The `World` and `Resources` type names can be customized.
 world! {
-  World {
-      components {
+    World {
         position: Position => POSITION,
         velocity: Velocity => VELOCITY,
         health: Health => HEALTH,
-      },
-      Resources {
-          delta_time: f32
-      }
-  }
+    }
+    Resources {
+        delta_time: f32
+    }
 }
 
 pub fn main() {
