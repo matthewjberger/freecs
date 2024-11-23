@@ -52,6 +52,8 @@ ecs! {
     }
     Resources {
         delta_time: f32
+        // This will not be serialized
+        #[serde(skip)] _map: std::collections::HashMap<String, Box<dyn std::any::Any>>,
     }
 }
 
