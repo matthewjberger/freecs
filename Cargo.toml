@@ -1,6 +1,6 @@
 [package]
 name = "freecs"
-version = "0.2.26"
+version = "0.2.27"
 authors = ["Matthew Berger <matthewjordanberger@gmail.com>"]
 description = """
 A high-performance, archetype-based Entity Component System (ECS) written in Rust.
