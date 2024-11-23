@@ -27,7 +27,7 @@
 //! struct Velocity { x: f32, y: f32 }
 //!
 //! // Then, create a world with the `ecs!` macro.
-//! // Resources are stored independently of component data and are not serialized.
+//! // Resources are stored independently of component data.
 //! // The `World` and `Resources` type names can be customized.
 //! ecs! {
 //!   World {
@@ -37,6 +37,8 @@
 //!   }
 //!   Resources {
 //!     delta_time: f32
+//!     // This will not be serialized
+//!     #[serde(skip)] map: HashMap<String, Box<dyn Any>>,
 //!   }
 //! }
 //! ```
@@ -132,7 +134,7 @@ macro_rules! ecs {
             $($name:ident: $type:ty => $mask:ident),* $(,)?
         }
         $resources:ident {
-            $($resource_name:ident: $resource_type:ty),* $(,)?
+            $($(#[$attr:meta])*  $resource_name:ident: $resource_type:ty),* $(,)?
         }
     ) => {
         /// Component masks
@@ -197,13 +199,11 @@ macro_rules! ecs {
             pending_despawns: Vec<EntityId>,
         }
 
-        /// Resources
-        #[derive(Default)]
+        #[derive(Default, serde::Serialize, serde::Deserialize)]
         pub struct $resources {
-            $(pub $resource_name: $resource_type,)*
+            $($(#[$attr])* pub $resource_name: $resource_type,)*
         }
 
-        /// Component Table
         #[derive(Default, serde::Serialize, serde::Deserialize)]
         pub struct ComponentArrays {
             $(pub $name: Vec<$type>,)*
@@ -671,7 +671,8 @@ mod tests {
             node: Node => NODE,
         }
         Resources {
-            _delta_time: f32
+            _delta_time: f32,
+            #[serde(skip)] _map: std::collections::HashMap<String, Box<dyn std::any::Any>>,
         }
     }
 

@@ -19,7 +19,7 @@ ecs! {
         mouse_attraction_weight: f32,
         mouse_repulsion_weight: f32,
         mouse_influence_range: f32,
-        mouse_pos: Vec2,
+        mouse_pos: [f32; 2],
         mouse_attract: bool,
         mouse_repel: bool,
     }
@@ -150,8 +150,8 @@ mod systems {
                 }
 
                 // Apply mouse influence
-                let mouse_dx = resources.mouse_pos.x - pos.x;
-                let mouse_dy = resources.mouse_pos.y - pos.y;
+                let mouse_dx = resources.mouse_pos[0] - pos.x;
+                let mouse_dy = resources.mouse_pos[0] - pos.y;
                 let mouse_dist_sq = mouse_dx * mouse_dx + mouse_dy * mouse_dy;
                 let mouse_range_sq =
                     resources.mouse_influence_range * resources.mouse_influence_range;
@@ -341,7 +341,7 @@ fn draw_ui(params: &mut BoidParams, world: &mut World) {
 
     // Update mouse state
     let mouse_pos = Vec2::new(mouse_position().0, mouse_position().1);
-    world.resources.mouse_pos = mouse_pos;
+    world.resources.mouse_pos = [mouse_pos.x, mouse_pos.y];
     world.resources.mouse_attract = is_mouse_button_down(MouseButton::Left);
     world.resources.mouse_repel = is_mouse_button_down(MouseButton::Right);
 
