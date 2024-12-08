@@ -149,7 +149,7 @@ macro_rules! ecs {
         pub const ALL: u32 = 0;
         $(pub const $mask: u32 = 1 << (Component::$mask as u32);)*
 
-        pub const COMPONENT_COUNT: usize = { Component::All as usize };
+        pub const COMPONENT_COUNT: usize = Component::All as usize;
 
         /// Entity ID, an index into storage and a generation counter to prevent stale references
         #[derive(Default, Clone, Copy, Debug, Eq, PartialEq, Hash, serde::Serialize, serde::Deserialize)]
