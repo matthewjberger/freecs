@@ -142,12 +142,14 @@ macro_rules! ecs {
         #[allow(clippy::upper_case_acronyms)]
         #[allow(non_camel_case_types)]
         pub enum Component {
+            None,
             $($mask,)*
             All,
         }
 
-        pub const ALL: u32 = 0;
+        pub const NONE: u32 = Component::None as u32;
         $(pub const $mask: u32 = 1 << (Component::$mask as u32);)*
+        pub const ALL: u32 = Component::All as u32;
 
         pub const COMPONENT_COUNT: usize = Component::All as usize;
 
