@@ -304,7 +304,7 @@ fn draw_ui(params: &mut BoidParams, world: &mut World) {
     };
 
     // Get current entity count
-    let entity_count = query_entities(world, ALL).len();
+    let entity_count = query_entities(world, BOID).len();
     draw_param(y, &format!("Entities: {}", entity_count));
     y += step;
     draw_param(y, &format!("FPS: {:.1}", get_fps()));
