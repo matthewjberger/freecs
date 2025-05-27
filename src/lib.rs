@@ -142,12 +142,10 @@ macro_rules! ecs {
         #[allow(clippy::upper_case_acronyms)]
         #[allow(non_camel_case_types)]
         pub enum Component {
-            None,
             $($mask,)*
             All,
         }
 
-        pub const NONE: u32 = Component::None as u32;
         $(pub const $mask: u32 = 1 << (Component::$mask as u32);)*
         pub const ALL: u32 = Component::All as u32;
 
@@ -199,6 +197,7 @@ macro_rules! ecs {
             pub resources: $resources,
             table_edges: Vec<TableEdges>,
             pending_despawns: Vec<EntityId>,
+            table_lookup: std::collections::HashMap<u32, usize>,
         }
 
         #[derive(Default, serde::Serialize, serde::Deserialize)]
@@ -614,12 +613,7 @@ macro_rules! ecs {
         }
 
         fn get_or_create_table(world: &mut $world, mask: u32) -> usize {
-            if let Some((index, _)) = world
-                .tables
-                .iter()
-                .enumerate()
-                .find(|(_, t)| t.mask == mask)
-            {
+            if let Some(&index) = world.table_lookup.get(&mask) {
                 return index;
             }
 
@@ -629,11 +623,10 @@ macro_rules! ecs {
                 ..Default::default()
             });
             world.table_edges.push(TableEdges::default());
+            world.table_lookup.insert(mask, table_index);
 
-            // Remove table registry updates and only update edges
-            for comp_mask in [
-                $($mask,)*
-            ] {
+            // Update table edges for efficient transitions
+            for comp_mask in [$($mask,)*] {
                 if let Some(comp_idx) = get_component_index(comp_mask) {
                     for (idx, table) in world.tables.iter().enumerate() {
                         if table.mask | comp_mask == mask {
