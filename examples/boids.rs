@@ -403,7 +403,7 @@ fn draw_ui(params: &mut BoidParams, world: &mut World) {
             params.spawn_count = params.spawn_count.saturating_sub(despawn_count);
 
             // Get entities from the front instead of the back to avoid swap_remove issues
-            let to_despawn: Vec<_> = query_entities(world, ALL)
+            let to_despawn: Vec<_> = get_all_entities(world)
                 .into_iter()
                 .take(despawn_count)
                 .collect();

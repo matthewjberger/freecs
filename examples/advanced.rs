@@ -26,7 +26,7 @@ pub fn main() {
     let mut world = World::default();
     world.resources.delta_time = 0.016;
     let entities = spawn_test_entities(&mut world, 1000);
-    println!("Spawned {} entities", query_entities(&world, ALL).len());
+    println!("Spawned {} entities", get_all_entities(&world).len());
     run_game_loop(&mut world);
     despawn_entities(&mut world, &entities);
 }

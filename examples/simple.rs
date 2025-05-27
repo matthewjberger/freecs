@@ -23,7 +23,7 @@ pub fn main() {
     let entity = spawn_entities(&mut world, POSITION | VELOCITY, 1)[0];
     println!(
         "Spawned {} with position and velocity",
-        query_entities(&world, ALL).len(),
+        get_all_entities(&world).len()
     );
 
     // Read a component
@@ -50,7 +50,7 @@ pub fn main() {
     );
 
     // Query all entities
-    let entities = query_entities(&world, ALL);
+    let entities = get_all_entities(&world);
     println!("All entities: {entities:?}");
 
     // Query all entities with a specific component

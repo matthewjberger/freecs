@@ -143,13 +143,15 @@ macro_rules! ecs {
         #[allow(non_camel_case_types)]
         pub enum Component {
             $($mask,)*
-            All,
         }
 
         $(pub const $mask: u32 = 1 << (Component::$mask as u32);)*
-        pub const ALL: u32 = Component::All as u32;
 
-        pub const COMPONENT_COUNT: usize = Component::All as usize;
+        pub const COMPONENT_COUNT: usize = {
+            let mut count = 0;
+            $(count += 1; let _ = Component::$mask;)*
+            count
+        };
 
         /// Entity ID, an index into storage and a generation counter to prevent stale references
         #[derive(Default, Clone, Copy, Debug, Eq, PartialEq, Hash, serde::Serialize, serde::Deserialize)]
@@ -641,6 +643,20 @@ macro_rules! ecs {
 
             table_index
         }
+
+        pub fn get_all_entities(world: &$world) -> Vec<EntityId> {
+            let mut result = Vec::new();
+            for table in &world.tables {
+                result.extend(
+                    table
+                        .entity_indices
+                        .iter()
+                        .copied()
+                        .filter(|&e| world.entity_locations.locations[e.id as usize].allocated),
+                );
+            }
+            result
+        }
     };
 }
 
@@ -774,7 +790,7 @@ mod tests {
         let entities = spawn_entities(&mut world, POSITION | VELOCITY, 3);
 
         assert_eq!(entities.len(), 3);
-        assert_eq!(query_entities(&world, ALL).len(), 3);
+        assert_eq!(get_all_entities(&world).len(), 3);
 
         // Verify each entity has the correct components
         for entity in entities {
@@ -877,12 +893,12 @@ mod tests {
 
         // Spawn multiple entities
         let entities = spawn_entities(&mut world, POSITION | VELOCITY, 3);
-        assert_eq!(query_entities(&world, ALL).len(), 3);
+        assert_eq!(get_all_entities(&world).len(), 3);
 
         // Despawn one entity
         let despawned = despawn_entities(&mut world, &[entities[1]]);
         assert_eq!(despawned.len(), 1);
-        assert_eq!(query_entities(&world, ALL).len(), 2);
+        assert_eq!(get_all_entities(&world).len(), 2);
 
         // Verify the entity is truly despawned
         assert!(get_component::<Position>(&world, entities[1], POSITION).is_none());
@@ -1276,7 +1292,7 @@ mod tests {
         let e4 = spawn_entities(&mut world, POSITION | VELOCITY | HEALTH, 1)[0];
 
         // Get all entities
-        let all = query_entities(&world, ALL);
+        let all = get_all_entities(&world);
 
         // Verify count
         assert_eq!(all.len(), 4, "Should have 4 total entities");
@@ -1289,7 +1305,7 @@ mod tests {
 
         // Test after despawning
         despawn_entities(&mut world, &[e2, e3]);
-        let remaining = query_entities(&world, ALL);
+        let remaining = get_all_entities(&world);
 
         // Verify count after despawn
         assert_eq!(remaining.len(), 2, "Should have 2 entities after despawn");
@@ -1304,7 +1320,7 @@ mod tests {
     #[test]
     fn test_all_entities_empty_world() {
         assert!(
-            query_entities(&World::default(), ALL).is_empty(),
+            get_all_entities(&World::default()).is_empty(),
             "Empty world should return empty vector"
         );
     }
@@ -1321,7 +1337,7 @@ mod tests {
         add_components(&mut world, e1, VELOCITY);
         add_components(&mut world, e2, POSITION);
 
-        let all = query_entities(&world, ALL);
+        let all = get_all_entities(&world);
         assert_eq!(
             all.len(),
             2,
