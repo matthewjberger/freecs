@@ -135,14 +135,14 @@ macro_rules! ecs {
         }
     ) => {
         /// Component masks
-        #[repr(u32)]
+        #[repr(u64)]
         #[allow(clippy::upper_case_acronyms)]
         #[allow(non_camel_case_types)]
         pub enum Component {
             $($mask,)*
         }
 
-        $(pub const $mask: u32 = 1 << (Component::$mask as u32);)*
+        $(pub const $mask: u64 = 1 << (Component::$mask as u64);)*
 
         pub const COMPONENT_COUNT: usize = {
             let mut count = 0;
@@ -195,7 +195,7 @@ macro_rules! ecs {
             pub resources: $resources,
             table_edges: Vec<TableEdges>,
             pending_despawns: Vec<EntityId>,
-            table_lookup: std::collections::HashMap<u32, usize>,
+            table_lookup: std::collections::HashMap<u64, usize>,
         }
 
         #[derive(Default)]
@@ -207,16 +207,24 @@ macro_rules! ecs {
         pub struct ComponentArrays {
             $(pub $name: Vec<$type>,)*
             pub entity_indices: Vec<EntityId>,
-            pub mask: u32,
+            pub mask: u64,
         }
 
-        #[derive(Copy, Clone, Default)]
+        #[derive(Copy, Clone)]
         struct TableEdges {
             add_edges: [Option<usize>; COMPONENT_COUNT],
             remove_edges: [Option<usize>; COMPONENT_COUNT],
         }
 
-        fn get_component_index(mask: u32) -> Option<usize> {
+        impl Default for TableEdges {
+            fn default() -> Self {
+                Self {
+                    add_edges: [None; COMPONENT_COUNT],
+                    remove_edges: [None; COMPONENT_COUNT],
+                }
+            }
+        }
+        fn get_component_index(mask: u64) -> Option<usize> {
             match mask {
                 $($mask => Some(Component::$mask as _),)*
                 _ => None,
@@ -224,7 +232,7 @@ macro_rules! ecs {
         }
 
         /// Spawn a batch of new entities with the same component mask
-        pub fn spawn_entities(world: &mut $world, mask: u32, count: usize) -> Vec<EntityId> {
+        pub fn spawn_entities(world: &mut $world, mask: u64, count: usize) -> Vec<EntityId> {
             let mut entities = Vec::with_capacity(count);
             let table_index = get_or_create_table(world, mask);
 
@@ -264,7 +272,7 @@ macro_rules! ecs {
         }
 
         /// Query for all entities that match the component mask
-        pub fn query_entities(world: &$world, mask: u32) -> Vec<EntityId> {
+        pub fn query_entities(world: &$world, mask: u64) -> Vec<EntityId> {
             let total_capacity = world
                 .tables
                 .iter()
@@ -290,7 +298,7 @@ macro_rules! ecs {
 
         /// Query for the first entity that matches the component mask
         /// Returns as soon as a match is found, instead of running for all entities
-        pub fn query_first_entity(world: &$world, mask: u32) -> Option<EntityId> {
+        pub fn query_first_entity(world: &$world, mask: u64) -> Option<EntityId> {
             for table in &world.tables {
                 if !has_components!(table, mask) {
                     continue;
@@ -309,7 +317,7 @@ macro_rules! ecs {
         }
 
         /// Get a specific component for an entity
-        pub fn get_component<T: 'static>(world: &$world, entity: EntityId, mask: u32) -> Option<&T> {
+        pub fn get_component<T: 'static>(world: &$world, entity: EntityId, mask: u64) -> Option<&T> {
            let (table_index, array_index) = location_get(&world.entity_locations, entity)?;
 
            // Early return if entity is despawned
@@ -341,7 +349,7 @@ macro_rules! ecs {
         }
 
         /// Get a mutable reference to a specific component for an entity
-        pub fn get_component_mut<T: 'static>(world: &mut $world, entity: EntityId, mask: u32) -> Option<&mut T> {
+        pub fn get_component_mut<T: 'static>(world: &mut $world, entity: EntityId, mask: u64) -> Option<&mut T> {
             let (table_index, array_index) = location_get(&world.entity_locations, entity)?;
             let table = &mut world.tables[table_index];
             if table.mask & mask == 0 {
@@ -424,7 +432,7 @@ macro_rules! ecs {
         }
 
         /// Add components to an entity
-        pub fn add_components(world: &mut $world, entity: EntityId, mask: u32) -> bool {
+        pub fn add_components(world: &mut $world, entity: EntityId, mask: u64) -> bool {
             if let Some((table_index, array_index)) = location_get(&world.entity_locations, entity) {
                 let current_mask = world.tables[table_index].mask;
                 if current_mask & mask == mask {
@@ -448,7 +456,7 @@ macro_rules! ecs {
         }
 
         /// Remove components from an entity
-        pub fn remove_components(world: &mut $world, entity: EntityId, mask: u32) -> bool {
+        pub fn remove_components(world: &mut $world, entity: EntityId, mask: u64) -> bool {
             if let Some((table_index, array_index)) = location_get(&world.entity_locations, entity) {
                 let current_mask = world.tables[table_index].mask;
                 if current_mask & mask == 0 {
@@ -473,7 +481,7 @@ macro_rules! ecs {
         }
 
         /// Get the current component mask for an entity
-        pub fn component_mask(world: &$world, entity: EntityId) -> Option<u32> {
+        pub fn component_mask(world: &$world, entity: EntityId) -> Option<u64> {
             location_get(&world.entity_locations, entity)
                 .map(|(table_index, _)| world.tables[table_index].mask)
         }
@@ -610,7 +618,7 @@ macro_rules! ecs {
             arrays.entity_indices.push(entity);
         }
 
-        fn get_or_create_table(world: &mut $world, mask: u32) -> usize {
+        fn get_or_create_table(world: &mut $world, mask: u64) -> usize {
             if let Some(&index) = world.table_lookup.get(&mask) {
                 return index;
             }

@@ -1,10 +1,10 @@
-# freecs
+# freECS
 
 [<img alt="github" src="https://img.shields.io/badge/github-matthewjberger/freecs-8da0cb?style=for-the-badge&labelColor=555555&logo=github" height="20">](https://github.com/matthewjberger/freecs)
 [<img alt="crates.io" src="https://img.shields.io/crates/v/freecs.svg?style=for-the-badge&color=fc8d62&logo=rust" height="20">](https://crates.io/crates/freecs)
 [<img alt="docs.rs" src="https://img.shields.io/badge/docs.rs-freecs-66c2a5?style=for-the-badge&labelColor=555555&logo=docs.rs" height="20">](https://docs.rs/freecs)
 
-freecs is a zero-abstraction ECS library for Rust, designed for high performance and simplicity. 🚀
+`freecs` is a zero-abstraction ECS library for Rust, designed for high performance and simplicity. 🚀
 
 It provides an archetypal table-based storage system for components, allowing for fast queries,
 fast system iteration, and parallel processing.
@@ -16,22 +16,13 @@ contains only plain data structures (no methods) and free functions that transfo
 The internal implementation is ~500 loc (aside from tests, comments, and example code),
 and does not use object orientation, generics, traits, or dynamic dispatch.
 
-### Key Features
-
-- **Table-based Storage**: Entities with the same components are stored together in memory
-- **Raw Access**: Functions work directly on the underlying vectors of components
-- **Parallel Processing**: Built-in support for processing tables in parallel with rayon
-- **Simple Queries**: Find entities by their components using bit masks
-- **Zero Overhead**: No dynamic dispatch, traits, or runtime abstractions
-- **Data Oriented**: Focus on cache coherence and performance
-
 ## Quick Start
 
 Add this to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-freecs = "0.3.0"
+freecs = "0.3.1"
 
 # (optional) add rayon if you want to parallelize systems
 rayon = "^1.10.0"
