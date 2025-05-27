@@ -15,15 +15,14 @@
 //!
 //! ```rust
 //! use freecs::{ecs, has_components};
-//! use serde::{Serialize, Deserialize};
 //!
 //! // First, define components.
-//! // They must implement: `Default + Clone + Serialize + Deserialize`
+//! // They must implement: `Default + Clone`
 //!
-//! #[derive(Default, Clone, Debug, Serialize, Deserialize)]
+//! #[derive(Default, Clone, Debug)]
 //! struct Position { x: f32, y: f32 }
 //!
-//! #[derive(Default, Clone, Debug, Serialize, Deserialize)]
+//! #[derive(Default, Clone, Debug)]
 //! struct Velocity { x: f32, y: f32 }
 //!
 //! // Then, create a world with the `ecs!` macro.
@@ -37,8 +36,6 @@
 //!   }
 //!   Resources {
 //!     delta_time: f32
-//!     // This will not be serialized
-//!     #[serde(skip)] map: HashMap<String, Box<dyn Any>>,
 //!   }
 //! }
 //! ```
@@ -154,7 +151,7 @@ macro_rules! ecs {
         };
 
         /// Entity ID, an index into storage and a generation counter to prevent stale references
-        #[derive(Default, Clone, Copy, Debug, Eq, PartialEq, Hash, serde::Serialize, serde::Deserialize)]
+        #[derive(Default, Clone, Copy, Debug, Eq, PartialEq, Hash)]
         pub struct EntityId {
             pub id: u32,
             pub generation: u32,
@@ -168,13 +165,13 @@ macro_rules! ecs {
         }
 
         // Handles allocation and reuse of entity IDs
-        #[derive(Default, serde::Serialize, serde::Deserialize)]
+        #[derive(Default)]
         pub struct EntityAllocator {
             next_id: u32,
             free_ids: Vec<(u32, u32)>, // (id, next_generation)
         }
 
-        #[derive(Copy, Clone, Default, serde::Serialize, serde::Deserialize)]
+        #[derive(Copy, Clone, Default)]
         struct EntityLocation {
             generation: u32,
             table_index: u16,
@@ -183,38 +180,37 @@ macro_rules! ecs {
         }
 
         /// Entity location cache for quick access
-        #[derive(Default, serde::Serialize, serde::Deserialize)]
+        #[derive(Default)]
         pub struct EntityLocations {
             locations: Vec<EntityLocation>,
         }
 
         /// A collection of component tables and resources
-        #[derive(Default, serde::Serialize, serde::Deserialize)]
+        #[derive(Default)]
+        #[allow(unused)]
         pub struct $world {
             pub entity_locations: EntityLocations,
             pub tables: Vec<ComponentArrays>,
             pub allocator: EntityAllocator,
-            #[serde(skip)]
-            #[allow(unused)]
             pub resources: $resources,
             table_edges: Vec<TableEdges>,
             pending_despawns: Vec<EntityId>,
             table_lookup: std::collections::HashMap<u32, usize>,
         }
 
-        #[derive(Default, serde::Serialize, serde::Deserialize)]
+        #[derive(Default)]
         pub struct $resources {
             $($(#[$attr])* pub $resource_name: $resource_type,)*
         }
 
-        #[derive(Default, serde::Serialize, serde::Deserialize)]
+        #[derive(Default)]
         pub struct ComponentArrays {
             $(pub $name: Vec<$type>,)*
             pub entity_indices: Vec<EntityId>,
             pub mask: u32,
         }
 
-        #[derive(Copy, Clone, Default, serde::Serialize, serde::Deserialize)]
+        #[derive(Copy, Clone, Default)]
         struct TableEdges {
             add_edges: [Option<usize>; COMPONENT_COUNT],
             remove_edges: [Option<usize>; COMPONENT_COUNT],
@@ -670,7 +666,6 @@ macro_rules! has_components {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rayon::*;
     use std::collections::HashSet;
 
     ecs! {
@@ -683,7 +678,6 @@ mod tests {
         }
         Resources {
             _delta_time: f32,
-            #[serde(skip)] _map: std::collections::HashMap<String, Box<dyn std::any::Any>>,
         }
     }
 
@@ -691,37 +685,31 @@ mod tests {
     mod components {
         use super::*;
 
-        #[derive(Default, Debug, Copy, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
+        #[derive(Default, Debug, Copy, Clone, PartialEq)]
         pub struct Parent(pub EntityId);
 
-        #[derive(Default, Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
+        #[derive(Default, Debug, Clone, PartialEq)]
         pub struct Node {
             pub id: EntityId,
             pub parent: Option<EntityId>,
             pub children: Vec<EntityId>,
         }
 
-        #[derive(Default, Debug, Clone, serde::Serialize, serde::Deserialize)]
+        #[derive(Default, Debug, Clone)]
         pub struct Position {
             pub x: f32,
             pub y: f32,
         }
 
-        #[derive(Default, Debug, Clone, serde::Serialize, serde::Deserialize)]
+        #[derive(Default, Debug, Clone)]
         pub struct Velocity {
             pub x: f32,
             pub y: f32,
         }
 
-        #[derive(Default, Debug, Clone, serde::Serialize, serde::Deserialize)]
+        #[derive(Default, Debug, Clone)]
         pub struct Health {
             pub value: f32,
-        }
-
-        #[derive(Default, Debug, Clone, serde::Serialize, serde::Deserialize)]
-        pub struct EntityRefs {
-            pub parent: EntityId,
-            pub children: Vec<EntityId>,
         }
     }
 

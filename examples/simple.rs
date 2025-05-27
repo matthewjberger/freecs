@@ -104,7 +104,7 @@ use components::*;
 mod components {
     use super::*;
 
-    #[derive(Default, Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
+    #[derive(Default, Debug, Clone, PartialEq)]
     pub struct Node {
         pub id: EntityId,
         pub parent: Option<EntityId>,
