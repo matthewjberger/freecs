@@ -31,11 +31,10 @@ Add this to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-freecs = "0.2.28"
-serde = { version = "1.0", features = ["derive"] }
+freecs = "0.3.0"
 
 # (optional) add rayon if you want to parallelize systems
-rayon = "1.10.0" # or higher
+rayon = "^1.10.0"
 ```
 
 And in `main.rs`:
@@ -52,8 +51,6 @@ ecs! {
     }
     Resources {
         delta_time: f32
-        // This will not be serialized
-        #[serde(skip)] _map: std::collections::HashMap<String, Box<dyn std::any::Any>>,
     }
 }
 
@@ -115,19 +112,19 @@ pub fn main() {
 
 use components::*;
 mod components {
-    #[derive(Default, Debug, Clone, serde::Serialize, serde::Deserialize)]
+    #[derive(Default, Debug, Clone)]
     pub struct Position {
         pub x: f32,
         pub y: f32,
     }
 
-    #[derive(Default, Debug, Clone, serde::Serialize, serde::Deserialize)]
+    #[derive(Default, Debug, Clone)]
     pub struct Velocity {
         pub x: f32,
         pub y: f32,
     }
 
-    #[derive(Default, Debug, Clone, serde::Serialize, serde::Deserialize)]
+    #[derive(Default, Debug, Clone)]
     pub struct Health {
         pub value: f32,
     }

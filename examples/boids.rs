@@ -25,22 +25,22 @@ ecs! {
     }
 }
 
-#[derive(Default, Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
+#[derive(Default, Debug, Clone, Copy)]
 struct Position {
     x: f32,
     y: f32,
 }
 
-#[derive(Default, Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
+#[derive(Default, Debug, Clone, Copy)]
 struct Velocity {
     x: f32,
     y: f32,
 }
 
-#[derive(Default, Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
+#[derive(Default, Debug, Clone, Copy)]
 struct Boid;
 
-#[derive(Default, Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
+#[derive(Default, Debug, Clone, Copy)]
 struct BoidColor {
     r: f32,
     g: f32,

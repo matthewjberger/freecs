@@ -22,43 +22,43 @@ ecs! {
 
 use components::*;
 mod components {
-    #[derive(Default, Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
+    #[derive(Default, Debug, Clone, Copy)]
     pub struct Position {
         pub x: f32,
         pub y: f32,
     }
 
-    #[derive(Default, Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
+    #[derive(Default, Debug, Clone, Copy)]
     pub struct Rotation {
         pub radians: f32,
     }
 
-    #[derive(Default, Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
+    #[derive(Default, Debug, Clone, Copy)]
     pub struct Velocity {
         pub x: f32,
         pub y: f32,
     }
 
-    #[derive(Default, Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
+    #[derive(Default, Debug, Clone, Copy)]
     pub struct Player;
 
-    #[derive(Default, Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
+    #[derive(Default, Debug, Clone, Copy)]
     pub struct Thrust {
         pub power: f32,
     }
 
-    #[derive(Default, Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
+    #[derive(Default, Debug, Clone, Copy)]
     pub struct Projectile;
 
-    #[derive(Default, Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
+    #[derive(Default, Debug, Clone, Copy)]
     pub struct Asteroid;
 
-    #[derive(Default, Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
+    #[derive(Default, Debug, Clone, Copy)]
     pub struct Radius {
         pub value: f32,
     }
 
-    #[derive(Default, Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
+    #[derive(Default, Debug, Clone, Copy)]
     pub struct Lifetime {
         pub remaining: f32,
     }

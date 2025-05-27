@@ -221,19 +221,19 @@ mod systems {
 
 use components::*;
 mod components {
-    #[derive(Default, Debug, Clone, serde::Serialize, serde::Deserialize)]
+    #[derive(Default, Debug, Clone)]
     pub struct Position {
         pub x: f32,
         pub y: f32,
     }
 
-    #[derive(Default, Debug, Clone, serde::Serialize, serde::Deserialize)]
+    #[derive(Default, Debug, Clone)]
     pub struct Velocity {
         pub x: f32,
         pub y: f32,
     }
 
-    #[derive(Default, Debug, Clone, serde::Serialize, serde::Deserialize)]
+    #[derive(Default, Debug, Clone)]
     pub struct Health {
         pub value: f32,
     }

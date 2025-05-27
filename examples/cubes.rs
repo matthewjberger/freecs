@@ -18,35 +18,35 @@ use components::*;
 mod components {
     use super::*;
 
-    #[derive(Default, Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
+    #[derive(Default, Debug, Clone, Copy)]
     pub struct Position3D {
         pub x: f32,
         pub y: f32,
         pub z: f32,
     }
 
-    #[derive(Default, Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
+    #[derive(Default, Debug, Clone, Copy)]
     pub struct Rotation {
         pub x: f32,
         pub y: f32,
         pub z: f32,
     }
 
-    #[derive(Default, Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
+    #[derive(Default, Debug, Clone, Copy)]
     pub struct Scale {
         pub x: f32,
         pub y: f32,
         pub z: f32,
     }
 
-    #[derive(Default, Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
+    #[derive(Default, Debug, Clone, Copy)]
     pub struct Velocity {
         pub x: f32,
         pub y: f32,
         pub z: f32,
     }
 
-    #[derive(Default, Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
+    #[derive(Default, Debug, Clone, Copy)]
     pub struct Gravity(pub f32);
 }
 
