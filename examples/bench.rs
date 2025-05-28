@@ -854,27 +854,151 @@ fn print_header() {
     println!("🚀 FreECS Performance Benchmark Suite");
     println!("===========================================");
     println!(
-        "{:<35} | {:<8} | {:<10} | {:<10} | {:<10} | {:<12} | {:<10}",
-        "Benchmark", "Entities", "Avg (ms)", "Min (ms)", "Max (ms)", "Entities/sec", "Throughput"
+        "{:<35} | {:<8} | {:<10} | {:<10} | {:<10} | {:<12} | {:<10} | {:<8} | {:<8}",
+        "Benchmark", "Entities", "Avg (ms)", "Min (ms)", "Max (ms)", "Entities/sec", "Throughput", "Memory", "Per Ent"
     );
-    println!("{}", "=".repeat(120));
+    println!("{}", "=".repeat(140));
 }
 
 fn run_benchmark_suite(entity_count: usize, iterations: usize) {
-    let benchmarks = vec![
-        benchmark_entity_creation(entity_count, iterations),
-        benchmark_sequential_movement_system(entity_count, iterations),
-        benchmark_parallel_movement_system(entity_count, iterations),
-        benchmark_sequential_physics_system(entity_count, iterations),
-        benchmark_parallel_physics_system(entity_count, iterations),
-        benchmark_multi_component_query(entity_count, iterations),
-        benchmark_component_transitions(entity_count, iterations),
-        benchmark_full_game_simulation(entity_count, iterations),
-    ];
+     // Original benchmarks
+     benchmark_entity_creation(entity_count, iterations).print();
+     benchmark_sequential_movement_system(entity_count, iterations).print();
+     benchmark_parallel_movement_system(entity_count, iterations).print();
+     benchmark_sequential_physics_system(entity_count, iterations).print();
+     benchmark_parallel_physics_system(entity_count, iterations).print();
+     benchmark_multi_component_query(entity_count, iterations).print();
+     benchmark_component_transitions(entity_count, iterations).print();
+     benchmark_full_game_simulation(entity_count, iterations).print();
+     
+     // New benchmarks
+     benchmark_entity_despawning(entity_count, iterations / 4).print(); // Fewer iterations since it recreates world each time
+     
+     if entity_count <= 10_000 { // Only run fragmentation test on smaller entity counts
+         benchmark_table_fragmentation(entity_count, iterations).print();
+     }
+     
+     let memory_result = benchmark_memory_usage(entity_count, iterations);
+     memory_result.print();
+}
 
-    for result in benchmarks {
-        result.print();
+fn benchmark_entity_despawning(entity_count: usize, iterations: usize) -> BenchmarkResult {
+    let mut times = Vec::new();
+    
+    for _ in 0..iterations {
+        // Setup entities for each iteration
+        let mut world = World::default();
+        let entities = spawn_entities(&mut world, POSITION | VELOCITY | HEALTH, entity_count);
+        
+        let start = Instant::now();
+        despawn_entities(&mut world, &entities);
+        times.push(start.elapsed());
     }
+
+    let data_size = entity_count * (std::mem::size_of::<Position>() + std::mem::size_of::<Velocity>() + std::mem::size_of::<Health>());
+    BenchmarkResult::new("Entity Despawning".to_string(), entity_count, &times, data_size)
+}
+
+fn benchmark_table_fragmentation(entity_count: usize, iterations: usize) -> BenchmarkResult {
+    let mut world = World::default();
+    
+    // Create maximum fragmentation: each entity gets a unique component combination
+    let components = [POSITION, VELOCITY, HEALTH, PHYSICS, AI, RENDER, TRANSFORM, INVENTORY];
+    for i in 0..entity_count {
+        let mask = components.iter().enumerate()
+            .filter(|(idx, _)| (i >> idx) & 1 == 1)
+            .map(|(_, &comp)| comp)
+            .fold(POSITION, |acc, comp| acc | comp); // Always include POSITION
+        spawn_entities(&mut world, mask, 1);
+    }
+
+    let mut times = Vec::new();
+    for _ in 0..iterations {
+        let start = Instant::now();
+        // Query across all fragmented tables
+        let _results = query_entities(&world, POSITION);
+        times.push(start.elapsed());
+    }
+
+    let data_size = entity_count * std::mem::size_of::<EntityId>();
+    BenchmarkResult::new(format!("Fragmented Query ({} tables)", world.tables.len()), entity_count, &times, data_size)
+}
+
+// Enhanced BenchmarkResult to track memory
+#[derive(Debug)]
+pub struct MemoryBenchmarkResult {
+    pub base: BenchmarkResult,
+    pub memory_used_mb: f64,
+    pub memory_per_entity_bytes: f64,
+}
+
+impl MemoryBenchmarkResult {
+    pub fn new(name: String, entity_count: usize, times: &[Duration], data_size_bytes: usize, world: &World) -> Self {
+        let base = BenchmarkResult::new(name, entity_count, times, data_size_bytes);
+        let memory_used = calculate_world_memory_usage(world);
+        let memory_used_mb = memory_used as f64 / (1024.0 * 1024.0);
+        let memory_per_entity_bytes = if entity_count > 0 { memory_used as f64 / entity_count as f64 } else { 0.0 };
+        
+        Self { base, memory_used_mb, memory_per_entity_bytes }
+    }
+
+    pub fn print(&self) {
+        println!(
+            "{:<35} | {:>8} | {:>8.3}ms | {:>8.3}ms | {:>8.3}ms | {:>12.0} | {:>8.3} GB/s | {:>8.1} MB | {:>6.0} B/ent",
+            self.base.name,
+            self.base.entity_count,
+            self.base.avg_time_ms,
+            self.base.min_time_ms,
+            self.base.max_time_ms,
+            self.base.entities_per_second,
+            self.base.throughput_gb_per_sec,
+            self.memory_used_mb,
+            self.memory_per_entity_bytes
+        );
+    }
+}
+
+fn calculate_world_memory_usage(world: &World) -> usize {
+    let mut total = 0;
+    
+    // Entity locations
+    total += world.entity_locations.locations.len() * std::mem::size_of::<EntityLocation>();
+    
+    // Tables
+    for table in &world.tables {
+        total += table.entity_indices.capacity() * std::mem::size_of::<EntityId>();
+        total += table.position.capacity() * std::mem::size_of::<Position>();
+        total += table.velocity.capacity() * std::mem::size_of::<Velocity>();
+        total += table.health.capacity() * std::mem::size_of::<Health>();
+        total += table.physics.capacity() * std::mem::size_of::<Physics>();
+        total += table.transform.capacity() * std::mem::size_of::<Transform>();
+        total += table.render.capacity() * std::mem::size_of::<Render>();
+        total += table.ai.capacity() * std::mem::size_of::<AI>();
+        total += table.inventory.capacity() * std::mem::size_of::<Inventory>();
+        // Add other components...
+        total += table.component_a.capacity() * std::mem::size_of::<ComponentA>();
+        total += table.component_b.capacity() * std::mem::size_of::<ComponentB>();
+        // ... other components
+    }
+    
+    // Table lookup HashMap
+    total += world.table_lookup.capacity() * (std::mem::size_of::<u64>() + std::mem::size_of::<usize>());
+    
+    total
+}
+
+fn benchmark_memory_usage(entity_count: usize, iterations: usize) -> MemoryBenchmarkResult {
+    let mut world = World::default();
+    let mut times = Vec::new();
+    
+    for _ in 0..iterations {
+        let start = Instant::now();
+        let _entities = spawn_entities(&mut world, POSITION | VELOCITY | HEALTH | PHYSICS, entity_count / iterations);
+        times.push(start.elapsed());
+    }
+
+    let data_size = entity_count * (std::mem::size_of::<Position>() + std::mem::size_of::<Velocity>() + std::mem::size_of::<Health>() + std::mem::size_of::<Physics>());
+    MemoryBenchmarkResult::new("Memory Usage".to_string(), entity_count, &times, data_size, &world)
 }
 
 fn main() {
