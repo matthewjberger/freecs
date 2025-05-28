@@ -8,7 +8,7 @@
 //! at compile time. The generated code contains only plain data structures and free functions that
 //! transform them.
 //!
-//! The core implementation is ~500 loc, is fully statically dispatched and
+//! The core implementation is ~600 loc, is fully statically dispatched and
 //! does not use object orientation, generics, or traits.
 //!
 //! # Creating a World
@@ -134,7 +134,6 @@ macro_rules! ecs {
             $($(#[$attr:meta])*  $resource_name:ident: $resource_type:ty),* $(,)?
         }
     ) => {
-        /// Component masks
         #[repr(u64)]
         #[allow(clippy::upper_case_acronyms)]
         #[allow(non_camel_case_types)]
@@ -150,7 +149,6 @@ macro_rules! ecs {
             count
         };
 
-        /// Entity ID, an index into storage and a generation counter to prevent stale references
         #[derive(Default, Clone, Copy, Debug, Eq, PartialEq, Hash)]
         pub struct EntityId {
             pub id: u32,
@@ -164,7 +162,6 @@ macro_rules! ecs {
             }
         }
 
-        // Handles allocation and reuse of entity IDs
         #[derive(Default)]
         pub struct EntityAllocator {
             next_id: u32,
@@ -179,13 +176,11 @@ macro_rules! ecs {
             allocated: bool,
         }
 
-        /// Entity location cache for quick access
         #[derive(Default)]
         pub struct EntityLocations {
             locations: Vec<EntityLocation>,
         }
 
-        /// A collection of component tables and resources
         #[derive(Default)]
         #[allow(unused)]
         pub struct $world {
@@ -200,113 +195,80 @@ macro_rules! ecs {
 
         #[allow(unused)]
         impl $world {
-        $(
-            paste::paste! {
-                /// Get component
-                #[inline]
-                pub fn [<get_ $name>](&self, entity: EntityId) -> Option<&$type> {
-                    get_component::<$type>(self, entity, $mask)
-                }
+            $(
+                paste::paste! {
+                    #[inline]
+                    pub fn [<get_ $name>](&self, entity: EntityId) -> Option<&$type> {
+                        get_component::<$type>(self, entity, $mask)
+                    }
 
-                /// Get mutable component
-                #[inline]
-                pub fn [<get_ $name _mut>](&mut self, entity: EntityId) -> Option<&mut $type> {
-                    get_component_mut::<$type>(self, entity, $mask)
+                    #[inline]
+                    pub fn [<get_ $name _mut>](&mut self, entity: EntityId) -> Option<&mut $type> {
+                        get_component_mut::<$type>(self, entity, $mask)
+                    }
                 }
+            )*
+
+            #[inline]
+            pub fn get_component<T: 'static>(&self, entity: EntityId, mask: u64) -> Option<&T> {
+                get_component::<T>(self, entity, mask)
             }
-        )*
 
-        /// Get component (generic) - wraps get_component
-        #[inline]
-        pub fn get_component<T: 'static>(&self, entity: EntityId, mask: u64) -> Option<&T> {
-            get_component::<T>(self, entity, mask)
-        }
+            #[inline]
+            pub fn get_component_mut<T: 'static>(&mut self, entity: EntityId, mask: u64) -> Option<&mut T> {
+                get_component_mut::<T>(self, entity, mask)
+            }
 
-        /// Get mutable component (generic) - wraps get_component_mut
-        #[inline]
-        pub fn get_component_mut<T: 'static>(&mut self, entity: EntityId, mask: u64) -> Option<&mut T> {
-            get_component_mut::<T>(self, entity, mask)
-        }
+            #[inline]
+            pub fn spawn_entities(&mut self, mask: u64, count: usize) -> Vec<EntityId> {
+                spawn_entities(self, mask, count)
+            }
 
-        /// Spawn entities - wraps spawn_entities
-        #[inline]
-        pub fn spawn_entities(&mut self, mask: u64, count: usize) -> Vec<EntityId> {
-            spawn_entities(self, mask, count)
-        }
+            #[inline]
+            pub fn despawn_entities(&mut self, entities: &[EntityId]) -> Vec<EntityId> {
+                despawn_entities(self, entities)
+            }
 
-        /// Despawn entities - wraps despawn_entities
-        #[inline]
-        pub fn despawn_entities(&mut self, entities: &[EntityId]) -> Vec<EntityId> {
-            despawn_entities(self, entities)
-        }
+            #[inline]
+            pub fn get_all_entities(&self) -> Vec<EntityId> {
+                get_all_entities(self)
+            }
 
-        /// Get all entities - wraps get_all_entities
-        #[inline]
-        pub fn get_all_entities(&self) -> Vec<EntityId> {
-            get_all_entities(self)
-        }
+            #[inline]
+            pub fn add_components(&mut self, entity: EntityId, mask: u64) -> bool {
+                add_components(self, entity, mask)
+            }
 
-        /// Add components - wraps add_components
-        #[inline]
-        pub fn add_components(&mut self, entity: EntityId, mask: u64) -> bool {
-            add_components(self, entity, mask)
-        }
+            #[inline]
+            pub fn remove_components(&mut self, entity: EntityId, mask: u64) -> bool {
+                remove_components(self, entity, mask)
+            }
 
-        /// Remove components - wraps remove_components
-        #[inline]
-        pub fn remove_components(&mut self, entity: EntityId, mask: u64) -> bool {
-            remove_components(self, entity, mask)
-        }
+            #[inline]
+            pub fn component_mask(&self, entity: EntityId) -> Option<u64> {
+                component_mask(self, entity)
+            }
 
-        /// Get component mask - wraps component_mask
-        #[inline]
-        pub fn component_mask(&self, entity: EntityId) -> Option<u64> {
-            component_mask(self, entity)
-        }
+            #[inline]
+            pub fn query_entities(&self, mask: u64) -> Vec<EntityId> {
+                query_entities(self, mask)
+            }
 
-        /// Query entities - wraps query_entities
-        #[inline]
-        pub fn query_entities(&self, mask: u64) -> Vec<EntityId> {
-            query_entities(self, mask)
-        }
+            #[inline]
+            pub fn query_first_entity(&self, mask: u64) -> Option<EntityId> {
+                query_first_entity(self, mask)
+            }
 
-        /// Query first entity - wraps query_first_entity
-        #[inline]
-        pub fn query_first_entity(&self, mask: u64) -> Option<EntityId> {
-            query_first_entity(self, mask)
+            #[inline]
+            pub fn entity_has_components(&self, entity: EntityId, components: u64) -> bool {
+                entity_has_components(self, entity, components)
+            }
         }
-    }
 
         #[derive(Default)]
         pub struct $resources {
             $($(#[$attr])* pub $resource_name: $resource_type,)*
         }
-
-        #[allow(unused)]
-        impl $resources {
-            $(
-                paste::paste! {
-                    /// Get resource
-                    #[inline]
-                    pub fn [<get_ $resource_name>](&self) -> &$resource_type {
-                        &self.$resource_name
-                    }
-
-                    /// Get mutable resource
-                    #[inline]
-                    pub fn [<get_ $resource_name _mut>](&mut self) -> &mut $resource_type {
-                        &mut self.$resource_name
-                    }
-
-                    /// Set resource
-                    #[inline]
-                    pub fn [<set_ $resource_name>](&mut self, value: $resource_type) {
-                        self.$resource_name = value;
-                    }
-                }
-            )*
-        }
-
 
         #[derive(Default)]
         pub struct ComponentArrays {
@@ -337,14 +299,12 @@ macro_rules! ecs {
             }
         }
 
-        /// Spawn a batch of new entities with the same component mask
         pub fn spawn_entities(world: &mut $world, mask: u64, count: usize) -> Vec<EntityId> {
             let mut entities = Vec::with_capacity(count);
             let table_index = get_or_create_table(world, mask);
 
             world.tables[table_index].entity_indices.reserve(count);
 
-            // Reserve space in components
             $(
                 if mask & $mask != 0 {
                     world.tables[table_index].$name.reserve(count);
@@ -378,7 +338,6 @@ macro_rules! ecs {
         }
 
         #[allow(dead_code)]
-        /// Query for all entities that match the component mask
         pub fn query_entities(world: &$world, mask: u64) -> Vec<EntityId> {
             let total_capacity = world
                 .tables
@@ -390,7 +349,6 @@ macro_rules! ecs {
             let mut result = Vec::with_capacity(total_capacity);
             for table in &world.tables {
                 if table.mask & mask == mask {
-                    // Only include allocated entities
                     result.extend(
                         table
                             .entity_indices
@@ -404,8 +362,6 @@ macro_rules! ecs {
         }
 
         #[allow(dead_code)]
-        /// Query for the first entity that matches the component mask
-        /// Returns as soon as a match is found, instead of running for all entities
         pub fn query_first_entity(world: &$world, mask: u64) -> Option<EntityId> {
             for table in &world.tables {
                 if !table_has_components!(table, mask) {
@@ -456,7 +412,6 @@ macro_rules! ecs {
            None
         }
 
-        /// Get a mutable reference to a specific component for an entity
         pub fn get_component_mut<T: 'static>(world: &mut $world, entity: EntityId, mask: u64) -> Option<&mut T> {
             let (table_index, array_index) = location_get(&world.entity_locations, entity)?;
             let table = &mut world.tables[table_index];
@@ -482,34 +437,28 @@ macro_rules! ecs {
         }
 
         #[allow(dead_code)]
-        /// Despawn a batch of entities
         pub fn despawn_entities(world: &mut $world, entities: &[EntityId]) -> Vec<EntityId> {
             let mut despawned = Vec::with_capacity(entities.len());
             let mut tables_to_update = Vec::new();
 
-            // First pass: mark entities as despawned and collect their table locations
             for &entity in entities {
                 let id = entity.id as usize;
                 if id < world.entity_locations.locations.len() {
                     let loc = &mut world.entity_locations.locations[id];
                     if loc.allocated && loc.generation == entity.generation {
-                        // Get table info before marking as despawned
                         let table_idx = loc.table_index as usize;
                         let array_idx = loc.array_index as usize;
 
-                        // Mark as despawned
                         loc.allocated = false;
                         loc.generation = loc.generation.wrapping_add(1);
                         world.allocator.free_ids.push((entity.id, loc.generation));
 
-                        // Collect table info for updates
                         tables_to_update.push((table_idx, array_idx));
                         despawned.push(entity);
                     }
                 }
             }
 
-            // Second pass: remove entities from tables in reverse order to maintain indices
             for (table_idx, array_idx) in tables_to_update.into_iter().rev() {
                 if table_idx >= world.tables.len() {
                     continue;
@@ -518,7 +467,6 @@ macro_rules! ecs {
                 let table = &mut world.tables[table_idx];
                 let last_idx = table.entity_indices.len() - 1;
 
-                // If we're not removing the last element, update the moved entity's location
                 if array_idx < last_idx {
                     let moved_entity = table.entity_indices[last_idx];
                     if let Some(loc) = world.entity_locations.locations.get_mut(moved_entity.id as usize) {
@@ -528,7 +476,6 @@ macro_rules! ecs {
                     }
                 }
 
-                // Remove the entity's components
                 $(
                     if table.mask & $mask != 0 {
                         table.$name.swap_remove(array_idx);
@@ -540,7 +487,6 @@ macro_rules! ecs {
             despawned
         }
 
-        /// Add components to an entity
         pub fn add_components(world: &mut $world, entity: EntityId, mask: u64) -> bool {
             if let Some((table_index, array_index)) = location_get(&world.entity_locations, entity) {
                 let current_mask = world.tables[table_index].mask;
@@ -564,7 +510,6 @@ macro_rules! ecs {
             }
         }
 
-        /// Remove components from an entity
         pub fn remove_components(world: &mut $world, entity: EntityId, mask: u64) -> bool {
             if let Some((table_index, array_index)) = location_get(&world.entity_locations, entity) {
                 let current_mask = world.tables[table_index].mask;
@@ -590,7 +535,6 @@ macro_rules! ecs {
         }
 
         #[allow(dead_code)]
-        /// Get the current component mask for an entity
         pub fn component_mask(world: &$world, entity: EntityId) -> Option<u64> {
             location_get(&world.entity_locations, entity)
                 .map(|(table_index, _)| world.tables[table_index].mask)
@@ -606,11 +550,6 @@ macro_rules! ecs {
 
             $(
                 if arrays.mask & $mask != 0 {
-                    // SAFETY: This swap_remove operation is safe because:
-                    // 1. We verified the component exists via mask check
-                    // 2. The index is guaranteed valid from the caller
-                    // 3. swap_remove properly handles the memory management
-                    // 4. Vec::swap_remove moves elements without cloning
                     arrays.$name.swap_remove(index);
                 }
             )*
@@ -626,19 +565,11 @@ macro_rules! ecs {
             from_index: usize,
             to_table: usize,
         ) {
-            // Extract components using mem::take (zero-cost for existing components)
             let components = {
                 let from_table_ref = &mut world.tables[from_table];
                 (
                     $(
                         if from_table_ref.mask & $mask != 0 {
-                            // SAFETY: This mem::take operation is safe because:
-                            // 1. from_index is guaranteed valid by location_get() bounds checking
-                            // 2. The component exists in the table (verified by mask check)
-                            // 3. mem::take replaces the value with Default::default()
-                            // 4. The taken value will be immediately moved to destination table
-                            // 5. remove_from_table will later clean up the Default placeholder
-                            // 6. No other code can access this component during the move operation
                             Some(std::mem::take(&mut from_table_ref.$name[from_index]))
                         } else {
                             None
@@ -647,17 +578,10 @@ macro_rules! ecs {
                 )
             };
 
-            // Add to destination table
             add_to_table(&mut world.tables[to_table], entity, components);
             let new_index = world.tables[to_table].entity_indices.len() - 1;
             location_insert(&mut world.entity_locations, entity, (to_table, new_index));
 
-            // Remove from source table
-            // SAFETY: This remove operation is safe because:
-            // 1. from_index was validated by location_get()
-            // 2. Any mem::taken components are now Default::default() placeholders
-            // 3. remove_from_table uses swap_remove which properly handles cleanup
-            // 4. Entity location updates maintain consistency between tables and location cache
             if let Some(swapped) = remove_from_table(&mut world.tables[from_table], from_index) {
                 location_insert(
                     &mut world.entity_locations,
@@ -674,7 +598,6 @@ macro_rules! ecs {
             }
 
             let location = &locations.locations[id];
-            // Only return location if entity is allocated AND generation matches
             if !location.allocated || location.generation != entity.generation {
                 return None;
             }
@@ -732,7 +655,7 @@ macro_rules! ecs {
         fn add_to_table(
             arrays: &mut ComponentArrays,
             entity: EntityId,
-            components: ( $(Option<$type>,)* ),  // ← CORRECT - expects values
+            components: ( $(Option<$type>,)* ),
         ) {
             let ($($name,)*) = components;
             $(
@@ -760,7 +683,6 @@ macro_rules! ecs {
             world.table_edges.push(TableEdges::default());
             world.table_lookup.insert(mask, table_index);
 
-            // Update table edges for efficient transitions
             for comp_mask in [$($mask,)*] {
                 if let Some(comp_idx) = get_component_index(comp_mask) {
                     for (idx, table) in world.tables.iter().enumerate() {
@@ -790,6 +712,11 @@ macro_rules! ecs {
                 );
             }
             result
+        }
+
+        #[allow(dead_code)]
+        pub fn entity_has_components(world: &$world, entity: EntityId, components: u64) -> bool {
+            component_mask(world, entity).unwrap_or(0) & components != 0
         }
     };
 }
@@ -1748,5 +1675,13 @@ mod tests {
             "✓ Successfully moved {} non-cloneable components through table transitions",
             entities.len() + 1
         );
+    }
+
+    #[test]
+    fn entity_has_components_test() {
+        let mut world = World::default();
+        let entity = spawn_entities(&mut world, POSITION | VELOCITY, 1)[0];
+        assert!(entity_has_components(&world, entity, POSITION | VELOCITY));
+        assert!(!entity_has_components(&world, entity, HEALTH));
     }
 }
