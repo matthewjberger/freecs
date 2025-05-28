@@ -124,6 +124,9 @@
 //! The table-based design means entities with the same components are stored together in contiguous
 //! memory, maximizing cache utilization. Component access and queries are O(1), with table transitions
 //! being the only O(n) operations.
+
+pub use paste;
+
 #[macro_export]
 macro_rules! ecs {
     (
@@ -196,7 +199,7 @@ macro_rules! ecs {
         #[allow(unused)]
         impl $world {
             $(
-                paste::paste! {
+                $crate::paste::paste! {
                     #[inline]
                     pub fn [<get_ $name>](&self, entity: EntityId) -> Option<&$type> {
                         get_component::<$type>(self, entity, $mask)
