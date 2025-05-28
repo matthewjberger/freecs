@@ -1,4 +1,4 @@
-use freecs::{ecs, has_components};
+use freecs::{ecs, table_has_components};
 use rayon::prelude::*;
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -84,7 +84,7 @@ fn query_entity_stats(world: &World) -> Vec<EntityStats> {
     world
         .tables
         .par_iter() // Parallel iteration over tables
-        .filter(|table| has_components!(table, POSITION | HEALTH))
+        .filter(|table| table_has_components!(table, POSITION | HEALTH))
         .flat_map(|table| {
             // Create parallel iterator over components we want
             table
@@ -109,7 +109,7 @@ fn query_entities_in_radius(world: &World, radius: f32) -> Vec<EntityId> {
     world
         .tables
         .par_iter()
-        .filter(|table| has_components!(table, POSITION))
+        .filter(|table| table_has_components!(table, POSITION))
         .flat_map(|table| {
             table
                 .entity_indices
@@ -131,7 +131,7 @@ mod systems {
     pub fn run_systems(world: &mut World) {
         let delta_time = world.resources.delta_time;
         world.tables.par_iter_mut().for_each(|table| {
-            if has_components!(table, POSITION | VELOCITY | HEALTH) {
+            if table_has_components!(table, POSITION | VELOCITY | HEALTH) {
                 // Parallel movement system with access to entity IDs
                 movement_system(table, delta_time);
 
@@ -183,7 +183,7 @@ mod systems {
         let interactions = Mutex::new(HashMap::new());
 
         world.tables.par_iter().for_each(|table| {
-            if has_components!(table, POSITION | HEALTH) {
+            if table_has_components!(table, POSITION | HEALTH) {
                 // Find entities that are close to each other
                 for first_entity in 0..table.entity_indices.len() {
                     for second_entity in (first_entity + 1)..table.entity_indices.len() {

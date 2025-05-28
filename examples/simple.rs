@@ -1,4 +1,4 @@
-use freecs::{ecs, has_components};
+use freecs::{ecs, table_has_components};
 use rayon::prelude::*;
 
 ecs! {
@@ -15,9 +15,6 @@ ecs! {
 
 pub fn main() {
     let mut world = World::default();
-
-    // Inject resources for systems to use
-    world.resources.delta_time = 0.016;
 
     // Spawn entities with components
     let entity = spawn_entities(&mut world, POSITION | VELOCITY, 1)[0];
@@ -139,10 +136,10 @@ mod systems {
     pub fn run_systems(world: &mut World) {
         let delta_time = world.resources.delta_time;
         world.tables.par_iter_mut().for_each(|table| {
-            if has_components!(table, POSITION | VELOCITY | HEALTH) {
+            if table_has_components!(table, POSITION | VELOCITY | HEALTH) {
                 update_positions_system(&mut table.position, &table.velocity, delta_time);
             }
-            if has_components!(table, HEALTH) {
+            if table_has_components!(table, HEALTH) {
                 health_system(&mut table.health);
             }
         });

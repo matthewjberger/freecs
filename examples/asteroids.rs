@@ -1,4 +1,4 @@
-use freecs::{ecs, has_components};
+use freecs::{ecs, table_has_components};
 use macroquad::prelude::*;
 
 ecs! {
@@ -81,19 +81,19 @@ mod systems {
         let screen_h = screen_height();
 
         world.tables.iter_mut().for_each(|table| {
-            if has_components!(table, POSITION | VELOCITY) {
+            if table_has_components!(table, POSITION | VELOCITY) {
                 movement_system(table, dt);
             }
 
-            if has_components!(table, POSITION) {
+            if table_has_components!(table, POSITION) {
                 wrap_position_system(table, screen_w, screen_h);
             }
 
-            if has_components!(table, PLAYER | VELOCITY) {
+            if table_has_components!(table, PLAYER | VELOCITY) {
                 damping_system(table);
             }
 
-            if has_components!(table, LIFETIME) {
+            if table_has_components!(table, LIFETIME) {
                 lifetime_system(table, dt);
             }
         });
@@ -111,7 +111,7 @@ mod systems {
         }
 
         for table in &mut world.tables {
-            if has_components!(table, PLAYER | ROTATION | VELOCITY | THRUST) {
+            if table_has_components!(table, PLAYER | ROTATION | VELOCITY | THRUST) {
                 for i in 0..table.entity_indices.len() {
                     let rot = &mut table.rotation[i];
                     let vel = &mut table.velocity[i];
@@ -146,7 +146,7 @@ mod systems {
         let mut player_rot = Rotation::default();
 
         for table in &world.tables {
-            if has_components!(table, PLAYER | POSITION | ROTATION) {
+            if table_has_components!(table, PLAYER | POSITION | ROTATION) {
                 for i in 0..table.entity_indices.len() {
                     player_pos = table.position[i];
                     player_rot = table.rotation[i];
@@ -223,7 +223,7 @@ mod systems {
         let mut asteroid_data = Vec::new();
 
         for table in &world.tables {
-            if has_components!(table, PROJECTILE | POSITION | RADIUS | LIFETIME) {
+            if table_has_components!(table, PROJECTILE | POSITION | RADIUS | LIFETIME) {
                 for i in 0..table.entity_indices.len() {
                     if table.lifetime[i].remaining > 0.0 {
                         projectile_positions.push((
@@ -234,7 +234,7 @@ mod systems {
                     }
                 }
             }
-            if has_components!(table, ASTEROID | POSITION | RADIUS) {
+            if table_has_components!(table, ASTEROID | POSITION | RADIUS) {
                 for i in 0..table.entity_indices.len() {
                     asteroid_data.push((
                         table.entity_indices[i],
@@ -325,7 +325,7 @@ async fn main() {
         // Render everything
         for table in &world.tables {
             // Render player
-            if has_components!(table, PLAYER | POSITION | ROTATION) {
+            if table_has_components!(table, PLAYER | POSITION | ROTATION) {
                 for i in 0..table.entity_indices.len() {
                     let pos = &table.position[i];
                     let rot = &table.rotation[i];
@@ -375,7 +375,7 @@ async fn main() {
             }
 
             // Render projectiles
-            if has_components!(table, PROJECTILE | POSITION | LIFETIME) {
+            if table_has_components!(table, PROJECTILE | POSITION | LIFETIME) {
                 for i in 0..table.entity_indices.len() {
                     if table.lifetime[i].remaining > 0.0 {
                         let pos = &table.position[i];
@@ -385,7 +385,7 @@ async fn main() {
             }
 
             // Render asteroids
-            if has_components!(table, ASTEROID | POSITION | RADIUS) {
+            if table_has_components!(table, ASTEROID | POSITION | RADIUS) {
                 for i in 0..table.entity_indices.len() {
                     let pos = &table.position[i];
                     let radius = table.radius[i].value;

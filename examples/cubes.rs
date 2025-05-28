@@ -1,4 +1,4 @@
-use freecs::{ecs, has_components};
+use freecs::{ecs, table_has_components};
 use macroquad::prelude::*;
 
 ecs! {
@@ -52,25 +52,25 @@ mod components {
 
 mod systems {
     use super::*;
-    use freecs::has_components;
+    use freecs::table_has_components;
 
     pub fn run_systems(world: &mut World2, dt: f32) {
         let delta_time = world.resources.delta_time;
         world.tables.iter_mut().for_each(|table| {
-            if has_components!(table, SCALE) {
+            if table_has_components!(table, SCALE) {
                 scale_system(&mut table.scale);
             }
 
-            if has_components!(table, POSITION | VELOCITY) {
+            if table_has_components!(table, POSITION | VELOCITY) {
                 movement_system(&mut table.position, &table.velocity, delta_time);
                 bounce_system(&mut table.position, &mut table.velocity);
             }
 
-            if has_components!(table, VELOCITY | GRAVITY) {
+            if table_has_components!(table, VELOCITY | GRAVITY) {
                 gravity_system(&mut table.velocity, &table.gravity, dt);
             }
 
-            if has_components!(table, ROTATION) {
+            if table_has_components!(table, ROTATION) {
                 rotation_system(&mut table.rotation, dt);
             }
         });
@@ -307,7 +307,7 @@ async fn main() {
         let distance_squared = view_distance * view_distance;
 
         for table in &world.tables {
-            if has_components!(table, POSITION | ROTATION | SCALE) {
+            if table_has_components!(table, POSITION | ROTATION | SCALE) {
                 for i in 0..table.entity_indices.len() {
                     let pos = &table.position[i];
                     let scale = &table.scale[i];

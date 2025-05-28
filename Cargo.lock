@@ -142,6 +142,7 @@ name = "freecs"
 version = "0.3.1"
 dependencies = [
  "macroquad",
+ "paste",
  "rand",
  "rayon",
 ]
@@ -268,6 +269,12 @@ checksum = "64a1e7069a2525126bf12a9f1f7916835fafade384fb27cabf698e745e2a1eb8"
 dependencies = [
  "malloc_buf",
 ]
+
+[[package]]
+name = "paste"
+version = "1.0.15"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "57c0d7b74b563b49d38dae00a0c37d4d6de9b432382b2892f0574ddcae73fd0a"
 
 [[package]]
 name = "png"

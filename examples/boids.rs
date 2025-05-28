@@ -1,4 +1,4 @@
-use freecs::{ecs, has_components};
+use freecs::{ecs, table_has_components};
 use macroquad::prelude::*;
 
 ecs! {
@@ -87,7 +87,7 @@ mod systems {
 
     pub fn run_systems(world: &mut World) {
         world.tables.par_iter_mut().for_each(|table| {
-            if has_components!(table, POSITION | VELOCITY | BOID) {
+            if table_has_components!(table, POSITION | VELOCITY | BOID) {
                 process_boids(table, &world.resources);
                 update_positions(table, world.resources.delta_time);
                 wrap_positions(table);
@@ -258,7 +258,7 @@ fn spawn_boids(world: &mut World, count: usize) {
 
 fn render_boids(world: &World) {
     for table in &world.tables {
-        if has_components!(table, POSITION | VELOCITY | COLOR) {
+        if table_has_components!(table, POSITION | VELOCITY | COLOR) {
             for i in 0..table.entity_indices.len() {
                 let pos = &table.position[i];
                 let vel = &table.velocity[i];
@@ -418,7 +418,7 @@ fn draw_ui(params: &mut BoidParams, world: &mut World) {
 
 fn draw_debug(world: &World) {
     for table in &world.tables {
-        if has_components!(table, POSITION | VELOCITY) {
+        if table_has_components!(table, POSITION | VELOCITY) {
             for i in 0..table.entity_indices.len() {
                 let pos = &table.position[i];
                 draw_circle_lines(

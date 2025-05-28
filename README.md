@@ -31,7 +31,7 @@ rayon = "^1.10.0"
 And in `main.rs`:
 
 ```rust
-use freecs::{has_components, ecs};
+use freecs::{table_has_components, ecs};
 use rayon::prelude::*;
 
 ecs! {
@@ -136,10 +136,10 @@ mod systems {
         // In practice, you should use `.iter_mut()` instead of `.par_iter_mut()` unless you have a large number of entities,
         // because sequential access is more performant until you are working with extreme numbers of entities.
         world.tables.par_iter_mut().for_each(|table| {
-            if has_components!(table, POSITION | VELOCITY | HEALTH) {
+            if table_has_components!(table, POSITION | VELOCITY | HEALTH) {
                 update_positions_system(&mut table.position, &table.velocity, delta_time);
             }
-            if has_components!(table, HEALTH) {
+            if table_has_components!(table, HEALTH) {
                 health_system(&mut table.health);
             }
         });
