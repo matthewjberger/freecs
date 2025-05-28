@@ -209,6 +209,11 @@ macro_rules! ecs {
                     pub fn [<get_ $name _mut>](&mut self, entity: EntityId) -> Option<&mut $type> {
                         get_component_mut::<$type>(self, entity, $mask)
                     }
+
+                    #[inline]
+                    pub fn [<entity_has_ $name>](&self, entity: EntityId) -> bool {
+                        entity_has_components(self, entity, $mask)
+                    }
                 }
             )*
 
