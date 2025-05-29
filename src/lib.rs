@@ -372,7 +372,7 @@ macro_rules! ecs {
         #[allow(dead_code)]
         pub fn query_first_entity(world: &$world, mask: u64) -> Option<EntityId> {
             for table in &world.tables {
-                if !table_has_components!(table, mask) {
+                if !$crate::table_has_components!(table, mask) {
                     continue;
                 }
                 let indices = table
@@ -795,10 +795,10 @@ mod tests {
         // for each table in the world filtered by component mask.
         pub fn run_systems(world: &mut World, dt: f32) {
             world.tables.iter_mut().for_each(|table| {
-                if table_has_components!(table, POSITION | VELOCITY | HEALTH) {
+                if super::table_has_components!(table, POSITION | VELOCITY | HEALTH) {
                     update_positions_system(&mut table.position, &table.velocity, dt);
                 }
-                if table_has_components!(table, HEALTH) {
+                if super::table_has_components!(table, HEALTH) {
                     health_system(&mut table.health);
                 }
             });
