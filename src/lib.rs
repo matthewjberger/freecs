@@ -214,6 +214,16 @@ macro_rules! ecs {
                     pub fn [<entity_has_ $name>](&self, entity: EntityId) -> bool {
                         entity_has_components(self, entity, $mask)
                     }
+
+                    #[inline]
+                    pub fn [<add_ $name>](&mut self, entity: EntityId) {
+                        add_components(self, entity, $mask);
+                    }
+
+                    #[inline]
+                    pub fn [<remove_ $name>](&mut self, entity: EntityId) -> bool {
+                        remove_components(self, entity, $mask)
+                    }
                 }
             )*
 
