@@ -4,7 +4,7 @@
 [<img alt="crates.io" src="https://img.shields.io/crates/v/freecs.svg?style=for-the-badge&color=fc8d62&logo=rust" height="20">](https://crates.io/crates/freecs)
 [<img alt="docs.rs" src="https://img.shields.io/badge/docs.rs-freecs-66c2a5?style=for-the-badge&labelColor=555555&logo=docs.rs" height="20">](https://docs.rs/freecs)
 
-`freecs` is a zero-abstraction ECS library for Rust, designed for high performance and simplicity. 🚀
+`freecs` is a zero-abstraction ECS library for Rust, in about ~600 lines
 
 It provides an archetypal table-based storage system for components, allowing for fast queries,
 fast system iteration, and parallel processing.
@@ -13,7 +13,7 @@ A macro is used to define the world and its components, and generates
 the entity component system as part of your source code at compile time. The generated code
 contains only plain data structures (no methods) and free functions that transform them, achieving static dispatch.
 
-The internal implementation is ~500 loc (aside from tests, comments, and example code),
+The internal implementation is ~600 loc (aside from tests, comments, and example code),
 and does not use object orientation, generics, traits, or dynamic dispatch.
 
 ## Quick Start
