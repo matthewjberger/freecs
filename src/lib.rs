@@ -192,7 +192,6 @@ macro_rules! ecs {
             pub allocator: EntityAllocator,
             pub resources: $resources,
             table_edges: Vec<TableEdges>,
-            pending_despawns: Vec<EntityId>,
             table_lookup: std::collections::HashMap<u64, usize>,
         }
 
