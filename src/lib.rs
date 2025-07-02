@@ -344,7 +344,7 @@ macro_rules! ecs {
                     ),
                 );
                 entities.push(entity);
-                location_insert(
+                insert_location(
                     &mut world.entity_locations,
                     entity,
                     (table_index, world.tables[table_index].entity_indices.len() - 1),
@@ -399,7 +399,7 @@ macro_rules! ecs {
 
         /// Get a specific component for an entity
         pub fn get_component<T: 'static>(world: &$world, entity: EntityId, mask: u64) -> Option<&T> {
-           let (table_index, array_index) = location_get(&world.entity_locations, entity)?;
+           let (table_index, array_index) = get_location(&world.entity_locations, entity)?;
 
            // Early return if entity is despawned
            if !world.entity_locations.locations[entity.id as usize].allocated {
@@ -430,7 +430,7 @@ macro_rules! ecs {
         }
 
         pub fn get_component_mut<T: 'static>(world: &mut $world, entity: EntityId, mask: u64) -> Option<&mut T> {
-            let (table_index, array_index) = location_get(&world.entity_locations, entity)?;
+            let (table_index, array_index) = get_location(&world.entity_locations, entity)?;
             let table = &mut world.tables[table_index];
             if table.mask & mask == 0 {
                 return None;
@@ -505,7 +505,7 @@ macro_rules! ecs {
         }
 
         pub fn add_components(world: &mut $world, entity: EntityId, mask: u64) -> bool {
-            if let Some((table_index, array_index)) = location_get(&world.entity_locations, entity) {
+            if let Some((table_index, array_index)) = get_location(&world.entity_locations, entity) {
                 let current_mask = world.tables[table_index].mask;
                 if current_mask & mask == mask {
                     return true;
@@ -528,7 +528,7 @@ macro_rules! ecs {
         }
 
         pub fn remove_components(world: &mut $world, entity: EntityId, mask: u64) -> bool {
-            if let Some((table_index, array_index)) = location_get(&world.entity_locations, entity) {
+            if let Some((table_index, array_index)) = get_location(&world.entity_locations, entity) {
                 let current_mask = world.tables[table_index].mask;
                 if current_mask & mask == 0 {
                     return true;
@@ -553,7 +553,7 @@ macro_rules! ecs {
 
         #[allow(dead_code)]
         pub fn component_mask(world: &$world, entity: EntityId) -> Option<u64> {
-            location_get(&world.entity_locations, entity)
+            get_location(&world.entity_locations, entity)
                 .map(|(table_index, _)| world.tables[table_index].mask)
         }
 
@@ -597,10 +597,10 @@ macro_rules! ecs {
 
             add_to_table(&mut world.tables[to_table], entity, components);
             let new_index = world.tables[to_table].entity_indices.len() - 1;
-            location_insert(&mut world.entity_locations, entity, (to_table, new_index));
+            insert_location(&mut world.entity_locations, entity, (to_table, new_index));
 
             if let Some(swapped) = remove_from_table(&mut world.tables[from_table], from_index) {
-                location_insert(
+                insert_location(
                     &mut world.entity_locations,
                     swapped,
                     (from_table, from_index),
@@ -608,7 +608,7 @@ macro_rules! ecs {
             }
         }
 
-        fn location_get(locations: &EntityLocations, entity: EntityId) -> Option<(usize, usize)> {
+        fn get_location(locations: &EntityLocations, entity: EntityId) -> Option<(usize, usize)> {
             let id = entity.id as usize;
             if id >= locations.locations.len() {
                 return None;
@@ -621,7 +621,7 @@ macro_rules! ecs {
 
             Some((location.table_index as usize, location.array_index as usize))        }
 
-        fn location_insert(
+        fn insert_location(
             locations: &mut EntityLocations,
             entity: EntityId,
             location: (usize, usize),
@@ -1167,7 +1167,7 @@ mod tests {
         let stored_id = get_component::<Velocity>(&world, entity1, VELOCITY)
             .unwrap()
             .x as u32;
-        let entity2_loc = location_get(&world.entity_locations, entity2);
+        let entity2_loc = get_location(&world.entity_locations, entity2);
         assert!(entity2_loc.is_some());
         assert_eq!(stored_id, entity2.id);
     }
@@ -1209,7 +1209,7 @@ mod tests {
         for table in &world.tables {
             for &entity in &table.entity_indices {
                 assert!(
-                    location_get(&world.entity_locations, entity).is_some(),
+                    get_location(&world.entity_locations, entity).is_some(),
                     "Entity location should be valid for remaining entities"
                 );
             }
@@ -1433,14 +1433,14 @@ mod tests {
         );
 
         // Get indices before transition
-        let (old_table_idx, _) = location_get(&world.entity_locations, entity).unwrap();
+        let (old_table_idx, _) = get_location(&world.entity_locations, entity).unwrap();
 
         // Add new component
         add_components(&mut world, entity, POSITION); // Try to add one we already have
 
         let final_mask = component_mask(&world, entity).unwrap();
         println!("Final mask: {:b}", final_mask);
-        let (new_table_idx, _) = location_get(&world.entity_locations, entity).unwrap();
+        let (new_table_idx, _) = get_location(&world.entity_locations, entity).unwrap();
 
         // Print the table info
         println!(
@@ -1524,7 +1524,7 @@ mod tests {
         );
         println!(
             "Current table mask: {:b}",
-            world.tables[location_get(&world.entity_locations, entity).unwrap().0].mask
+            world.tables[get_location(&world.entity_locations, entity).unwrap().0].mask
         );
 
         add_components(&mut world, entity, HEALTH); // Like adding LIGHT
@@ -1534,7 +1534,7 @@ mod tests {
             "Entity components: {:b}",
             component_mask(&world, entity).unwrap()
         );
-        let (table_idx, _) = location_get(&world.entity_locations, entity).unwrap();
+        let (table_idx, _) = get_location(&world.entity_locations, entity).unwrap();
         println!("New table mask: {:b}", world.tables[table_idx].mask);
 
         // Query should still work post-transition
