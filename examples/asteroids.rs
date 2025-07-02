@@ -154,27 +154,24 @@ mod systems {
             }
         }
 
-        let projectile = spawn_entities(
-            world,
-            POSITION | VELOCITY | PROJECTILE | RADIUS | LIFETIME,
-            1,
-        )[0];
+        let projectile =
+            world.spawn_entities(POSITION | VELOCITY | PROJECTILE | RADIUS | LIFETIME, 1)[0];
 
-        if let Some(pos) = get_component_mut::<Position>(world, projectile, POSITION) {
+        if let Some(pos) = world.get_component_mut::<Position>(projectile, POSITION) {
             pos.x = player_pos.x + player_rot.radians.cos() * 20.0;
             pos.y = player_pos.y + player_rot.radians.sin() * 20.0;
         }
 
-        if let Some(vel) = get_component_mut::<Velocity>(world, projectile, VELOCITY) {
+        if let Some(vel) = world.get_component_mut::<Velocity>(projectile, VELOCITY) {
             vel.x = player_rot.radians.cos() * PROJECTILE_SPEED;
             vel.y = player_rot.radians.sin() * PROJECTILE_SPEED;
         }
 
-        if let Some(radius) = get_component_mut::<Radius>(world, projectile, RADIUS) {
+        if let Some(radius) = world.get_component_mut::<Radius>(projectile, RADIUS) {
             radius.value = 2.0;
         }
 
-        if let Some(lifetime) = get_component_mut::<Lifetime>(world, projectile, LIFETIME) {
+        if let Some(lifetime) = world.get_component_mut::<Lifetime>(projectile, LIFETIME) {
             lifetime.remaining = PROJECTILE_LIFETIME;
         }
     }
@@ -266,7 +263,7 @@ mod systems {
 
         // Despawn collided entities
         if !to_despawn.is_empty() {
-            despawn_entities(world, &to_despawn);
+            world.despawn_entities(&to_despawn);
         }
     }
 }
@@ -280,38 +277,34 @@ async fn main() {
     world.resources.score = 0;
 
     // Spawn player
-    let player = spawn_entities(
-        &mut world,
-        POSITION | ROTATION | VELOCITY | PLAYER | THRUST,
-        1,
-    )[0];
+    let player = world.spawn_entities(POSITION | ROTATION | VELOCITY | PLAYER | THRUST, 1)[0];
 
-    if let Some(pos) = get_component_mut::<Position>(&mut world, player, POSITION) {
+    if let Some(pos) = world.get_component_mut::<Position>(player, POSITION) {
         pos.x = screen_width() / 2.0;
         pos.y = screen_height() / 2.0;
     }
 
-    if let Some(thrust) = get_component_mut::<Thrust>(&mut world, player, THRUST) {
+    if let Some(thrust) = world.get_component_mut::<Thrust>(player, THRUST) {
         thrust.power = 1.0;
     }
 
     // Spawn initial asteroids
     for _ in 0..10 {
-        let asteroid = spawn_entities(&mut world, POSITION | VELOCITY | ASTEROID | RADIUS, 1)[0];
+        let asteroid = world.spawn_entities(POSITION | VELOCITY | ASTEROID | RADIUS, 1)[0];
 
-        if let Some(pos) = get_component_mut::<Position>(&mut world, asteroid, POSITION) {
+        if let Some(pos) = world.get_component_mut::<Position>(asteroid, POSITION) {
             pos.x = rand::gen_range(0.0, screen_width());
             pos.y = rand::gen_range(0.0, screen_height());
         }
 
-        if let Some(vel) = get_component_mut::<Velocity>(&mut world, asteroid, VELOCITY) {
+        if let Some(vel) = world.get_component_mut::<Velocity>(asteroid, VELOCITY) {
             let angle = rand::gen_range(0.0, std::f32::consts::PI * 2.0);
             let speed = rand::gen_range(50.0, 100.0);
             vel.x = angle.cos() * speed;
             vel.y = angle.sin() * speed;
         }
 
-        if let Some(radius) = get_component_mut::<Radius>(&mut world, asteroid, RADIUS) {
+        if let Some(radius) = world.get_component_mut::<Radius>(asteroid, RADIUS) {
             radius.value = 20.0;
         }
     }

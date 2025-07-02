@@ -172,8 +172,7 @@ async fn main() {
     let spawn_start = std::time::Instant::now();
 
     // Pre-spawn all entities at once
-    let entities = spawn_entities(
-        &mut world,
+    let entities = world.spawn_entities(
         POSITION | ROTATION | SCALE | VELOCITY,
         TOTAL_ENTITIES as usize,
     );
@@ -181,7 +180,7 @@ async fn main() {
     // The gravity component is added separately to
     // demonstrate adding components after initial creation
     for entity in entities.iter() {
-        add_components(&mut world, *entity, GRAVITY);
+        world.add_components(*entity, GRAVITY);
     }
 
     // Initialize all entities in the pre-spawned batch
@@ -201,7 +200,7 @@ async fn main() {
         let py = START_HEIGHT + (ny * GRID_SIZE * 0.5);
         let pz = (nz * 2.0 - 1.0) * GRID_SIZE;
 
-        if let Some(position) = get_component_mut::<Position3D>(&mut world, *entity, POSITION) {
+        if let Some(position) = world.get_component_mut::<Position3D>(*entity, POSITION) {
             *position = Position3D {
                 x: px,
                 y: py,
@@ -210,7 +209,7 @@ async fn main() {
         }
 
         // Random initial velocity scaled with position
-        if let Some(velocity) = get_component_mut::<Velocity>(&mut world, *entity, VELOCITY) {
+        if let Some(velocity) = world.get_component_mut::<Velocity>(*entity, VELOCITY) {
             *velocity = Velocity {
                 x: rand::gen_range(-2.0, 2.0) * (px / GRID_SIZE),
                 y: 0.0,
@@ -218,7 +217,7 @@ async fn main() {
             };
         }
 
-        if let Some(rotation) = get_component_mut::<Rotation>(&mut world, *entity, ROTATION) {
+        if let Some(rotation) = world.get_component_mut::<Rotation>(*entity, ROTATION) {
             *rotation = Rotation {
                 x: rand::gen_range(-1.0, 1.0),
                 y: rand::gen_range(-1.0, 1.0),
@@ -228,7 +227,7 @@ async fn main() {
 
         // Scale varies with height
         let scale_factor = 0.4 + (ny * 0.2);
-        if let Some(scale) = get_component_mut::<Scale>(&mut world, *entity, SCALE) {
+        if let Some(scale) = world.get_component_mut::<Scale>(*entity, SCALE) {
             *scale = Scale {
                 x: scale_factor,
                 y: scale_factor,
@@ -236,7 +235,7 @@ async fn main() {
             };
         }
 
-        if let Some(gravity) = get_component_mut::<Gravity>(&mut world, *entity, GRAVITY) {
+        if let Some(gravity) = world.get_component_mut::<Gravity>(*entity, GRAVITY) {
             *gravity = Gravity(9.81 * (1.0 + ny * 0.2));
         }
     }

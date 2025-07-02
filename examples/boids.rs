@@ -86,10 +86,14 @@ mod systems {
     use rayon::prelude::*;
 
     pub fn run_systems(world: &mut World) {
+        // Extract resources before parallel iteration to avoid borrowing conflicts
+        let resources = &world.resources;
+        let delta_time = resources.delta_time;
+
         world.tables.par_iter_mut().for_each(|table| {
             if table_has_components!(table, POSITION | VELOCITY | BOID) {
-                process_boids(table, &world.resources);
-                update_positions(table, world.resources.delta_time);
+                process_boids(table, resources);
+                update_positions(table, delta_time);
                 wrap_positions(table);
             }
         });
@@ -151,7 +155,7 @@ mod systems {
 
                 // Apply mouse influence
                 let mouse_dx = resources.mouse_pos[0] - pos.x;
-                let mouse_dy = resources.mouse_pos[0] - pos.y;
+                let mouse_dy = resources.mouse_pos[1] - pos.y;
                 let mouse_dist_sq = mouse_dx * mouse_dx + mouse_dy * mouse_dy;
                 let mouse_range_sq =
                     resources.mouse_influence_range * resources.mouse_influence_range;
@@ -233,22 +237,22 @@ mod systems {
 }
 
 fn spawn_boids(world: &mut World, count: usize) {
-    let entities = spawn_entities(world, POSITION | VELOCITY | BOID | COLOR, count);
+    let entities = world.spawn_entities(POSITION | VELOCITY | BOID | COLOR, count);
 
     for entity in entities {
-        if let Some(pos) = get_component_mut::<Position>(world, entity, POSITION) {
+        if let Some(pos) = world.get_component_mut::<Position>(entity, POSITION) {
             pos.x = rand::gen_range(0.0, screen_width());
             pos.y = rand::gen_range(0.0, screen_height());
         }
 
-        if let Some(vel) = get_component_mut::<Velocity>(world, entity, VELOCITY) {
+        if let Some(vel) = world.get_component_mut::<Velocity>(entity, VELOCITY) {
             let angle = rand::gen_range(0.0, std::f32::consts::PI * 2.0);
             let speed = rand::gen_range(100.0, 200.0);
             vel.x = angle.cos() * speed;
             vel.y = angle.sin() * speed;
         }
 
-        if let Some(color) = get_component_mut::<BoidColor>(world, entity, COLOR) {
+        if let Some(color) = world.get_component_mut::<BoidColor>(entity, COLOR) {
             color.r = rand::gen_range(0.5, 1.0);
             color.g = rand::gen_range(0.5, 1.0);
             color.b = rand::gen_range(0.5, 1.0);
@@ -304,7 +308,7 @@ fn draw_ui(params: &mut BoidParams, world: &mut World) {
     };
 
     // Get current entity count
-    let entity_count = query_entities(world, BOID).len();
+    let entity_count = world.query_entities(BOID).len();
     draw_param(y, &format!("Entities: {}", entity_count));
     y += step;
     draw_param(y, &format!("FPS: {:.1}", get_fps()));
@@ -403,14 +407,15 @@ fn draw_ui(params: &mut BoidParams, world: &mut World) {
             params.spawn_count = params.spawn_count.saturating_sub(despawn_count);
 
             // Get entities from the front instead of the back to avoid swap_remove issues
-            let to_despawn: Vec<_> = get_all_entities(world)
+            let to_despawn: Vec<_> = world
+                .get_all_entities()
                 .into_iter()
                 .take(despawn_count)
                 .collect();
 
             // Despawn in chunks to avoid potential index issues
             for chunk in to_despawn.chunks(100) {
-                despawn_entities(world, chunk);
+                world.despawn_entities(chunk);
             }
         }
     }

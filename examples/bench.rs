@@ -402,7 +402,7 @@ fn benchmark_entity_creation(entity_count: usize, iterations: usize) -> Benchmar
     for _ in 0..3 {
         let mut world = World::default();
         let start = Instant::now();
-        let _entities = spawn_entities(&mut world, POSITION | VELOCITY, entity_count);
+        let _entities = world.spawn_entities(POSITION | VELOCITY, entity_count);
         times.push(start.elapsed());
     }
     times.clear();
@@ -411,7 +411,7 @@ fn benchmark_entity_creation(entity_count: usize, iterations: usize) -> Benchmar
     for _ in 0..iterations {
         let mut world = World::default();
         let start = Instant::now();
-        let _entities = spawn_entities(&mut world, POSITION | VELOCITY, entity_count);
+        let _entities = world.spawn_entities(POSITION | VELOCITY, entity_count);
         times.push(start.elapsed());
     }
 
@@ -421,7 +421,7 @@ fn benchmark_entity_creation(entity_count: usize, iterations: usize) -> Benchmar
 
 fn benchmark_sequential_movement_system(entity_count: usize, iterations: usize) -> BenchmarkResult {
     let mut world = World::default();
-    let _entities = spawn_entities(&mut world, POSITION | VELOCITY, entity_count);
+    let _entities = world.spawn_entities(POSITION | VELOCITY, entity_count);
 
     // Initialize velocities
     for table in &mut world.tables {
@@ -451,7 +451,7 @@ fn benchmark_sequential_movement_system(entity_count: usize, iterations: usize) 
 
 fn benchmark_parallel_movement_system(entity_count: usize, iterations: usize) -> BenchmarkResult {
     let mut world = World::default();
-    let _entities = spawn_entities(&mut world, POSITION | VELOCITY, entity_count);
+    let _entities = world.spawn_entities(POSITION | VELOCITY, entity_count);
 
     // Initialize velocities
     for table in &mut world.tables {
@@ -481,7 +481,7 @@ fn benchmark_parallel_movement_system(entity_count: usize, iterations: usize) ->
 
 fn benchmark_sequential_physics_system(entity_count: usize, iterations: usize) -> BenchmarkResult {
     let mut world = World::default();
-    let _entities = spawn_entities(&mut world, POSITION | VELOCITY | PHYSICS, entity_count);
+    let _entities = world.spawn_entities(POSITION | VELOCITY | PHYSICS, entity_count);
 
     // Initialize physics components
     for table in &mut world.tables {
@@ -532,7 +532,7 @@ fn benchmark_sequential_physics_system(entity_count: usize, iterations: usize) -
 
 fn benchmark_parallel_physics_system(entity_count: usize, iterations: usize) -> BenchmarkResult {
     let mut world = World::default();
-    let _entities = spawn_entities(&mut world, POSITION | VELOCITY | PHYSICS, entity_count);
+    let _entities = world.spawn_entities(POSITION | VELOCITY | PHYSICS, entity_count);
 
     // Initialize physics components
     for table in &mut world.tables {
@@ -586,18 +586,18 @@ fn benchmark_multi_component_query(entity_count: usize, iterations: usize) -> Be
     
     // Create entities with different component combinations to test query performance
     let quarter = entity_count / 4;
-    let _e1 = spawn_entities(&mut world, POSITION, quarter);
-    let _e2 = spawn_entities(&mut world, POSITION | VELOCITY, quarter);
-    let _e3 = spawn_entities(&mut world, POSITION | VELOCITY | HEALTH, quarter);
-    let _e4 = spawn_entities(&mut world, POSITION | VELOCITY | HEALTH | PHYSICS, quarter);
+    let _e1 = world.spawn_entities(POSITION, quarter);
+    let _e2 = world.spawn_entities(POSITION | VELOCITY, quarter);
+    let _e3 = world.spawn_entities(POSITION | VELOCITY | HEALTH, quarter);
+    let _e4 = world.spawn_entities(POSITION | VELOCITY | HEALTH | PHYSICS, quarter);
 
     let mut times = Vec::new();
     for _ in 0..iterations {
         let start = Instant::now();
-        let _r1 = query_entities(&world, POSITION);
-        let _r2 = query_entities(&world, POSITION | VELOCITY);
-        let _r3 = query_entities(&world, POSITION | VELOCITY | HEALTH);
-        let _r4 = query_entities(&world, VELOCITY | PHYSICS);
+        let _r1 = world.query_entities(POSITION);
+        let _r2 = world.query_entities(POSITION | VELOCITY);
+        let _r3 = world.query_entities(POSITION | VELOCITY | HEALTH);
+        let _r4 = world.query_entities(VELOCITY | PHYSICS);
         times.push(start.elapsed());
     }
 
@@ -607,7 +607,7 @@ fn benchmark_multi_component_query(entity_count: usize, iterations: usize) -> Be
 
 fn benchmark_component_transitions(entity_count: usize, iterations: usize) -> BenchmarkResult {
     let mut world = World::default();
-    let entities = spawn_entities(&mut world, POSITION | VELOCITY, entity_count);
+    let entities = world.spawn_entities(POSITION | VELOCITY, entity_count);
 
     let mut times = Vec::new();
     for iteration in 0..iterations {
@@ -616,14 +616,14 @@ fn benchmark_component_transitions(entity_count: usize, iterations: usize) -> Be
         // Add various components to different entities to create more archetype diversity
         for (i, &entity) in entities.iter().enumerate() {
             match i % 8 {
-                0 => { add_components(&mut world, entity, HEALTH | COMPONENT_A | COMPONENT_B); },
-                1 => { add_components(&mut world, entity, PHYSICS | COMPONENT_C | COMPONENT_D); },
-                2 => { add_components(&mut world, entity, AI | COMPONENT_E | COMPONENT_F); },
-                3 => { add_components(&mut world, entity, INVENTORY | COMPONENT_G | COMPONENT_H); },
-                4 => { add_components(&mut world, entity, TRANSFORM | COMPONENT_I | COMPONENT_J); },
-                5 => { add_components(&mut world, entity, RENDER | COMPONENT_K | COMPONENT_L); },
-                6 => { add_components(&mut world, entity, COMPONENT_M | COMPONENT_N | COMPONENT_O); },
-                7 => { add_components(&mut world, entity, COMPONENT_P | HEALTH | PHYSICS); },
+                0 => { world.add_components(entity, HEALTH | COMPONENT_A | COMPONENT_B); },
+                1 => { world.add_components(entity, PHYSICS | COMPONENT_C | COMPONENT_D); },
+                2 => { world.add_components(entity, AI | COMPONENT_E | COMPONENT_F); },
+                3 => { world.add_components(entity, INVENTORY | COMPONENT_G | COMPONENT_H); },
+                4 => { world.add_components(entity, TRANSFORM | COMPONENT_I | COMPONENT_J); },
+                5 => { world.add_components(entity, RENDER | COMPONENT_K | COMPONENT_L); },
+                6 => { world.add_components(entity, COMPONENT_M | COMPONENT_N | COMPONENT_O); },
+                7 => { world.add_components(entity, COMPONENT_P | HEALTH | PHYSICS); },
                 _ => {}
             }
         }
@@ -631,7 +631,7 @@ fn benchmark_component_transitions(entity_count: usize, iterations: usize) -> Be
         // Remove some components to test removal transitions too
         for (i, &entity) in entities.iter().enumerate() {
             if i % 4 == 0 {
-                remove_components(&mut world, entity, VELOCITY | COMPONENT_A);
+                world.remove_components(entity, VELOCITY | COMPONENT_A);
             }
         }
         
@@ -641,18 +641,18 @@ fn benchmark_component_transitions(entity_count: usize, iterations: usize) -> Be
         if iteration < iterations - 1 {
             for (i, &entity) in entities.iter().enumerate() {
                 match i % 8 {
-                    0 => { remove_components(&mut world, entity, HEALTH | COMPONENT_A | COMPONENT_B); },
-                    1 => { remove_components(&mut world, entity, PHYSICS | COMPONENT_C | COMPONENT_D); },
-                    2 => { remove_components(&mut world, entity, AI | COMPONENT_E | COMPONENT_F); },
-                    3 => { remove_components(&mut world, entity, INVENTORY | COMPONENT_G | COMPONENT_H); },
-                    4 => { remove_components(&mut world, entity, TRANSFORM | COMPONENT_I | COMPONENT_J); },
-                    5 => { remove_components(&mut world, entity, RENDER | COMPONENT_K | COMPONENT_L); },
-                    6 => { remove_components(&mut world, entity, COMPONENT_M | COMPONENT_N | COMPONENT_O); },
-                    7 => { remove_components(&mut world, entity, COMPONENT_P | HEALTH | PHYSICS); },
+                    0 => { world.remove_components(entity, HEALTH | COMPONENT_A | COMPONENT_B); },
+                    1 => { world.remove_components(entity, PHYSICS | COMPONENT_C | COMPONENT_D); },
+                    2 => { world.remove_components(entity, AI | COMPONENT_E | COMPONENT_F); },
+                    3 => { world.remove_components(entity, INVENTORY | COMPONENT_G | COMPONENT_H); },
+                    4 => { world.remove_components(entity, TRANSFORM | COMPONENT_I | COMPONENT_J); },
+                    5 => { world.remove_components(entity, RENDER | COMPONENT_K | COMPONENT_L); },
+                    6 => { world.remove_components(entity, COMPONENT_M | COMPONENT_N | COMPONENT_O); },
+                    7 => { world.remove_components(entity, COMPONENT_P | HEALTH | PHYSICS); },
                     _ => {}
                 }
                 if i % 4 == 0 {
-                    add_components(&mut world, entity, VELOCITY | COMPONENT_A);
+                    world.add_components(entity, VELOCITY | COMPONENT_A);
                 }
             }
         }
@@ -684,31 +684,27 @@ fn benchmark_full_game_simulation(entity_count: usize, iterations: usize) -> Ben
              players, npcs, projectiles, environment, players + npcs + projectiles + environment);
 
     // Players: Full feature set with many components
-    let _player_entities = spawn_entities(
-        &mut world, 
+    let _player_entities = world.spawn_entities(
         POSITION | VELOCITY | HEALTH | TRANSFORM | RENDER | PHYSICS | AI | INVENTORY | 
         COMPONENT_A | COMPONENT_B | COMPONENT_C | COMPONENT_D | COMPONENT_E, 
         players
     );
 
     // NPCs: AI and basic physics with some additional components
-    let _npc_entities = spawn_entities(
-        &mut world, 
+    let _npc_entities = world.spawn_entities(
         POSITION | VELOCITY | HEALTH | TRANSFORM | RENDER | AI | 
         COMPONENT_F | COMPONENT_G | COMPONENT_H | COMPONENT_I, 
         npcs
     );
 
     // Projectiles: Simple physics with minimal components
-    let _projectile_entities = spawn_entities(
-        &mut world, 
+    let _projectile_entities = world.spawn_entities(
         POSITION | VELOCITY | PHYSICS | RENDER | COMPONENT_J | COMPONENT_K, 
         projectiles
     );
 
     // Environment: Static objects with various component combinations
-    let _env_entities = spawn_entities(
-        &mut world, 
+    let _env_entities = world.spawn_entities(
         POSITION | TRANSFORM | RENDER | COMPONENT_L | COMPONENT_M | 
         COMPONENT_N | COMPONENT_O | COMPONENT_P, 
         environment
@@ -888,10 +884,10 @@ fn benchmark_entity_despawning(entity_count: usize, iterations: usize) -> Benchm
     for _ in 0..iterations {
         // Setup entities for each iteration
         let mut world = World::default();
-        let entities = spawn_entities(&mut world, POSITION | VELOCITY | HEALTH, entity_count);
+        let entities = world.spawn_entities(POSITION | VELOCITY | HEALTH, entity_count);
         
         let start = Instant::now();
-        despawn_entities(&mut world, &entities);
+        world.despawn_entities( &entities);
         times.push(start.elapsed());
     }
 
@@ -909,14 +905,14 @@ fn benchmark_table_fragmentation(entity_count: usize, iterations: usize) -> Benc
             .filter(|(idx, _)| (i >> idx) & 1 == 1)
             .map(|(_, &comp)| comp)
             .fold(POSITION, |acc, comp| acc | comp); // Always include POSITION
-        spawn_entities(&mut world, mask, 1);
+        world.spawn_entities(mask, 1);
     }
 
     let mut times = Vec::new();
     for _ in 0..iterations {
         let start = Instant::now();
         // Query across all fragmented tables
-        let _results = query_entities(&world, POSITION);
+        let _results = world.query_entities(POSITION);
         times.push(start.elapsed());
     }
 
@@ -993,7 +989,7 @@ fn benchmark_memory_usage(entity_count: usize, iterations: usize) -> MemoryBench
     
     for _ in 0..iterations {
         let start = Instant::now();
-        let _entities = spawn_entities(&mut world, POSITION | VELOCITY | HEALTH | PHYSICS, entity_count / iterations);
+        let _entities = world.spawn_entities(POSITION | VELOCITY | HEALTH | PHYSICS, entity_count / iterations);
         times.push(start.elapsed());
     }
 

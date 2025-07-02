@@ -19,7 +19,7 @@ Add this to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-freecs = "0.3.8"
+freecs = "0.4.0"
 
 # (optional) add rayon if you want to parallelize systems
 rayon = "^1.10.0"
@@ -28,7 +28,7 @@ rayon = "^1.10.0"
 And in `main.rs`:
 
 ```rust
-use freecs::{table_has_components, ecs};
+use freecs::{ecs, table_has_components};
 use rayon::prelude::*;
 
 ecs! {
@@ -45,57 +45,64 @@ ecs! {
 pub fn main() {
     let mut world = World::default();
 
-    // Add resources for systems to use
-    world.resources.delta_time = 0.016;
-
     // Spawn entities with components
-    let entity = spawn_entities(&mut world, POSITION | VELOCITY, 1)[0];
+    let entity = world.spawn_entities(POSITION | VELOCITY, 1)[0];
     println!(
         "Spawned {} with position and velocity",
-        query_entities(&world, ALL).len(),
+        world.get_all_entities().len()
     );
 
-    // Read a component
-    let position = get_component::<Position>(&world, entity, POSITION);
+    // Read arbitrary components
+    let position = world.get_component::<Position>(entity, POSITION);
+    println!("Position: {:?}", position);
+
+    // Same as the above but more concise, these are generated for each component
+    let position = world.get_position(entity);
     println!("Position: {:?}", position);
 
     // Mutate a component
-    if let Some(position) = get_component_mut::<Position>(&mut world, entity, POSITION) {
+    if let Some(position) = world.get_position_mut(entity) {
         position.x += 1.0;
     }
 
     // Get an entity's component mask
     println!(
         "Component mask before adding health component: {:b}",
-        component_mask(&world, entity).unwrap()
+        world.component_mask(entity).unwrap()
     );
 
     // Add a new component to an entity
-    add_components(&mut world, entity, HEALTH);
+    world.add_components(entity, HEALTH);
 
     println!(
         "Component mask after adding health component: {:b}",
-        component_mask(&world, entity).unwrap()
+        world.component_mask(entity).unwrap()
     );
 
+    // Query all entities
+    let entities = world.get_all_entities();
+    println!("All entities: {entities:?}");
+
     // Query all entities with a specific component
-    let players = query_entities(&world, POSITION | VELOCITY | HEALTH);
+    let players = world.query_entities(POSITION | VELOCITY | HEALTH);
     println!("Player entities: {players:?}");
 
     // Query the first entity with a specific component,
     // returning early instead of checking remaining entities
-    let first_player_entity = query_first_entity(&world, POSITION | VELOCITY | HEALTH);
+    let first_player_entity = world.query_first_entity(POSITION | VELOCITY | HEALTH);
     println!("First player entity : {first_player_entity:?}");
 
     // Remove a component from an entity
-    remove_components(&mut world, entity, HEALTH);
+    world.remove_components(entity, HEALTH);
 
-    // This runs the systems once in parallel
-    // Not part of the library's public API, but a demonstration of how to run systems
-    systems::run_systems(&mut world, 0.01);
+    // Systems are functions that iterate over
+    // the component tables and transform component data.
+    // This function invokes two systems in parallel
+    // for each table in the world filtered by component mask.
+    systems::run_systems(&mut world);
 
     // Despawn entities, freeing their table slots for reuse
-    despawn_entities(&mut world, &[entity]);
+    world.despawn_entities(&[entity]);
 }
 
 use components::*;
@@ -121,17 +128,8 @@ mod components {
 mod systems {
     use super::*;
 
-    // Systems are functions that iterate over the component tables
-    // and transform component data.
-    // This function invokes two systems in parallel
-    // for each table in the world filtered by component mask.
     pub fn run_systems(world: &mut World) {
         let delta_time = world.resources.delta_time;
-
-        // Parallelization of systems can be done with Rayon, which is useful when working with more than 3 million entities.
-        //
-        // In practice, you should use `.iter_mut()` instead of `.par_iter_mut()` unless you have a large number of entities,
-        // because sequential access is more performant until you are working with extreme numbers of entities.
         world.tables.par_iter_mut().for_each(|table| {
             if table_has_components!(table, POSITION | VELOCITY | HEALTH) {
                 update_positions_system(&mut table.position, &table.velocity, delta_time);
@@ -157,7 +155,7 @@ mod systems {
     #[inline]
     pub fn health_system(health: &mut [Health]) {
         health.par_iter_mut().for_each(|health| {
-            health.value *= 0.98; // gradually decline health value
+            health.value *= 0.98;
         });
     }
 }

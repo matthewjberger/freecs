@@ -26,9 +26,9 @@ pub fn main() {
     let mut world = World::default();
     world.resources.delta_time = 0.016;
     let entities = spawn_test_entities(&mut world, 1000);
-    println!("Spawned {} entities", get_all_entities(&world).len());
+    println!("Spawned {} entities", world.get_all_entities().len());
     run_game_loop(&mut world);
-    despawn_entities(&mut world, &entities);
+    world.despawn_entities(&entities);
 }
 
 fn spawn_test_entities(world: &mut World, count: usize) -> Vec<EntityId> {
@@ -42,17 +42,17 @@ fn spawn_test_entities(world: &mut World, count: usize) -> Vec<EntityId> {
                 POSITION | VELOCITY
             };
 
-            let entity = spawn_entities(world, mask, 1)[0];
+            let entity = world.spawn_entities(mask, 1)[0];
 
-            if let Some(pos) = get_component_mut::<Position>(world, entity, POSITION) {
+            if let Some(pos) = world.get_component_mut::<Position>(entity, POSITION) {
                 pos.x = (index as f32) * 2.0;
                 pos.y = (index as f32) * 1.5;
             }
-            if let Some(vel) = get_component_mut::<Velocity>(world, entity, VELOCITY) {
+            if let Some(vel) = world.get_component_mut::<Velocity>(entity, VELOCITY) {
                 vel.x = 1.0;
                 vel.y = 0.5;
             }
-            if let Some(health) = get_component_mut::<Health>(world, entity, HEALTH) {
+            if let Some(health) = world.get_component_mut::<Health>(entity, HEALTH) {
                 health.value = 100.0;
             }
 

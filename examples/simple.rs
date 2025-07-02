@@ -6,7 +6,6 @@ ecs! {
         position: Position => POSITION,
         velocity: Velocity => VELOCITY,
         health: Health => HEALTH,
-        node: Node => NODE,
     }
     Resources {
         delta_time: f32
@@ -17,97 +16,67 @@ pub fn main() {
     let mut world = World::default();
 
     // Spawn entities with components
-    let entity = spawn_entities(&mut world, POSITION | VELOCITY, 1)[0];
+    let entity = world.spawn_entities(POSITION | VELOCITY, 1)[0];
     println!(
         "Spawned {} with position and velocity",
-        get_all_entities(&world).len()
+        world.get_all_entities().len()
     );
 
-    // Read a component
-    let position = get_component::<Position>(&world, entity, POSITION);
+    // Read arbitrary components
+    let position = world.get_component::<Position>(entity, POSITION);
+    println!("Position: {:?}", position);
+
+    // Same as the above but more concise, these are generated for each component
+    let position = world.get_position(entity);
     println!("Position: {:?}", position);
 
     // Mutate a component
-    if let Some(position) = get_component_mut::<Position>(&mut world, entity, POSITION) {
+    if let Some(position) = world.get_position_mut(entity) {
         position.x += 1.0;
     }
 
     // Get an entity's component mask
     println!(
         "Component mask before adding health component: {:b}",
-        component_mask(&world, entity).unwrap()
+        world.component_mask(entity).unwrap()
     );
 
     // Add a new component to an entity
-    add_components(&mut world, entity, HEALTH);
+    world.add_components(entity, HEALTH);
 
     println!(
         "Component mask after adding health component: {:b}",
-        component_mask(&world, entity).unwrap()
+        world.component_mask(entity).unwrap()
     );
 
     // Query all entities
-    let entities = get_all_entities(&world);
+    let entities = world.get_all_entities();
     println!("All entities: {entities:?}");
 
     // Query all entities with a specific component
-    let players = query_entities(&world, POSITION | VELOCITY | HEALTH);
+    let players = world.query_entities(POSITION | VELOCITY | HEALTH);
     println!("Player entities: {players:?}");
 
     // Query the first entity with a specific component,
     // returning early instead of checking remaining entities
-    let first_player_entity = query_first_entity(&world, POSITION | VELOCITY | HEALTH);
+    let first_player_entity = world.query_first_entity(POSITION | VELOCITY | HEALTH);
     println!("First player entity : {first_player_entity:?}");
 
     // Remove a component from an entity
-    remove_components(&mut world, entity, HEALTH);
+    world.remove_components(entity, HEALTH);
 
-    // This runs the systems once in parallel
-    // Not part of the library's public API, but a demonstration of how to run systems
+    // Systems are functions that iterate over
+    // the component tables and transform component data.
+    // This function invokes two systems in parallel
+    // for each table in the world filtered by component mask.
     systems::run_systems(&mut world);
 
     // Despawn entities, freeing their table slots for reuse
-    despawn_entities(&mut world, &[entity]);
-
-    // Create a new world to populate
-    let mut new_world = World::default();
-
-    // Spawn all entities at once
-    let [root, child1, child2] = spawn_entities(&mut new_world, POSITION | NODE, 3)[..] else {
-        panic!("Failed to spawn entities");
-    };
-
-    // Set up hierarchy
-    if let Some(root_node) = get_component_mut::<Node>(&mut new_world, root, NODE) {
-        root_node.id = root;
-        root_node.parent = None;
-        root_node.children = vec![child1, child2];
-    }
-
-    if let Some(child1_node) = get_component_mut::<Node>(&mut new_world, child1, NODE) {
-        child1_node.id = child1;
-        child1_node.parent = Some(root);
-        child1_node.children = vec![child2];
-    }
-
-    if let Some(child2_node) = get_component_mut::<Node>(&mut new_world, child2, NODE) {
-        child2_node.id = child2;
-        child2_node.parent = Some(child1);
-        child2_node.children = vec![];
-    }
+    world.despawn_entities(&[entity]);
 }
 
 use components::*;
 mod components {
-    use super::*;
-
-    #[derive(Default, Debug, Clone, PartialEq)]
-    pub struct Node {
-        pub id: EntityId,
-        pub parent: Option<EntityId>,
-        pub children: Vec<EntityId>,
-    }
-
     #[derive(Default, Debug, Clone)]
     pub struct Position {
         pub x: f32,
@@ -129,10 +98,6 @@ mod components {
 mod systems {
     use super::*;
 
-    // Systems are functions that iterate over
-    // the component tables and transform component data.
-    // This function invokes two systems in parallel
-    // for each table in the world filtered by component mask.
     pub fn run_systems(world: &mut World) {
         let delta_time = world.resources.delta_time;
         world.tables.par_iter_mut().for_each(|table| {
@@ -160,7 +125,7 @@ mod systems {
     #[inline]
     pub fn health_system(health: &mut [Health]) {
         health.par_iter_mut().for_each(|health| {
-            health.value *= 0.98; // gradually decline health value
+            health.value *= 0.98;
         });
     }
 }
