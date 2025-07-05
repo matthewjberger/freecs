@@ -76,11 +76,12 @@
 //! Systems are plain functions that iterate over
 //! the component tables and transform component data.
 //!
-//! Parallelization of systems can be done with Rayon,
-//! which is useful when working with more than 3 million entities.
+//! Parallelization of systems can be done with [rayon](https://docs.rs/rayon/latest/rayon/).
+//! which lets you replace `.iter_mut()` with `.par_iter_mut()` when iterating over tables.
+//!
 //! In practice, you should use `.iter_mut()` instead of `.par_iter_mut()`
-//! unless you have a large number of entities, because sequential access
-//! is more performant until you are working with extreme numbers of entities.
+//! because sequential access is typically more performant until
+//! you are working with extreme numbers of entities.
 //!
 //! The example function below invokes two systems in parallel
 //! for each table in the world, filtered by component mask.
