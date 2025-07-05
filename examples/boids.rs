@@ -99,10 +99,8 @@ mod systems {
     }
 
     fn process_boids(table: &mut ComponentArrays, resources: &Resources) {
-        // Create spatial grid
         let mut grid = SpatialGrid::new(screen_width(), screen_height(), resources.visual_range);
 
-        // Fill grid with current positions and velocities
         for i in 0..table.entity_indices.len() {
             grid.insert(
                 table.entity_indices[i],
@@ -111,7 +109,6 @@ mod systems {
             );
         }
 
-        // Process boids using spatial grid
         table
             .velocity
             .par_iter_mut()
@@ -123,7 +120,6 @@ mod systems {
                 let mut separation = Velocity::default();
                 let mut neighbors = 0;
 
-                // Existing flocking behavior...
                 for (other_entity, other_pos, other_vel) in
                     grid.get_nearby_boids(pos, resources.visual_range)
                 {
@@ -152,7 +148,6 @@ mod systems {
                     }
                 }
 
-                // Apply mouse influence
                 let mouse_dx = resources.mouse_pos[0] - pos.x;
                 let mouse_dy = resources.mouse_pos[1] - pos.y;
                 let mouse_dist_sq = mouse_dx * mouse_dx + mouse_dy * mouse_dy;
@@ -163,19 +158,16 @@ mod systems {
                     let mouse_influence = 1.0 - (mouse_dist_sq / mouse_range_sq).sqrt();
 
                     if resources.mouse_attract {
-                        // Attraction - move towards mouse
                         vel.x += mouse_dx * mouse_influence * resources.mouse_attraction_weight;
                         vel.y += mouse_dy * mouse_influence * resources.mouse_attraction_weight;
                     }
 
                     if resources.mouse_repel {
-                        // Repulsion - move away from mouse
                         vel.x -= mouse_dx * mouse_influence * resources.mouse_repulsion_weight;
                         vel.y -= mouse_dy * mouse_influence * resources.mouse_repulsion_weight;
                     }
                 }
 
-                // Apply flocking behaviors if we have neighbors
                 if neighbors > 0 {
                     let inv_neighbors = 1.0 / neighbors as f32;
 
@@ -189,7 +181,6 @@ mod systems {
                     vel.y += alignment.y + cohesion.y + separation.y * resources.separation_weight;
                 }
 
-                // Enforce speed limits
                 let speed = (vel.x * vel.x + vel.y * vel.y).sqrt();
                 if speed > resources.max_speed {
                     let factor = resources.max_speed / speed;
@@ -306,7 +297,6 @@ fn draw_ui(params: &mut BoidParams, world: &mut World) {
         draw_text(text, x, y, 20.0, WHITE);
     };
 
-    // Get current entity count
     let entity_count = world.query_entities(BOID).len();
     draw_param(y, &format!("Entities: {}", entity_count));
     y += step;
@@ -342,18 +332,15 @@ fn draw_ui(params: &mut BoidParams, world: &mut World) {
 
     draw_param(y, "[Right Mouse] Repel boids");
 
-    // Update mouse state
     let mouse_pos = Vec2::new(mouse_position().0, mouse_position().1);
     world.resources.mouse_pos = [mouse_pos.x, mouse_pos.y];
     world.resources.mouse_attract = is_mouse_button_down(MouseButton::Left);
     world.resources.mouse_repel = is_mouse_button_down(MouseButton::Right);
 
-    // Add mouse influence parameters to resources
     world.resources.mouse_attraction_weight = params.mouse_attraction_weight;
     world.resources.mouse_repulsion_weight = params.mouse_repulsion_weight;
     world.resources.mouse_influence_range = params.mouse_influence_range;
 
-    // Draw mouse influence range if active
     if world.resources.mouse_attract || world.resources.mouse_repel {
         let color = if world.resources.mouse_attract {
             Color::new(0.0, 1.0, 0.0, 0.2)
@@ -395,7 +382,6 @@ fn draw_ui(params: &mut BoidParams, world: &mut World) {
         params.cohesion_weight = (params.cohesion_weight + speed).min(1.0);
     }
 
-    // Handle spawning and despawning
     if is_key_pressed(KeyCode::Equal) {
         params.spawn_count += 1000;
         spawn_boids(world, 1000);
@@ -405,14 +391,12 @@ fn draw_ui(params: &mut BoidParams, world: &mut World) {
         if despawn_count > 0 {
             params.spawn_count = params.spawn_count.saturating_sub(despawn_count);
 
-            // Get entities from the front instead of the back to avoid swap_remove issues
             let to_despawn: Vec<_> = world
                 .get_all_entities()
                 .into_iter()
                 .take(despawn_count)
                 .collect();
 
-            // Despawn in chunks to avoid potential index issues
             for chunk in to_despawn.chunks(100) {
                 world.despawn_entities(chunk);
             }
