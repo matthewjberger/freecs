@@ -51,7 +51,6 @@
 //! // Lookup and modify a component
 //! if let Some(pos) = world.get_component_mut::<Position>(entity, POSITION) {
 //!     pos.x += 1.0;
-//!
 //! }
 //!
 //! // Add new components to an entity by mask
