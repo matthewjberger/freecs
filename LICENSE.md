@@ -1,7 +1,7 @@
 The MIT License (MIT)
 =====================
 
-Copyright © `2024` `Matthew Jordan Berger`
+Copyright © `2025` `Matthew Jordan Berger`
 
 Permission is hereby granted, free of charge, to any person
 obtaining a copy of this software and associated documentation

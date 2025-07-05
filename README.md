@@ -19,7 +19,7 @@ Add this to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-freecs = "0.4.4"
+freecs = "0.4.5"
 
 # (optional) add rayon if you want to parallelize systems
 rayon = "^1.10.0"
@@ -186,17 +186,10 @@ while let Some(event) = world.try_next_event() {
         }
     }
 }
+
+// You can also clear the event queue
+world.clear_events();
 ```
-
-## API
-
-- `world.mark_changed(entity, mask)` - Mark one or more components as changed
-- `world.try_next_event()` - Pop the next change event from the queue
-- `world.clear_events()` - Clear all pending change events
-
-## Design
-
-Change detection in freecs is explicit rather than automatic. This gives you full control over when change events are generated, avoiding spurious events when components are accessed but not modified.
 
 You can mark multiple components as changed in a single call:
 
