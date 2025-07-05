@@ -1,4 +1,4 @@
-use freecs::{ecs, table_has_components};
+use freecs::{ecs, table_has_components, EntityId};
 use std::time::{Duration, Instant};
 use rayon::prelude::*;
 
@@ -13,7 +13,6 @@ ecs! {
         physics: Physics => PHYSICS,
         ai: AI => AI,
         inventory: Inventory => INVENTORY,
-        // Additional test components to stress test component count
         component_a: ComponentA => COMPONENT_A,
         component_b: ComponentB => COMPONENT_B,
         component_c: ComponentC => COMPONENT_C,

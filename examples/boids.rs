@@ -1,4 +1,4 @@
-use freecs::{ecs, table_has_components};
+use freecs::{EntityId, ecs, table_has_components};
 use macroquad::prelude::*;
 
 ecs! {
@@ -86,7 +86,6 @@ mod systems {
     use rayon::prelude::*;
 
     pub fn run_systems(world: &mut World) {
-        // Extract resources before parallel iteration to avoid borrowing conflicts
         let resources = &world.resources;
         let delta_time = resources.delta_time;
 

@@ -4,13 +4,13 @@
 [<img alt="crates.io" src="https://img.shields.io/crates/v/freecs.svg?style=for-the-badge&color=fc8d62&logo=rust" height="20">](https://crates.io/crates/freecs)
 [<img alt="docs.rs" src="https://img.shields.io/badge/docs.rs-freecs-66c2a5?style=for-the-badge&labelColor=555555&logo=docs.rs" height="20">](https://docs.rs/freecs)
 
-`freecs` is a zero-abstraction table-based ECS library for Rust, in about ~600 lines
+`freecs` is a zero-abstraction table-based ECS library for Rust, in about ~500 lines
 
 A macro is used to define the world and its components, and generates
 the entity component system as part of your source code at compile time. The generated code
 contains only plain data structures (no methods) and free functions that transform them, achieving static dispatch.
 
-The internal implementation is ~600 loc (aside from tests, comments, and example code),
+The internal implementation is ~500 loc (aside from tests, comments, and example code),
 and does not use object orientation, generics, traits, or dynamic dispatch.
 
 ## Quick Start
@@ -19,7 +19,7 @@ Add this to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-freecs = "0.4.2"
+freecs = "0.4.3"
 
 # (optional) add rayon if you want to parallelize systems
 rayon = "^1.10.0"
@@ -28,7 +28,7 @@ rayon = "^1.10.0"
 And in `main.rs`:
 
 ```rust
-use freecs::{ecs, table_has_components};
+use freecs::{ecs, table_has_components, EntityId};
 use rayon::prelude::*;
 
 ecs! {
@@ -160,6 +160,53 @@ mod systems {
     }
 }
 ```
+
+## Change Detection
+
+`freecs` provides an opt-in change detection system that allows you to track when components are modified.
+This is useful for systems that only need to process entities when their data has changed.
+
+## Basic Usage
+
+```rust
+// Get mutable access and modify a component
+if let Some(pos) = world.get_component_mut::<Position>(entity, POSITION) {
+    pos.x += velocity.x * dt;
+    pos.y += velocity.y * dt;
+}
+
+// Explicitly mark the component as changed
+world.mark_changed(entity, POSITION);
+
+// Later, process change events
+while let Some(event) = world.try_next_event() {
+    match event {
+        Event::ComponentChanged { kind, entity } => {
+            println!("Component {:b} changed for entity {:?}", kind, entity);
+        }
+    }
+}
+```
+
+## API
+
+- `world.mark_changed(entity, mask)` - Mark one or more components as changed
+- `world.try_next_event()` - Pop the next change event from the queue
+- `world.clear_events()` - Clear all pending change events
+
+## Design
+
+Change detection in freecs is explicit rather than automatic. This gives you full control over when change events are generated, avoiding spurious events when components are accessed but not modified.
+
+You can mark multiple components as changed in a single call:
+
+```rust
+// Mark both position and velocity as changed
+world.mark_changed(entity, POSITION | VELOCITY);
+```
+
+The event queue is stored in the world's `Resources` struct and is automatically available when you create a world with the `ecs!` macro.
+
 
 ## Examples
 

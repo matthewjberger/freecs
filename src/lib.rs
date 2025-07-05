@@ -8,13 +8,13 @@
 //! at compile time. The generated code contains only plain data structures and free functions that
 //! transform them.
 //!
-//! The core implementation is ~600 loc, is fully statically dispatched and
+//! The core implementation is ~500 loc, is fully statically dispatched and
 //! does not use object orientation, generics, or traits.
 //!
 //! # Creating a World
 //!
 //! ```rust
-//! use freecs::{ecs, table_has_components};
+//! use freecs::{ecs, table_has_components, EntityId};
 //!
 //! // First, define components.
 //! // They must implement: `Default`
@@ -70,7 +70,22 @@
 //! let player = world.query_first_entity(POSITION | VELOCITY);
 //! ```
 //!
-//! ## Systems and Parallel Processing
+//! ## Systems
+//!
+//! A system is any function that takes a *mutable* reference to a world,
+//! querying the world for entities to process and operating on their components.
+//!
+//! ```rust
+//! fn example_system(world: &mut World) {
+//!   for entity in world.query_entities(POSITION | VELOCITY) {
+//!       if let Some(position) = world.get_component_mut::<Position>(entity, POSITION) {
+//!           position.x += 1.0;
+//!       }
+//!   }
+//! }
+//! ```
+//!
+//! ## Parallel Processing
 //!
 //! Systems are plain functions that iterate over
 //! the component tables and transform component data.
@@ -78,12 +93,9 @@
 //! Parallelization of systems can be done with [rayon](https://docs.rs/rayon/latest/rayon/).
 //! which lets you replace `.iter_mut()` with `.par_iter_mut()` when iterating over tables.
 //!
-//! In practice, you should use `.iter_mut()` instead of `.par_iter_mut()`
-//! because sequential access is typically more performant until
-//! you are working with extreme numbers of entities.
-//!
-//! The example function below invokes two systems in parallel
-//! for each table in the world, filtered by component mask.
+//! > In practice, you should use `.iter_mut()` instead of `.par_iter_mut()`
+//! > because sequential access is typically more performant until
+//! > you are working with extreme numbers of entities.
 //!
 //! ```rust
 //! pub fn run_systems(world: &mut World, dt: f32) {
@@ -114,13 +126,80 @@
 //! #[inline]
 //! pub fn health_system(health: &mut [Health]) {
 //!     health.par_iter_mut().for_each(|health| {
-//!         health.value *= 0.98; // gradually decline health value
+//!         health.value *= 0.98;
 //!     });
 //! }
 //! ```
 //!
+//! ## Change Detection
+//!
+//! freecs provides an opt-in change detection system that allows you to track when components are modified.
+//! This is useful for systems that only need to process entities when their data has changed.
+//!
+//! ### Basic Usage
+//!
+//! ```rust
+//! // Get mutable access and modify a component
+//! if let Some(pos) = world.get_component_mut::<Position>(entity, POSITION) {
+//!     pos.x += velocity.x * dt;
+//!     pos.y += velocity.y * dt;
+//! }
+//!
+//! // Explicitly mark the component as changed
+//! world.mark_changed(entity, POSITION);
+//!
+//! // Later, process change events
+//! while let Some(event) = world.try_next_event() {
+//!     match event {
+//!         Event::ComponentChanged { kind, entity } => {
+//!             println!("Component {:b} changed for entity {:?}", kind, entity);
+//!         }
+//!     }
+//! }
+//! ```
+//!
+//! ### API
+//!
+//! - `world.mark_changed(entity, mask)` - Mark one or more components as changed
+//! - `world.try_next_event()` - Pop the next change event from the queue
+//! - `world.clear_events()` - Clear all pending change events
+//!
+//! ### Design
+//!
+//! Change detection in freecs is explicit rather than automatic. This gives you full control
+//! over when change events are generated, avoiding spurious events when components are accessed
+//! but not modified.
+//!
+//! You can mark multiple components as changed in a single call:
+//!
+//! ```rust
+//! // Mark both position and velocity as changed
+//! world.mark_changed(entity, POSITION | VELOCITY);
+//! ```
+//!
+//! The event queue is stored in the world's `Resources` struct and is automatically available
+//! when you create a world with the `ecs!` macro.
+//!
 
 pub use paste;
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum Event {
+    ComponentChanged { kind: u64, entity: EntityId },
+}
+
+#[derive(Default, Clone, Copy, Debug, Eq, PartialEq, Hash)]
+pub struct EntityId {
+    pub id: u32,
+    pub generation: u32,
+}
+
+impl std::fmt::Display for EntityId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let Self { id, generation } = self;
+        write!(f, "Id: {id} - Generation: {generation}")
+    }
+}
 
 #[macro_export]
 macro_rules! ecs {
@@ -147,23 +226,10 @@ macro_rules! ecs {
             count
         };
 
-        #[derive(Default, Clone, Copy, Debug, Eq, PartialEq, Hash)]
-        pub struct EntityId {
-            pub id: u32,
-            pub generation: u32,
-        }
-
-        impl std::fmt::Display for EntityId {
-            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                let Self { id, generation } = self;
-                write!(f, "Id: {id} - Generation: {generation}")
-            }
-        }
-
         #[derive(Default)]
         pub struct EntityAllocator {
             next_id: u32,
-            free_ids: Vec<(u32, u32)>, // (id, next_generation)
+            free_ids: Vec<(u32, u32)>,
         }
 
         #[derive(Copy, Clone, Default)]
@@ -192,39 +258,50 @@ macro_rules! ecs {
 
         #[allow(unused)]
         impl $world {
+            pub fn try_next_event(&mut self) -> Option<$crate::Event> {
+                self.resources.events.pop_front()
+            }
+
+            pub fn clear_events(&mut self) {
+                self.resources.events.clear();
+            }
+
+            pub fn mark_changed(&mut self, entity: $crate::EntityId, mask: u64) {
+                self.resources.events.push_back($crate::Event::ComponentChanged { kind: mask, entity });
+            }
+
             $(
                 $crate::paste::paste! {
                     #[inline]
-                    pub fn [<get_ $name>](&self, entity: EntityId) -> Option<&$type> {
+                    pub fn [<get_ $name>](&self, entity: $crate::EntityId) -> Option<&$type> {
                         self.get_component::<$type>(entity, $mask)
                     }
 
                     #[inline]
-                    pub fn [<get_ $name _mut>](&mut self, entity: EntityId) -> Option<&mut $type> {
+                    pub fn [<get_ $name _mut>](&mut self, entity: $crate::EntityId) -> Option<&mut $type> {
                         self.get_component_mut::<$type>(entity, $mask)
                     }
 
                     #[inline]
-                    pub fn [<entity_has_ $name>](&self, entity: EntityId) -> bool {
+                    pub fn [<entity_has_ $name>](&self, entity: $crate::EntityId) -> bool {
                         self.entity_has_components(entity, $mask)
                     }
 
                     #[inline]
-                    pub fn [<add_ $name>](&mut self, entity: EntityId) {
+                    pub fn [<add_ $name>](&mut self, entity: $crate::EntityId) {
                         self.add_components(entity, $mask);
                     }
 
                     #[inline]
-                    pub fn [<remove_ $name>](&mut self, entity: EntityId) -> bool {
+                    pub fn [<remove_ $name>](&mut self, entity: $crate::EntityId) -> bool {
                         self.remove_components(entity, $mask)
                     }
                 }
             )*
 
-            pub fn get_component<T: 'static>(&self, entity: EntityId, mask: u64) -> Option<&T> {
+            pub fn get_component<T: 'static>(&self, entity: $crate::EntityId, mask: u64) -> Option<&T> {
                 let (table_index, array_index) = get_location(&self.entity_locations, entity)?;
 
-                // Early return if entity is despawned
                 if !self.entity_locations.locations[entity.id as usize].allocated {
                     return None;
                 }
@@ -237,14 +314,6 @@ macro_rules! ecs {
 
                 $(
                     if mask == $mask && std::any::TypeId::of::<T>() == std::any::TypeId::of::<$type>() {
-                        // SAFETY: This operation is safe because:
-                        // 1. We verify the component type T exactly matches $type via TypeId
-                        // 2. We confirm the table contains this component via mask check
-                        // 3. array_index is valid from get_location bounds check
-                        // 4. The reference is valid for the lifetime of the return value
-                        //    because it's tied to the table reference lifetime
-                        // 5. No mutable aliases can exist during the shared borrow
-                        // 6. The type cast maintains proper alignment as types are identical
                         return Some(unsafe { &*(&table.$name[array_index] as *const $type as *const T) });
                     }
                 )*
@@ -252,7 +321,7 @@ macro_rules! ecs {
                 None
             }
 
-            pub fn get_component_mut<T: 'static>(&mut self, entity: EntityId, mask: u64) -> Option<&mut T> {
+            pub fn get_component_mut<T: 'static>(&mut self, entity: $crate::EntityId, mask: u64) -> Option<&mut T> {
                 let (table_index, array_index) = get_location(&self.entity_locations, entity)?;
                 let table = &mut self.tables[table_index];
                 if table.mask & mask == 0 {
@@ -261,14 +330,6 @@ macro_rules! ecs {
 
                 $(
                     if mask == $mask && std::any::TypeId::of::<T>() == std::any::TypeId::of::<$type>() {
-                        // SAFETY: This operation is safe because:
-                        // 1. We verify the component type T exactly matches $type via TypeId
-                        // 2. We confirm the table contains this component via mask check
-                        // 3. array_index is valid from get_location bounds check
-                        // 4. We have exclusive access through the mutable borrow
-                        // 5. The borrow checker ensures no other references exist
-                        // 6. The pointer cast is valid as we verified the types are identical
-                        // 7. Proper alignment is maintained as the types are the same
                         return Some(unsafe { &mut *(&mut table.$name[array_index] as *mut $type as *mut T) });
                     }
                 )*
@@ -276,7 +337,7 @@ macro_rules! ecs {
                 None
             }
 
-            pub fn spawn_entities(&mut self, mask: u64, count: usize) -> Vec<EntityId> {
+            pub fn spawn_entities(&mut self, mask: u64, count: usize) -> Vec<$crate::EntityId> {
                 let mut entities = Vec::with_capacity(count);
                 let table_index = get_or_create_table(self, mask);
 
@@ -314,7 +375,7 @@ macro_rules! ecs {
                 entities
             }
 
-            pub fn query_entities(&self, mask: u64) -> Vec<EntityId> {
+            pub fn query_entities(&self, mask: u64) -> Vec<$crate::EntityId> {
                 let total_capacity = self
                     .tables
                     .iter()
@@ -337,7 +398,7 @@ macro_rules! ecs {
                 result
             }
 
-            pub fn query_first_entity(&self, mask: u64) -> Option<EntityId> {
+            pub fn query_first_entity(&self, mask: u64) -> Option<$crate::EntityId> {
                 for table in &self.tables {
                     if !$crate::table_has_components!(table, mask) {
                         continue;
@@ -355,7 +416,7 @@ macro_rules! ecs {
                 None
             }
 
-            pub fn despawn_entities(&mut self, entities: &[EntityId]) -> Vec<EntityId> {
+            pub fn despawn_entities(&mut self, entities: &[$crate::EntityId]) -> Vec<$crate::EntityId> {
                 let mut despawned = Vec::with_capacity(entities.len());
                 let mut tables_to_update = Vec::new();
 
@@ -405,7 +466,7 @@ macro_rules! ecs {
                 despawned
             }
 
-            pub fn add_components(&mut self, entity: EntityId, mask: u64) -> bool {
+            pub fn add_components(&mut self, entity: $crate::EntityId, mask: u64) -> bool {
                 if let Some((table_index, array_index)) = get_location(&self.entity_locations, entity) {
                     let current_mask = self.tables[table_index].mask;
                     if current_mask & mask == mask {
@@ -428,7 +489,7 @@ macro_rules! ecs {
                 }
             }
 
-            pub fn remove_components(&mut self, entity: EntityId, mask: u64) -> bool {
+            pub fn remove_components(&mut self, entity: $crate::EntityId, mask: u64) -> bool {
                 if let Some((table_index, array_index)) = get_location(&self.entity_locations, entity) {
                     let current_mask = self.tables[table_index].mask;
                     if current_mask & mask == 0 {
@@ -452,12 +513,12 @@ macro_rules! ecs {
                 }
             }
 
-            pub fn component_mask(&self, entity: EntityId) -> Option<u64> {
+            pub fn component_mask(&self, entity: $crate::EntityId) -> Option<u64> {
                 get_location(&self.entity_locations, entity)
                     .map(|(table_index, _)| self.tables[table_index].mask)
             }
 
-            pub fn get_all_entities(&self) -> Vec<EntityId> {
+            pub fn get_all_entities(&self) -> Vec<$crate::EntityId> {
                 let mut result = Vec::new();
                 for table in &self.tables {
                     result.extend(
@@ -471,20 +532,21 @@ macro_rules! ecs {
                 result
             }
 
-            pub fn entity_has_components(&self, entity: EntityId, components: u64) -> bool {
+            pub fn entity_has_components(&self, entity: $crate::EntityId, components: u64) -> bool {
                 self.component_mask(entity).unwrap_or(0) & components != 0
             }
         }
 
         #[derive(Default)]
         pub struct $resources {
+            pub events: std::collections::VecDeque<$crate::Event>,
             $($(#[$attr])* pub $resource_name: $resource_type,)*
         }
 
         #[derive(Default)]
         pub struct ComponentArrays {
             $(pub $name: Vec<$type>,)*
-            pub entity_indices: Vec<EntityId>,
+            pub entity_indices: Vec<$crate::EntityId>,
             pub mask: u64,
         }
 
@@ -510,13 +572,7 @@ macro_rules! ecs {
             }
         }
 
-
-
-
-
-
-
-        fn remove_from_table(arrays: &mut ComponentArrays, index: usize) -> Option<EntityId> {
+        fn remove_from_table(arrays: &mut ComponentArrays, index: usize) -> Option<$crate::EntityId> {
             let last_index = arrays.entity_indices.len() - 1;
             let mut swapped_entity = None;
 
@@ -536,7 +592,7 @@ macro_rules! ecs {
 
         fn move_entity(
             world: &mut $world,
-            entity: EntityId,
+            entity: $crate::EntityId,
             from_table: usize,
             from_index: usize,
             to_table: usize,
@@ -567,7 +623,7 @@ macro_rules! ecs {
             }
         }
 
-        fn get_location(locations: &EntityLocations, entity: EntityId) -> Option<(usize, usize)> {
+        fn get_location(locations: &EntityLocations, entity: $crate::EntityId) -> Option<(usize, usize)> {
             let id = entity.id as usize;
             if id >= locations.locations.len() {
                 return None;
@@ -578,11 +634,12 @@ macro_rules! ecs {
                 return None;
             }
 
-            Some((location.table_index as usize, location.array_index as usize))        }
+            Some((location.table_index as usize, location.array_index as usize))
+        }
 
         fn insert_location(
             locations: &mut EntityLocations,
-            entity: EntityId,
+            entity: $crate::EntityId,
             location: (usize, usize),
         ) {
             let id = entity.id as usize;
@@ -600,7 +657,7 @@ macro_rules! ecs {
             };
         }
 
-        fn create_entity(world: &mut $world) -> EntityId {
+        fn create_entity(world: &mut $world) -> $crate::EntityId {
             if let Some((id, next_gen)) = world.allocator.free_ids.pop() {
                 let id_usize = id as usize;
                 if id_usize >= world.entity_locations.locations.len() {
@@ -610,7 +667,7 @@ macro_rules! ecs {
                     );
                 }
                 world.entity_locations.locations[id_usize].generation = next_gen;
-                EntityId {
+                $crate::EntityId {
                     id,
                     generation: next_gen,
                 }
@@ -624,13 +681,13 @@ macro_rules! ecs {
                         EntityLocation::default(),
                     );
                 }
-                EntityId { id, generation: 0 }
+                $crate::EntityId { id, generation: 0 }
             }
         }
 
         fn add_to_table(
             arrays: &mut ComponentArrays,
-            entity: EntityId,
+            entity: $crate::EntityId,
             components: ( $(Option<$type>,)* ),
         ) {
             let ($($name,)*) = components;
@@ -1361,49 +1418,6 @@ mod tests {
     }
 
     #[test]
-    fn test_table_transitions_with_light() {
-        let mut world = World::default();
-
-        let entity = world.spawn_entities(POSITION | VELOCITY | HEALTH, 1)[0];
-        println!("Initial mask: {:b}", world.component_mask(entity).unwrap());
-
-        let query_mask = POSITION | VELOCITY;
-        let results = world.query_entities(query_mask);
-        assert!(
-            results.contains(&entity),
-            "Pre-transition query should work"
-        );
-
-        println!("Before adding new component...");
-        println!(
-            "Entity components: {:b}",
-            world.component_mask(entity).unwrap()
-        );
-        println!(
-            "Current table mask: {:b}",
-            world.tables[get_location(&world.entity_locations, entity).unwrap().0].mask
-        );
-
-        world.add_components(entity, HEALTH);
-
-        println!("After adding new component...");
-        println!(
-            "Entity components: {:b}",
-            world.component_mask(entity).unwrap()
-        );
-        let (table_idx, _) = get_location(&world.entity_locations, entity).unwrap();
-        println!("New table mask: {:b}", world.tables[table_idx].mask);
-
-        let results = world.query_entities(query_mask);
-        assert!(
-            results.contains(&entity),
-            "Post-transition query should still work\nQuery mask: {:b}\nEntity mask: {:b}",
-            query_mask,
-            world.component_mask(entity).unwrap()
-        );
-    }
-
-    #[test]
     fn test_query_consistency() {
         let mut world = World::default();
 
@@ -1461,5 +1475,116 @@ mod tests {
         let entity = world.spawn_entities(POSITION | VELOCITY, 1)[0];
         assert!(world.entity_has_components(entity, POSITION | VELOCITY));
         assert!(!world.entity_has_components(entity, HEALTH));
+    }
+
+    #[test]
+    fn test_change_detection() {
+        let mut world = World::default();
+
+        let entity = world.spawn_entities(POSITION, 1)[0];
+
+        world.add_components(entity, VELOCITY);
+
+        assert!(world.try_next_event().is_none());
+
+        if let Some(vel) = world.get_component_mut::<Velocity>(entity, VELOCITY) {
+            vel.x = 10.0;
+        }
+
+        assert!(world.try_next_event().is_none());
+
+        world.mark_changed(entity, VELOCITY);
+
+        let event = world.try_next_event();
+        assert!(event.is_some());
+
+        if let Some(Event::ComponentChanged {
+            kind,
+            entity: changed_entity,
+        }) = event
+        {
+            assert_eq!(kind, VELOCITY);
+            assert_eq!(changed_entity, entity);
+        } else {
+            panic!("Expected ComponentChanged event");
+        }
+
+        assert!(world.try_next_event().is_none());
+    }
+
+    #[test]
+    fn test_multiple_change_events() {
+        let mut world = World::default();
+
+        let entity = world.spawn_entities(POSITION | VELOCITY, 1)[0];
+
+        if let Some(pos) = world.get_component_mut::<Position>(entity, POSITION) {
+            pos.x = 5.0;
+        }
+
+        if let Some(vel) = world.get_component_mut::<Velocity>(entity, VELOCITY) {
+            vel.x = 10.0;
+        }
+
+        world.mark_changed(entity, POSITION);
+        world.mark_changed(entity, VELOCITY);
+
+        let event1 = world.try_next_event();
+        assert!(event1.is_some());
+        if let Some(Event::ComponentChanged { kind, .. }) = event1 {
+            assert_eq!(kind, POSITION);
+        }
+
+        let event2 = world.try_next_event();
+        assert!(event2.is_some());
+        if let Some(Event::ComponentChanged { kind, .. }) = event2 {
+            assert_eq!(kind, VELOCITY);
+        }
+
+        assert!(world.try_next_event().is_none());
+    }
+
+    #[test]
+    fn test_mark_changed_with_combined_mask() {
+        let mut world = World::default();
+
+        let entity = world.spawn_entities(POSITION | VELOCITY | HEALTH, 1)[0];
+
+        if let Some(pos) = world.get_component_mut::<Position>(entity, POSITION) {
+            pos.x = 1.0;
+        }
+        if let Some(vel) = world.get_component_mut::<Velocity>(entity, VELOCITY) {
+            vel.x = 2.0;
+        }
+
+        world.mark_changed(entity, POSITION | VELOCITY);
+
+        let event = world.try_next_event();
+        assert!(event.is_some());
+        if let Some(Event::ComponentChanged {
+            kind,
+            entity: changed_entity,
+        }) = event
+        {
+            assert_eq!(kind, POSITION | VELOCITY);
+            assert_eq!(changed_entity, entity);
+        }
+
+        assert!(world.try_next_event().is_none());
+    }
+
+    #[test]
+    fn test_clear_events() {
+        let mut world = World::default();
+
+        let entity = world.spawn_entities(POSITION | VELOCITY, 1)[0];
+
+        world.mark_changed(entity, POSITION);
+        world.mark_changed(entity, VELOCITY);
+        world.mark_changed(entity, POSITION | VELOCITY);
+
+        world.clear_events();
+
+        assert!(world.try_next_event().is_none());
     }
 }

@@ -1,4 +1,4 @@
-use freecs::{ecs, table_has_components};
+use freecs::{EntityId, ecs, table_has_components};
 use rayon::prelude::*;
 use std::collections::HashMap;
 use std::sync::Mutex;
