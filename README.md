@@ -161,12 +161,40 @@ mod systems {
 }
 ```
 
+## Systems
+
+Systems can iterate over tables, but for most use cases you can just write a function that queries entities:
+
+```rust
+pub fn update_global_transforms_system(world: &mut World) {
+    world
+        .query_entities(LOCAL_TRANSFORM | GLOBAL_TRANSFORM)
+        .into_iter()
+        .for_each(|entity| {
+            // The entities we queried for are guaranteed to have
+            // a local transform and global transform here
+            let new_global_transform = query_global_transform(world, entity);
+            let global_transform = world.get_global_transform_mut(entity).unwrap();
+            *global_transform = GlobalTransform(new_global_transform);
+        });
+}
+
+pub fn query_global_transform(world: &World, entity: EntityId) -> nalgebra_glm::Mat4 {
+    let Some(local_transform) = world.get_local_transform(entity) else {
+        return nalgebra_glm::Mat4::identity();
+    };
+    if let Some(Parent(parent)) = world.get_parent(entity) {
+        query_global_transform(world, *parent) * local_transform
+    } else {
+        local_transform
+    }
+}
+```
+
 ## Change Detection
 
 `freecs` provides an opt-in change detection system that allows you to track when components are modified.
 This is useful for systems that only need to process entities when their data has changed.
-
-## Basic Usage
 
 ```rust
 // Get mutable access and modify a component
@@ -199,7 +227,6 @@ world.mark_changed(entity, POSITION | VELOCITY);
 ```
 
 The event queue is stored in the world's `Resources` struct and is automatically available when you create a world with the `ecs!` macro.
-
 
 ## Examples
 
