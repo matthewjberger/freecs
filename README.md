@@ -7,8 +7,7 @@
 `freecs` is a zero-abstraction table-based ECS library for Rust, in about ~500 lines
 
 A macro is used to define the world and its components, and generates
-the entity component system as part of your source code at compile time. The generated code
-contains only plain data structures (no methods) and free functions that transform them, achieving static dispatch.
+the entity component system as part of your source code at compile time.
 
 The internal implementation is ~500 loc (aside from tests, comments, and example code),
 and does not use object orientation, generics, traits, or dynamic dispatch.
