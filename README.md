@@ -232,7 +232,7 @@ The event queue is stored in the world's `Resources` struct and is automatically
 Run the examples with:
 
 ```rust
-cargo run -r --example cubes
+cargo run -r --example simple
 ```
 
 ## License
