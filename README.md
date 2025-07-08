@@ -229,10 +229,27 @@ The event queue is stored in the world's `Resources` struct and is automatically
 
 ## Examples
 
+### Simple Example
+A basic demonstration of spawning entities, querying components, and running systems.
+
+### Boids Example
+A flocking simulation using macroquad for visualization, demonstrating parallel systems and spatial partitioning.
+
+### Wolfenstein Example
+A raycasted 3D engine similar to Wolfenstein 3D, showcasing:
+- Player movement and rotation with collision detection
+- Raycasting algorithm for 3D rendering
+- ECS-based game state management
+- Real-time 3D visualization with minimap
+- Different wall types with varying colors
+- Debug visualization of raycast rays
+
 Run the examples with:
 
 ```rust
 cargo run -r --example simple
+cargo run -r --example boids
+cargo run -r --example wolfenstein
 ```
 
 ## License
