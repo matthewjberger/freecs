@@ -279,6 +279,16 @@ macro_rules! ecs {
                     }
 
                     #[inline]
+                    pub fn [<assign_ $name>](&mut self, entity: $crate::EntityId, value: $type) {
+                        if let Some(component) = self.get_component_mut(entity, $mask) {
+                            *component = value;
+                        } else {
+                            self.add_components(entity, $mask);
+                            *self.get_component_mut(entity, $mask).unwrap() = value;
+                        }
+                    }
+
+                    #[inline]
                     pub fn [<add_ $name>](&mut self, entity: $crate::EntityId) {
                         self.add_components(entity, $mask);
                     }
@@ -1577,5 +1587,30 @@ mod tests {
         world.clear_events();
 
         assert!(world.try_next_event().is_none());
+    }
+
+    #[test]
+    fn test_assign_component() {
+        let mut world = World::default();
+        let entity = world.spawn_entities(POSITION, 1)[0];
+        world.assign_position(entity, Position { x: 1.0, y: 2.0 });
+        assert_eq!(
+            world.get_component::<Position>(entity, POSITION).unwrap().x,
+            1.0
+        );
+        assert_eq!(
+            world.get_component::<Position>(entity, POSITION).unwrap().y,
+            2.0
+        );
+
+        world.assign_position(entity, Position { x: 3.0, y: 4.0 });
+        assert_eq!(
+            world.get_component::<Position>(entity, POSITION).unwrap().x,
+            3.0
+        );
+        assert_eq!(
+            world.get_component::<Position>(entity, POSITION).unwrap().y,
+            4.0
+        );
     }
 }
