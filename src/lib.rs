@@ -279,7 +279,7 @@ macro_rules! ecs {
                     }
 
                     #[inline]
-                    pub fn [<assign_ $name>](&mut self, entity: $crate::EntityId, value: $type) {
+                    pub fn [<set_ $name>](&mut self, entity: $crate::EntityId, value: $type) {
                         if let Some(component) = self.get_component_mut(entity, $mask) {
                             *component = value;
                         } else {
@@ -1590,10 +1590,10 @@ mod tests {
     }
 
     #[test]
-    fn test_assign_component() {
+    fn test_set_component() {
         let mut world = World::default();
         let entity = world.spawn_entities(POSITION, 1)[0];
-        world.assign_position(entity, Position { x: 1.0, y: 2.0 });
+        world.set_position(entity, Position { x: 1.0, y: 2.0 });
         assert_eq!(
             world.get_component::<Position>(entity, POSITION).unwrap().x,
             1.0
@@ -1603,7 +1603,7 @@ mod tests {
             2.0
         );
 
-        world.assign_position(entity, Position { x: 3.0, y: 4.0 });
+        world.set_position(entity, Position { x: 3.0, y: 4.0 });
         assert_eq!(
             world.get_component::<Position>(entity, POSITION).unwrap().x,
             3.0

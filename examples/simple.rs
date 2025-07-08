@@ -30,6 +30,8 @@ pub fn main() {
     let position = world.get_position(entity);
     println!("Position: {:?}", position);
 
+    world.set_position(entity, Position { x: 1.0, y: 2.0 });
+
     // Mutate a component
     if let Some(position) = world.get_position_mut(entity) {
         position.x += 1.0;
