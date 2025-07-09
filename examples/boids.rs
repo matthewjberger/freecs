@@ -1,4 +1,4 @@
-use freecs::{EntityId, ecs, table_has_components};
+use freecs::{Entity, ecs, table_has_components};
 use macroquad::prelude::*;
 
 ecs! {
@@ -431,7 +431,7 @@ fn draw_debug(world: &World) {
 }
 
 struct SpatialGrid {
-    cells: Vec<Vec<(EntityId, Position, Velocity)>>,
+    cells: Vec<Vec<(Entity, Position, Velocity)>>,
     cell_size: f32,
     width: usize,
     height: usize,
@@ -450,7 +450,7 @@ impl SpatialGrid {
         }
     }
 
-    fn insert(&mut self, entity: EntityId, pos: Position, vel: Velocity) {
+    fn insert(&mut self, entity: Entity, pos: Position, vel: Velocity) {
         let idx = self.get_cell_index(pos.x, pos.y);
         if let Some(cell) = self.cells.get_mut(idx) {
             cell.push((entity, pos, vel));
@@ -467,7 +467,7 @@ impl SpatialGrid {
         &self,
         pos: Position,
         range: f32,
-    ) -> impl Iterator<Item = &(EntityId, Position, Velocity)> {
+    ) -> impl Iterator<Item = &(Entity, Position, Velocity)> {
         let range_cells = (range / self.cell_size).ceil() as isize;
         let cell_x = (pos.x / self.cell_size).floor() as isize;
         let cell_y = (pos.y / self.cell_size).floor() as isize;

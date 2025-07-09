@@ -4,13 +4,12 @@
 [<img alt="crates.io" src="https://img.shields.io/crates/v/freecs.svg?style=for-the-badge&color=fc8d62&logo=rust" height="20">](https://crates.io/crates/freecs)
 [<img alt="docs.rs" src="https://img.shields.io/badge/docs.rs-freecs-66c2a5?style=for-the-badge&labelColor=555555&logo=docs.rs" height="20">](https://docs.rs/freecs)
 
-`freecs` is a abstraction-free table-based ECS library for Rust, in about ~500 lines
+`freecs` is a table-based ECS library for Rust, in about ~600 lines
 
 A macro is used to define the world and its components, and generates
 the entity component system as part of your source code at compile time.
 
-The internal implementation is ~500 loc (aside from tests, comments, and example code),
-and does not use object orientation, generics, traits, or dynamic dispatch.
+The internal implementation is minimal and does not use object orientation, generics, traits, or dynamic dispatch.
 
 ## Quick Start
 
@@ -18,7 +17,7 @@ Add this to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-freecs = "0.4.8"
+freecs = "0.5.0"
 
 # (optional) add rayon if you want to parallelize systems
 rayon = "^1.10.0"
@@ -27,7 +26,7 @@ rayon = "^1.10.0"
 And in `main.rs`:
 
 ```rust
-use freecs::{ecs, table_has_components, EntityId};
+use freecs::{ecs, table_has_components};
 use rayon::prelude::*;
 
 ecs! {
@@ -45,19 +44,22 @@ pub fn main() {
     let mut world = World::default();
 
     // Spawn entities with components
-    let entity = world.spawn_entities(POSITION | VELOCITY, 1)[0];
-    println!(
-        "Spawned {} with position and velocity",
-        world.get_all_entities().len()
-    );
+    let _entity = world.spawn_entities(POSITION | VELOCITY, 1)[0];
+
+    // Or use the entity builder
+    let entity = EntityBuilder::new()
+        .with_position(Position { x: 1.0, y: 2.0 })
+        .spawn(&mut world, 1)[0];
 
     // Read arbitrary components
     let position = world.get_component::<Position>(entity, POSITION);
     println!("Position: {:?}", position);
 
-    // Same as the above but more concise, these are generated for each component
+    // Or use the shorthand methods
     let position = world.get_position(entity);
     println!("Position: {:?}", position);
+
+    world.set_position(entity, Position { x: 1.0, y: 2.0 });
 
     // Mutate a component
     if let Some(position) = world.get_position_mut(entity) {
@@ -65,31 +67,20 @@ pub fn main() {
     }
 
     // Get an entity's component mask
-    println!(
-        "Component mask before adding health component: {:b}",
-        world.component_mask(entity).unwrap()
-    );
+    let _component_mask = world.component_mask(entity).unwrap();
 
     // Add a new component to an entity
     world.add_components(entity, HEALTH);
 
-    println!(
-        "Component mask after adding health component: {:b}",
-        world.component_mask(entity).unwrap()
-    );
-
     // Query all entities
-    let entities = world.get_all_entities();
-    println!("All entities: {entities:?}");
+    let _entities = world.get_all_entities();
 
     // Query all entities with a specific component
-    let players = world.query_entities(POSITION | VELOCITY | HEALTH);
-    println!("Player entities: {players:?}");
+    let _players = world.query_entities(POSITION | VELOCITY | HEALTH);
 
     // Query the first entity with a specific component,
     // returning early instead of checking remaining entities
-    let first_player_entity = world.query_first_entity(POSITION | VELOCITY | HEALTH);
-    println!("First player entity : {first_player_entity:?}");
+    let _first_player_entity = world.query_first_entity(POSITION | VELOCITY | HEALTH);
 
     // Remove a component from an entity
     world.remove_components(entity, HEALTH);
@@ -128,6 +119,10 @@ mod systems {
     use super::*;
 
     pub fn run_systems(world: &mut World) {
+        // systems can be simple functions that use queries and component accessors
+        example_system(world);
+
+        // or you can iterate over the tables in the world directly
         let delta_time = world.resources.delta_time;
         world.tables.par_iter_mut().for_each(|table| {
             if table_has_components!(table, POSITION | VELOCITY | HEALTH) {
@@ -137,6 +132,14 @@ mod systems {
                 health_system(&mut table.health);
             }
         });
+    }
+
+    fn example_system(world: &mut World) {
+        for entity in world.query_entities(POSITION | VELOCITY) {
+            if let Some(position) = world.get_component_mut::<Position>(entity, POSITION) {
+                position.x += 1.0;
+            }
+        }
     }
 
     // The system itself can also access components in parallel
@@ -227,30 +230,22 @@ world.mark_changed(entity, POSITION | VELOCITY);
 
 The event queue is stored in the world's `Resources` struct and is automatically available when you create a world with the `ecs!` macro.
 
-## Examples
 
-### Simple Example
-A basic demonstration of spawning entities, querying components, and running systems.
+## Entity Builder
 
-### Boids Example
-A flocking simulation using macroquad for visualization, demonstrating parallel systems and spatial partitioning.
-
-### Wolfenstein Example
-A raycasted 3D engine similar to Wolfenstein 3D, showcasing:
-- Player movement and rotation with collision detection
-- Raycasting algorithm for 3D rendering
-- ECS-based game state management
-- Real-time 3D visualization with minimap
-- Different wall types with varying colors
-- Debug visualization of raycast rays
-
-Run the examples with:
+An entity builder is generated automatically:
 
 ```rust
-cargo run -r --example simple
-cargo run -r --example boids
-cargo run -r --example wolfenstein
+let mut world = World::default();
+
+let entities = EntityBuilder::new()
+    .with_position(Position { x: 1.0, y: 2.0 })
+    .spawn(&mut world, 2);
+
+assert_eq!(world.get_position(entities[0]).unwrap().x, 1.0);
+assert_eq!(world.get_position(entities[1]).unwrap().y, 2.0);
 ```
+
 
 ## License
 

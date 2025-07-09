@@ -1,4 +1,4 @@
-use freecs::{EntityId, ecs, table_has_components};
+use freecs::{Entity, ecs, table_has_components};
 use macroquad::prelude::*;
 
 ecs! {
@@ -273,7 +273,7 @@ fn spawn_level(world: &mut World) {
     }
 }
 
-fn spawn_player(world: &mut World) -> EntityId {
+fn spawn_player(world: &mut World) -> Entity {
     let entity = world.spawn_entities(POSITION | ROTATION | VELOCITY | PLAYER, 1)[0];
     if let Some(pos) = world.get_component_mut::<Position>(entity, POSITION) {
         pos.x = 2.0;

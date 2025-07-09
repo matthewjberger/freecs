@@ -16,17 +16,18 @@ pub fn main() {
     let mut world = World::default();
 
     // Spawn entities with components
-    let entity = world.spawn_entities(POSITION | VELOCITY, 1)[0];
-    println!(
-        "Spawned {} with position and velocity",
-        world.get_all_entities().len()
-    );
+    let _entity = world.spawn_entities(POSITION | VELOCITY, 1)[0];
+
+    // Or use the entity builder
+    let entity = EntityBuilder::new()
+        .with_position(Position { x: 1.0, y: 2.0 })
+        .spawn(&mut world, 1)[0];
 
     // Read arbitrary components
     let position = world.get_component::<Position>(entity, POSITION);
     println!("Position: {:?}", position);
 
-    // Same as the above but more concise, these are generated for each component
+    // Or use the shorthand methods
     let position = world.get_position(entity);
     println!("Position: {:?}", position);
 
@@ -38,31 +39,20 @@ pub fn main() {
     }
 
     // Get an entity's component mask
-    println!(
-        "Component mask before adding health component: {:b}",
-        world.component_mask(entity).unwrap()
-    );
+    let _component_mask = world.component_mask(entity).unwrap();
 
     // Add a new component to an entity
     world.add_components(entity, HEALTH);
 
-    println!(
-        "Component mask after adding health component: {:b}",
-        world.component_mask(entity).unwrap()
-    );
-
     // Query all entities
-    let entities = world.get_all_entities();
-    println!("All entities: {entities:?}");
+    let _entities = world.get_all_entities();
 
     // Query all entities with a specific component
-    let players = world.query_entities(POSITION | VELOCITY | HEALTH);
-    println!("Player entities: {players:?}");
+    let _players = world.query_entities(POSITION | VELOCITY | HEALTH);
 
     // Query the first entity with a specific component,
     // returning early instead of checking remaining entities
-    let first_player_entity = world.query_first_entity(POSITION | VELOCITY | HEALTH);
-    println!("First player entity : {first_player_entity:?}");
+    let _first_player_entity = world.query_first_entity(POSITION | VELOCITY | HEALTH);
 
     // Remove a component from an entity
     world.remove_components(entity, HEALTH);
@@ -101,6 +91,10 @@ mod systems {
     use super::*;
 
     pub fn run_systems(world: &mut World) {
+        // systems can be simple functions that use queries and component accessors
+        example_system(world);
+
+        // or you can iterate over the tables in the world directly
         let delta_time = world.resources.delta_time;
         world.tables.par_iter_mut().for_each(|table| {
             if table_has_components!(table, POSITION | VELOCITY | HEALTH) {
@@ -110,6 +104,14 @@ mod systems {
                 health_system(&mut table.health);
             }
         });
+    }
+
+    fn example_system(world: &mut World) {
+        for entity in world.query_entities(POSITION | VELOCITY) {
+            if let Some(position) = world.get_component_mut::<Position>(entity, POSITION) {
+                position.x += 1.0;
+            }
+        }
     }
 
     // The system itself can also access components in parallel

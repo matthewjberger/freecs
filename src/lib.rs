@@ -14,7 +14,7 @@
 //! # Creating a World
 //!
 //! ```rust
-//! use freecs::{ecs, table_has_components, EntityId};
+//! use freecs::{ecs, table_has_components, Entity};
 //!
 //! // First, define components.
 //! // They must implement: `Default`
@@ -50,6 +50,11 @@
 //!
 //! // Lookup and modify a component
 //! if let Some(pos) = world.get_component_mut::<Position>(entity, POSITION) {
+//!     pos.x += 1.0;
+//! }
+//!
+//! // Or use the shorthand methods
+//! if let Some(pos) = world.get_position_mut(entity) {
 //!     pos.x += 1.0;
 //! }
 //!
@@ -133,11 +138,6 @@
 //!
 //! ## Change Detection
 //!
-//! freecs provides an opt-in change detection system that allows you to track when components are modified.
-//! This is useful for systems that only need to process entities when their data has changed.
-//!
-//! ### Basic Usage
-//!
 //! ```rust
 //! // Get mutable access and modify a component
 //! if let Some(pos) = world.get_component_mut::<Position>(entity, POSITION) {
@@ -171,21 +171,29 @@
 //! The event queue is stored in the world's `Resources` struct and is automatically available
 //! when you create a world with the `ecs!` macro.
 //!
+//! ## Entity Builder
+//!
+//! ```rust
+//! let mut world = World::default();
+//! let entities = EntityBuilder::new()
+//!     .with_position(Position { x: 1.0, y: 2.0 })
+//!     .spawn(&mut world, 2);
+//! ```
 
 pub use paste;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Event {
-    ComponentChanged { kind: u64, entity: EntityId },
+    ComponentChanged { kind: u64, entity: Entity },
 }
 
 #[derive(Default, Clone, Copy, Debug, Eq, PartialEq, Hash)]
-pub struct EntityId {
+pub struct Entity {
     pub id: u32,
     pub generation: u32,
 }
 
-impl std::fmt::Display for EntityId {
+impl std::fmt::Display for Entity {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let Self { id, generation } = self;
         write!(f, "Id: {id} - Generation: {generation}")
@@ -202,6 +210,48 @@ macro_rules! ecs {
             $($(#[$attr:meta])*  $resource_name:ident: $resource_type:ty),* $(,)?
         }
     ) => {
+        #[allow(unused)]
+        #[derive(Default, Debug, Clone)]
+        pub struct EntityBuilder {
+            $($name: Option<$type>,)*
+        }
+
+        #[allow(unused)]
+        impl EntityBuilder {
+            pub fn new() -> Self {
+                Self::default()
+            }
+
+            $(
+                $crate::paste::paste! {
+                    pub fn [<with_$name>](&mut self, value: $type) -> &mut Self {
+                        self.$name = Some(value);
+                        self
+                    }
+                }
+            )*
+
+            pub fn spawn(&self, world: &mut $world, instances: usize) -> Vec<$crate::Entity> {
+                let mut mask = 0;
+                $(
+                    if self.$name.is_some() {
+                        mask |= $mask;
+                    }
+                )*
+                let entities = world.spawn_entities(mask, instances);
+                for entity in entities.iter() {
+                    $(
+                        $crate::paste::paste! {
+                            if let Some(component) = self.$name.clone() {
+                                world.[<set_$name>](*entity, component);
+                            }
+                        }
+                    )*
+                }
+                entities
+            }
+        }
+
         #[repr(u64)]
         #[allow(clippy::upper_case_acronyms)]
         #[allow(non_camel_case_types)]
@@ -257,29 +307,29 @@ macro_rules! ecs {
                 self.resources.events.clear();
             }
 
-            pub fn mark_changed(&mut self, entity: $crate::EntityId, mask: u64) {
+            pub fn mark_changed(&mut self, entity: $crate::Entity, mask: u64) {
                 self.resources.events.push_back($crate::Event::ComponentChanged { kind: mask, entity });
             }
 
             $(
                 $crate::paste::paste! {
                     #[inline]
-                    pub fn [<get_ $name>](&self, entity: $crate::EntityId) -> Option<&$type> {
+                    pub fn [<get_ $name>](&self, entity: $crate::Entity) -> Option<&$type> {
                         self.get_component::<$type>(entity, $mask)
                     }
 
                     #[inline]
-                    pub fn [<get_ $name _mut>](&mut self, entity: $crate::EntityId) -> Option<&mut $type> {
+                    pub fn [<get_ $name _mut>](&mut self, entity: $crate::Entity) -> Option<&mut $type> {
                         self.get_component_mut::<$type>(entity, $mask)
                     }
 
                     #[inline]
-                    pub fn [<entity_has_ $name>](&self, entity: $crate::EntityId) -> bool {
+                    pub fn [<entity_has_ $name>](&self, entity: $crate::Entity) -> bool {
                         self.entity_has_components(entity, $mask)
                     }
 
                     #[inline]
-                    pub fn [<set_ $name>](&mut self, entity: $crate::EntityId, value: $type) {
+                    pub fn [<set_ $name>](&mut self, entity: $crate::Entity, value: $type) {
                         if let Some(component) = self.get_component_mut(entity, $mask) {
                             *component = value;
                         } else {
@@ -289,18 +339,18 @@ macro_rules! ecs {
                     }
 
                     #[inline]
-                    pub fn [<add_ $name>](&mut self, entity: $crate::EntityId) {
+                    pub fn [<add_ $name>](&mut self, entity: $crate::Entity) {
                         self.add_components(entity, $mask);
                     }
 
                     #[inline]
-                    pub fn [<remove_ $name>](&mut self, entity: $crate::EntityId) -> bool {
+                    pub fn [<remove_ $name>](&mut self, entity: $crate::Entity) -> bool {
                         self.remove_components(entity, $mask)
                     }
                 }
             )*
 
-            pub fn get_component<T: 'static>(&self, entity: $crate::EntityId, mask: u64) -> Option<&T> {
+            pub fn get_component<T: 'static>(&self, entity: $crate::Entity, mask: u64) -> Option<&T> {
                 let (table_index, array_index) = get_location(&self.entity_locations, entity)?;
 
                 if !self.entity_locations.locations[entity.id as usize].allocated {
@@ -322,7 +372,7 @@ macro_rules! ecs {
                 None
             }
 
-            pub fn get_component_mut<T: 'static>(&mut self, entity: $crate::EntityId, mask: u64) -> Option<&mut T> {
+            pub fn get_component_mut<T: 'static>(&mut self, entity: $crate::Entity, mask: u64) -> Option<&mut T> {
                 let (table_index, array_index) = get_location(&self.entity_locations, entity)?;
                 let table = &mut self.tables[table_index];
                 if table.mask & mask == 0 {
@@ -338,7 +388,7 @@ macro_rules! ecs {
                 None
             }
 
-            pub fn spawn_entities(&mut self, mask: u64, count: usize) -> Vec<$crate::EntityId> {
+            pub fn spawn_entities(&mut self, mask: u64, count: usize) -> Vec<$crate::Entity> {
                 let mut entities = Vec::with_capacity(count);
                 let table_index = get_or_create_table(self, mask);
 
@@ -376,7 +426,7 @@ macro_rules! ecs {
                 entities
             }
 
-            pub fn query_entities(&self, mask: u64) -> Vec<$crate::EntityId> {
+            pub fn query_entities(&self, mask: u64) -> Vec<$crate::Entity> {
                 let total_capacity = self
                     .tables
                     .iter()
@@ -399,7 +449,7 @@ macro_rules! ecs {
                 result
             }
 
-            pub fn query_first_entity(&self, mask: u64) -> Option<$crate::EntityId> {
+            pub fn query_first_entity(&self, mask: u64) -> Option<$crate::Entity> {
                 for table in &self.tables {
                     if !$crate::table_has_components!(table, mask) {
                         continue;
@@ -417,7 +467,7 @@ macro_rules! ecs {
                 None
             }
 
-            pub fn despawn_entities(&mut self, entities: &[$crate::EntityId]) -> Vec<$crate::EntityId> {
+            pub fn despawn_entities(&mut self, entities: &[$crate::Entity]) -> Vec<$crate::Entity> {
                 let mut despawned = Vec::with_capacity(entities.len());
                 let mut tables_to_update = Vec::new();
 
@@ -467,7 +517,7 @@ macro_rules! ecs {
                 despawned
             }
 
-            pub fn add_components(&mut self, entity: $crate::EntityId, mask: u64) -> bool {
+            pub fn add_components(&mut self, entity: $crate::Entity, mask: u64) -> bool {
                 if let Some((table_index, array_index)) = get_location(&self.entity_locations, entity) {
                     let current_mask = self.tables[table_index].mask;
                     if current_mask & mask == mask {
@@ -490,7 +540,7 @@ macro_rules! ecs {
                 }
             }
 
-            pub fn remove_components(&mut self, entity: $crate::EntityId, mask: u64) -> bool {
+            pub fn remove_components(&mut self, entity: $crate::Entity, mask: u64) -> bool {
                 if let Some((table_index, array_index)) = get_location(&self.entity_locations, entity) {
                     let current_mask = self.tables[table_index].mask;
                     if current_mask & mask == 0 {
@@ -514,12 +564,12 @@ macro_rules! ecs {
                 }
             }
 
-            pub fn component_mask(&self, entity: $crate::EntityId) -> Option<u64> {
+            pub fn component_mask(&self, entity: $crate::Entity) -> Option<u64> {
                 get_location(&self.entity_locations, entity)
                     .map(|(table_index, _)| self.tables[table_index].mask)
             }
 
-            pub fn get_all_entities(&self) -> Vec<$crate::EntityId> {
+            pub fn get_all_entities(&self) -> Vec<$crate::Entity> {
                 let mut result = Vec::new();
                 for table in &self.tables {
                     result.extend(
@@ -533,7 +583,7 @@ macro_rules! ecs {
                 result
             }
 
-            pub fn entity_has_components(&self, entity: $crate::EntityId, components: u64) -> bool {
+            pub fn entity_has_components(&self, entity: $crate::Entity, components: u64) -> bool {
                 self.component_mask(entity).unwrap_or(0) & components != 0
             }
         }
@@ -547,7 +597,7 @@ macro_rules! ecs {
         #[derive(Default)]
         pub struct ComponentArrays {
             $(pub $name: Vec<$type>,)*
-            pub entity_indices: Vec<$crate::EntityId>,
+            pub entity_indices: Vec<$crate::Entity>,
             pub mask: u64,
         }
 
@@ -573,7 +623,7 @@ macro_rules! ecs {
             }
         }
 
-        fn remove_from_table(arrays: &mut ComponentArrays, index: usize) -> Option<$crate::EntityId> {
+        fn remove_from_table(arrays: &mut ComponentArrays, index: usize) -> Option<$crate::Entity> {
             let last_index = arrays.entity_indices.len() - 1;
             let mut swapped_entity = None;
 
@@ -593,7 +643,7 @@ macro_rules! ecs {
 
         fn move_entity(
             world: &mut $world,
-            entity: $crate::EntityId,
+            entity: $crate::Entity,
             from_table: usize,
             from_index: usize,
             to_table: usize,
@@ -624,7 +674,7 @@ macro_rules! ecs {
             }
         }
 
-        fn get_location(locations: &EntityLocations, entity: $crate::EntityId) -> Option<(usize, usize)> {
+        fn get_location(locations: &EntityLocations, entity: $crate::Entity) -> Option<(usize, usize)> {
             let id = entity.id as usize;
             if id >= locations.locations.len() {
                 return None;
@@ -640,7 +690,7 @@ macro_rules! ecs {
 
         fn insert_location(
             locations: &mut EntityLocations,
-            entity: $crate::EntityId,
+            entity: $crate::Entity,
             location: (usize, usize),
         ) {
             let id = entity.id as usize;
@@ -658,7 +708,7 @@ macro_rules! ecs {
             };
         }
 
-        fn create_entity(world: &mut $world) -> $crate::EntityId {
+        fn create_entity(world: &mut $world) -> $crate::Entity {
             if let Some((id, next_gen)) = world.allocator.free_ids.pop() {
                 let id_usize = id as usize;
                 if id_usize >= world.entity_locations.locations.len() {
@@ -668,7 +718,7 @@ macro_rules! ecs {
                     );
                 }
                 world.entity_locations.locations[id_usize].generation = next_gen;
-                $crate::EntityId {
+                $crate::Entity {
                     id,
                     generation: next_gen,
                 }
@@ -682,13 +732,13 @@ macro_rules! ecs {
                         EntityLocation::default(),
                     );
                 }
-                $crate::EntityId { id, generation: 0 }
+                $crate::Entity { id, generation: 0 }
             }
         }
 
         fn add_to_table(
             arrays: &mut ComponentArrays,
-            entity: $crate::EntityId,
+            entity: $crate::Entity,
             components: ( $(Option<$type>,)* ),
         ) {
             let ($($name,)*) = components;
@@ -765,13 +815,13 @@ mod tests {
         use super::*;
 
         #[derive(Default, Debug, Copy, Clone, PartialEq)]
-        pub struct Parent(pub EntityId);
+        pub struct Parent(pub Entity);
 
         #[derive(Default, Debug, Clone, PartialEq)]
         pub struct Node {
-            pub id: EntityId,
-            pub parent: Option<EntityId>,
-            pub children: Vec<EntityId>,
+            pub id: Entity,
+            pub parent: Option<Entity>,
+            pub children: Vec<Entity>,
         }
 
         #[derive(Default, Debug, Clone)]
@@ -829,7 +879,7 @@ mod tests {
         }
     }
 
-    fn setup_test_world() -> (World, EntityId) {
+    fn setup_test_world() -> (World, Entity) {
         let mut world = World::default();
         let entity = world.spawn_entities(POSITION | VELOCITY, 1)[0];
 
@@ -1080,7 +1130,7 @@ mod tests {
         world.remove_components(empty, POSITION);
         assert_eq!(world.component_mask(empty).unwrap(), 0);
 
-        let invalid = EntityId {
+        let invalid = Entity {
             id: 9999,
             generation: 0,
         };
@@ -1612,5 +1662,15 @@ mod tests {
             world.get_component::<Position>(entity, POSITION).unwrap().y,
             4.0
         );
+    }
+
+    #[test]
+    fn test_entity_builder() {
+        let mut world = World::default();
+        let entities = EntityBuilder::new()
+            .with_position(Position { x: 1.0, y: 2.0 })
+            .spawn(&mut world, 2);
+        assert_eq!(world.get_position(entities[0]).unwrap().x, 1.0);
+        assert_eq!(world.get_position(entities[1]).unwrap().y, 2.0);
     }
 }
