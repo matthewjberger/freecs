@@ -187,7 +187,9 @@ pub enum Event {
     ComponentChanged { kind: u64, entity: Entity },
 }
 
-#[derive(Default, Clone, Copy, Debug, Eq, PartialEq, Hash)]
+#[derive(
+    Default, Clone, Copy, Debug, Eq, PartialEq, Hash, serde::Serialize, serde::Deserialize,
+)]
 pub struct Entity {
     pub id: u32,
     pub generation: u32,

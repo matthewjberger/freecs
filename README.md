@@ -17,7 +17,7 @@ Add this to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-freecs = "0.5.0"
+freecs = "0.5.1"
 
 # (optional) add rayon if you want to parallelize systems
 rayon = "^1.10.0"
