@@ -1,4 +1,4 @@
-use freecs::{Entity, ecs, table_has_components};
+use freecs::{Entity, ecs};
 use macroquad::prelude::*;
 
 ecs! {
@@ -83,146 +83,161 @@ impl Default for BoidParams {
 
 mod systems {
     use super::*;
-    use rayon::prelude::*;
 
     pub fn run_systems(world: &mut World) {
-        let resources = &world.resources;
-        let delta_time = resources.delta_time;
-
-        world.tables.par_iter_mut().for_each(|table| {
-            if table_has_components!(table, POSITION | VELOCITY | BOID) {
-                process_boids(table, resources);
-                update_positions(table, delta_time);
-                wrap_positions(table);
-            }
-        });
+        process_boids(world);
+        update_positions(world);
+        wrap_positions(world);
     }
 
-    fn process_boids(table: &mut ComponentArrays, resources: &Resources) {
-        let mut grid = SpatialGrid::new(screen_width(), screen_height(), resources.visual_range);
+    fn process_boids(world: &mut World) {
+        let visual_range = world.resources.visual_range;
+        let mouse_pos = world.resources.mouse_pos;
+        let mouse_attract = world.resources.mouse_attract;
+        let mouse_repel = world.resources.mouse_repel;
+        let mouse_attraction_weight = world.resources.mouse_attraction_weight;
+        let mouse_repulsion_weight = world.resources.mouse_repulsion_weight;
+        let mouse_influence_range = world.resources.mouse_influence_range;
+        let alignment_weight = world.resources.alignment_weight;
+        let cohesion_weight = world.resources.cohesion_weight;
+        let separation_weight = world.resources.separation_weight;
+        let min_speed = world.resources.min_speed;
+        let max_speed = world.resources.max_speed;
 
-        for i in 0..table.entity_indices.len() {
-            grid.insert(
-                table.entity_indices[i],
-                table.position[i],
-                table.velocity[i],
-            );
+        let mut grid = SpatialGrid::new(screen_width(), screen_height(), visual_range);
+
+        for entity in world.query_entities(POSITION | VELOCITY | BOID) {
+            if let (Some(pos), Some(vel)) = (world.get_position(entity), world.get_velocity(entity))
+            {
+                grid.insert(entity, *pos, *vel);
+            }
         }
 
-        table
-            .velocity
-            .par_iter_mut()
-            .enumerate()
-            .for_each(|(i, vel)| {
-                let pos = table.position[i];
-                let mut alignment = Velocity::default();
-                let mut cohesion = Position::default();
-                let mut separation = Velocity::default();
-                let mut neighbors = 0;
+        let boids: Vec<Entity> = world.query_entities(POSITION | VELOCITY | BOID);
 
-                for (other_entity, other_pos, other_vel) in
-                    grid.get_nearby_boids(pos, resources.visual_range)
-                {
-                    if table.entity_indices[i] == *other_entity {
-                        continue;
-                    }
+        for entity in boids {
+            let Some(pos) = world.get_position(entity) else {
+                continue;
+            };
+            let pos = *pos;
 
-                    let dx = other_pos.x - pos.x;
-                    let dy = other_pos.y - pos.y;
-                    let dist_sq = dx * dx + dy * dy;
+            let mut alignment = Velocity::default();
+            let mut cohesion = Position::default();
+            let mut separation = Velocity::default();
+            let mut neighbors = 0;
 
-                    if dist_sq < resources.visual_range * resources.visual_range {
-                        alignment.x += other_vel.x;
-                        alignment.y += other_vel.y;
-
-                        cohesion.x += other_pos.x;
-                        cohesion.y += other_pos.y;
-
-                        if dist_sq > 0.0 {
-                            let factor = 1.0 / dist_sq.sqrt();
-                            separation.x -= dx * factor;
-                            separation.y -= dy * factor;
-                        }
-
-                        neighbors += 1;
-                    }
+            for (other_entity, other_pos, other_vel) in grid.get_nearby_boids(pos, visual_range) {
+                if entity == *other_entity {
+                    continue;
                 }
 
-                let mouse_dx = resources.mouse_pos[0] - pos.x;
-                let mouse_dy = resources.mouse_pos[1] - pos.y;
-                let mouse_dist_sq = mouse_dx * mouse_dx + mouse_dy * mouse_dy;
-                let mouse_range_sq =
-                    resources.mouse_influence_range * resources.mouse_influence_range;
+                let dx = other_pos.x - pos.x;
+                let dy = other_pos.y - pos.y;
+                let dist_sq = dx * dx + dy * dy;
 
-                if mouse_dist_sq < mouse_range_sq {
-                    let mouse_influence = 1.0 - (mouse_dist_sq / mouse_range_sq).sqrt();
+                if dist_sq < visual_range * visual_range {
+                    alignment.x += other_vel.x;
+                    alignment.y += other_vel.y;
 
-                    if resources.mouse_attract {
-                        vel.x += mouse_dx * mouse_influence * resources.mouse_attraction_weight;
-                        vel.y += mouse_dy * mouse_influence * resources.mouse_attraction_weight;
+                    cohesion.x += other_pos.x;
+                    cohesion.y += other_pos.y;
+
+                    if dist_sq > 0.0 {
+                        let factor = 1.0 / dist_sq.sqrt();
+                        separation.x -= dx * factor;
+                        separation.y -= dy * factor;
                     }
 
-                    if resources.mouse_repel {
-                        vel.x -= mouse_dx * mouse_influence * resources.mouse_repulsion_weight;
-                        vel.y -= mouse_dy * mouse_influence * resources.mouse_repulsion_weight;
-                    }
+                    neighbors += 1;
+                }
+            }
+
+            let mouse_dx = mouse_pos[0] - pos.x;
+            let mouse_dy = mouse_pos[1] - pos.y;
+            let mouse_dist_sq = mouse_dx * mouse_dx + mouse_dy * mouse_dy;
+            let mouse_range_sq = mouse_influence_range * mouse_influence_range;
+
+            let Some(vel) = world.get_velocity_mut(entity) else {
+                continue;
+            };
+
+            if mouse_dist_sq < mouse_range_sq {
+                let mouse_influence = 1.0 - (mouse_dist_sq / mouse_range_sq).sqrt();
+
+                if mouse_attract {
+                    vel.x += mouse_dx * mouse_influence * mouse_attraction_weight;
+                    vel.y += mouse_dy * mouse_influence * mouse_attraction_weight;
                 }
 
-                if neighbors > 0 {
-                    let inv_neighbors = 1.0 / neighbors as f32;
-
-                    alignment.x *= inv_neighbors * resources.alignment_weight;
-                    alignment.y *= inv_neighbors * resources.alignment_weight;
-
-                    cohesion.x = (cohesion.x * inv_neighbors - pos.x) * resources.cohesion_weight;
-                    cohesion.y = (cohesion.y * inv_neighbors - pos.y) * resources.cohesion_weight;
-
-                    vel.x += alignment.x + cohesion.x + separation.x * resources.separation_weight;
-                    vel.y += alignment.y + cohesion.y + separation.y * resources.separation_weight;
+                if mouse_repel {
+                    vel.x -= mouse_dx * mouse_influence * mouse_repulsion_weight;
+                    vel.y -= mouse_dy * mouse_influence * mouse_repulsion_weight;
                 }
+            }
 
-                let speed = (vel.x * vel.x + vel.y * vel.y).sqrt();
-                if speed > resources.max_speed {
-                    let factor = resources.max_speed / speed;
-                    vel.x *= factor;
-                    vel.y *= factor;
-                } else if speed < resources.min_speed {
-                    let factor = resources.min_speed / speed;
-                    vel.x *= factor;
-                    vel.y *= factor;
-                }
-            });
+            if neighbors > 0 {
+                let inv_neighbors = 1.0 / neighbors as f32;
+
+                alignment.x *= inv_neighbors * alignment_weight;
+                alignment.y *= inv_neighbors * alignment_weight;
+
+                cohesion.x = (cohesion.x * inv_neighbors - pos.x) * cohesion_weight;
+                cohesion.y = (cohesion.y * inv_neighbors - pos.y) * cohesion_weight;
+
+                vel.x += alignment.x + cohesion.x + separation.x * separation_weight;
+                vel.y += alignment.y + cohesion.y + separation.y * separation_weight;
+            }
+
+            let speed = (vel.x * vel.x + vel.y * vel.y).sqrt();
+            if speed > max_speed {
+                let factor = max_speed / speed;
+                vel.x *= factor;
+                vel.y *= factor;
+            } else if speed < min_speed && speed > 0.0 {
+                let factor = min_speed / speed;
+                vel.x *= factor;
+                vel.y *= factor;
+            }
+        }
     }
 
-    fn update_positions(table: &mut ComponentArrays, dt: f32) {
-        table
-            .position
-            .par_iter_mut()
-            .zip(table.velocity.par_iter())
-            .for_each(|(pos, vel)| {
+    fn update_positions(world: &mut World) {
+        let dt = world.resources.delta_time;
+
+        let updates: Vec<(Entity, Velocity)> = world
+            .query_entities(POSITION | VELOCITY)
+            .into_iter()
+            .filter_map(|entity| world.get_velocity(entity).map(|vel| (entity, *vel)))
+            .collect();
+
+        for (entity, vel) in updates {
+            if let Some(pos) = world.get_position_mut(entity) {
                 pos.x += vel.x * dt;
                 pos.y += vel.y * dt;
-            });
+            }
+        }
     }
 
-    fn wrap_positions(table: &mut ComponentArrays) {
+    fn wrap_positions(world: &mut World) {
         let screen_w = screen_width();
         let screen_h = screen_height();
 
-        table.position.par_iter_mut().for_each(|pos| {
-            if pos.x < 0.0 {
-                pos.x += screen_w;
+        for entity in world.query_entities(POSITION) {
+            if let Some(pos) = world.get_position_mut(entity) {
+                if pos.x < 0.0 {
+                    pos.x += screen_w;
+                }
+                if pos.x > screen_w {
+                    pos.x -= screen_w;
+                }
+                if pos.y < 0.0 {
+                    pos.y += screen_h;
+                }
+                if pos.y > screen_h {
+                    pos.y -= screen_h;
+                }
             }
-            if pos.x > screen_w {
-                pos.x -= screen_w;
-            }
-            if pos.y < 0.0 {
-                pos.y += screen_h;
-            }
-            if pos.y > screen_h {
-                pos.y -= screen_h;
-            }
-        });
+        }
     }
 }
 
@@ -230,19 +245,19 @@ fn spawn_boids(world: &mut World, count: usize) {
     let entities = world.spawn_entities(POSITION | VELOCITY | BOID | COLOR, count);
 
     for entity in entities {
-        if let Some(pos) = world.get_component_mut::<Position>(entity, POSITION) {
+        if let Some(pos) = world.get_position_mut(entity) {
             pos.x = rand::gen_range(0.0, screen_width());
             pos.y = rand::gen_range(0.0, screen_height());
         }
 
-        if let Some(vel) = world.get_component_mut::<Velocity>(entity, VELOCITY) {
+        if let Some(vel) = world.get_velocity_mut(entity) {
             let angle = rand::gen_range(0.0, std::f32::consts::PI * 2.0);
             let speed = rand::gen_range(100.0, 200.0);
             vel.x = angle.cos() * speed;
             vel.y = angle.sin() * speed;
         }
 
-        if let Some(color) = world.get_component_mut::<BoidColor>(entity, COLOR) {
+        if let Some(color) = world.get_color_mut(entity) {
             color.r = rand::gen_range(0.5, 1.0);
             color.g = rand::gen_range(0.5, 1.0);
             color.b = rand::gen_range(0.5, 1.0);
@@ -251,28 +266,26 @@ fn spawn_boids(world: &mut World, count: usize) {
 }
 
 fn render_boids(world: &World) {
-    for table in &world.tables {
-        if table_has_components!(table, POSITION | VELOCITY | COLOR) {
-            for i in 0..table.entity_indices.len() {
-                let pos = &table.position[i];
-                let vel = &table.velocity[i];
-                let color = &table.color[i];
+    for entity in world.query_entities(POSITION | VELOCITY | COLOR) {
+        if let (Some(pos), Some(vel), Some(color)) = (
+            world.get_position(entity),
+            world.get_velocity(entity),
+            world.get_color(entity),
+        ) {
+            let angle = vel.y.atan2(vel.x);
 
-                let angle = vel.y.atan2(vel.x);
-
-                draw_triangle(
-                    Vec2::new(pos.x, pos.y),
-                    Vec2::new(
-                        pos.x - 8.0 * (angle + 2.0).cos(),
-                        pos.y - 8.0 * (angle + 2.0).sin(),
-                    ),
-                    Vec2::new(
-                        pos.x - 8.0 * (angle - 2.0).cos(),
-                        pos.y - 8.0 * (angle - 2.0).sin(),
-                    ),
-                    Color::new(color.r, color.g, color.b, 1.0),
-                );
-            }
+            draw_triangle(
+                Vec2::new(pos.x, pos.y),
+                Vec2::new(
+                    pos.x - 8.0 * (angle + 2.0).cos(),
+                    pos.y - 8.0 * (angle + 2.0).sin(),
+                ),
+                Vec2::new(
+                    pos.x - 8.0 * (angle - 2.0).cos(),
+                    pos.y - 8.0 * (angle - 2.0).sin(),
+                ),
+                Color::new(color.r, color.g, color.b, 1.0),
+            );
         }
     }
 }
@@ -405,27 +418,23 @@ fn draw_ui(params: &mut BoidParams, world: &mut World) {
 }
 
 fn draw_debug(world: &World) {
-    for table in &world.tables {
-        if table_has_components!(table, POSITION | VELOCITY) {
-            for i in 0..table.entity_indices.len() {
-                let pos = &table.position[i];
-                draw_circle_lines(
-                    pos.x,
-                    pos.y,
-                    world.resources.visual_range,
-                    0.5,
-                    Color::new(0.2, 0.2, 0.2, 0.3),
-                );
-                let vel = &table.velocity[i];
-                draw_line(
-                    pos.x,
-                    pos.y,
-                    pos.x + vel.x * 0.2,
-                    pos.y + vel.y * 0.2,
-                    1.0,
-                    Color::new(0.0, 1.0, 0.0, 0.3),
-                );
-            }
+    for entity in world.query_entities(POSITION | VELOCITY) {
+        if let (Some(pos), Some(vel)) = (world.get_position(entity), world.get_velocity(entity)) {
+            draw_circle_lines(
+                pos.x,
+                pos.y,
+                world.resources.visual_range,
+                0.5,
+                Color::new(0.2, 0.2, 0.2, 0.3),
+            );
+            draw_line(
+                pos.x,
+                pos.y,
+                pos.x + vel.x * 0.2,
+                pos.y + vel.y * 0.2,
+                1.0,
+                Color::new(0.0, 1.0, 0.0, 0.3),
+            );
         }
     }
 }

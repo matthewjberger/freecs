@@ -1,4 +1,4 @@
-use freecs::{ecs, table_has_components};
+use freecs::{Entity, ecs};
 use rayon::prelude::*;
 
 ecs! {
@@ -23,14 +23,11 @@ pub fn main() {
         .with_position(Position { x: 1.0, y: 2.0 })
         .spawn(&mut world, 1)[0];
 
-    // Read arbitrary components
-    let position = world.get_component::<Position>(entity, POSITION);
-    println!("Position: {:?}", position);
-
-    // Or use the shorthand methods
+    // Read components using the generated methods
     let position = world.get_position(entity);
     println!("Position: {:?}", position);
 
+    // Set components (adds if not present)
     world.set_position(entity, Position { x: 1.0, y: 2.0 });
 
     // Mutate a component
@@ -43,6 +40,9 @@ pub fn main() {
 
     // Add a new component to an entity
     world.add_components(entity, HEALTH);
+
+    // Or use the generated add method
+    world.add_health(entity);
 
     // Query all entities
     let _entities = world.get_all_entities();
@@ -57,10 +57,15 @@ pub fn main() {
     // Remove a component from an entity
     world.remove_components(entity, HEALTH);
 
-    // Systems are functions that iterate over
-    // the component tables and transform component data.
-    // This function invokes two systems in parallel
-    // for each table in the world filtered by component mask.
+    // Or use the generated remove method
+    world.remove_health(entity);
+
+    // Check if entity has components
+    if world.entity_has_position(entity) {
+        println!("Entity has position component");
+    }
+
+    // Systems are functions that transform component data
     systems::run_systems(&mut world);
 
     // Despawn entities, freeing their table slots for reuse
@@ -69,19 +74,19 @@ pub fn main() {
 
 use components::*;
 mod components {
-    #[derive(Default, Debug, Clone)]
+    #[derive(Default, Debug, Clone, Copy)]
     pub struct Position {
         pub x: f32,
         pub y: f32,
     }
 
-    #[derive(Default, Debug, Clone)]
+    #[derive(Default, Debug, Clone, Copy)]
     pub struct Velocity {
         pub x: f32,
         pub y: f32,
     }
 
-    #[derive(Default, Debug, Clone)]
+    #[derive(Default, Debug, Clone, Copy)]
     pub struct Health {
         pub value: f32,
     }
@@ -91,45 +96,74 @@ mod systems {
     use super::*;
 
     pub fn run_systems(world: &mut World) {
-        // systems can be simple functions that use queries and component accessors
+        // Systems use queries and component accessors
         example_system(world);
-
-        // or you can iterate over the tables in the world directly
-        let delta_time = world.resources.delta_time;
-        world.tables.par_iter_mut().for_each(|table| {
-            if table_has_components!(table, POSITION | VELOCITY | HEALTH) {
-                update_positions_system(&mut table.position, &table.velocity, delta_time);
-            }
-            if table_has_components!(table, HEALTH) {
-                health_system(&mut table.health);
-            }
-        });
+        update_positions_system(world);
+        health_system(world);
     }
 
     fn example_system(world: &mut World) {
         for entity in world.query_entities(POSITION | VELOCITY) {
-            if let Some(position) = world.get_component_mut::<Position>(entity, POSITION) {
+            if let Some(position) = world.get_position_mut(entity) {
                 position.x += 1.0;
             }
         }
     }
 
-    // The system itself can also access components in parallel
-    #[inline]
-    pub fn update_positions_system(positions: &mut [Position], velocities: &[Velocity], dt: f32) {
-        positions
-            .par_iter_mut()
-            .zip(velocities.par_iter())
-            .for_each(|(pos, vel)| {
+    fn update_positions_system(world: &mut World) {
+        let dt = world.resources.delta_time;
+
+        // Collect entities with their velocities first to avoid borrow conflicts
+        let updates: Vec<(Entity, Velocity)> = world
+            .query_entities(POSITION | VELOCITY)
+            .into_iter()
+            .filter_map(|entity| world.get_velocity(entity).map(|vel| (entity, *vel)))
+            .collect();
+
+        // Now update positions
+        for (entity, vel) in updates {
+            if let Some(pos) = world.get_position_mut(entity) {
                 pos.x += vel.x * dt;
                 pos.y += vel.y * dt;
-            });
+            }
+        }
     }
 
-    #[inline]
-    pub fn health_system(health: &mut [Health]) {
-        health.par_iter_mut().for_each(|health| {
-            health.value *= 0.98;
+    fn health_system(world: &mut World) {
+        for entity in world.query_entities(HEALTH) {
+            if let Some(health) = world.get_health_mut(entity) {
+                health.value *= 0.98;
+            }
+        }
+    }
+
+    // Alternative: If you need parallel processing for large numbers of entities,
+    // you can batch the entities and process them in parallel
+    #[allow(dead_code)]
+    fn parallel_update_positions_system(world: &mut World) {
+        let dt = world.resources.delta_time;
+
+        // Collect all entity data first
+        let mut entity_data: Vec<(Entity, Position, Velocity)> = world
+            .query_entities(POSITION | VELOCITY)
+            .into_iter()
+            .filter_map(
+                |entity| match (world.get_position(entity), world.get_velocity(entity)) {
+                    (Some(pos), Some(vel)) => Some((entity, *pos, *vel)),
+                    _ => None,
+                },
+            )
+            .collect();
+
+        // Process in parallel
+        entity_data.par_iter_mut().for_each(|(_, pos, vel)| {
+            pos.x += vel.x * dt;
+            pos.y += vel.y * dt;
         });
+
+        // Write back the results
+        for (entity, new_pos, _) in entity_data {
+            world.set_position(entity, new_pos);
+        }
     }
 }

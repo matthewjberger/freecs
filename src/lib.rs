@@ -14,7 +14,7 @@
 //! # Creating a World
 //!
 //! ```rust
-//! use freecs::{ecs, table_has_components, Entity};
+//! use freecs::{ecs, Entity};
 //!
 //! // First, define components.
 //! // They must implement: `Default`
@@ -24,6 +24,9 @@
 //!
 //! #[derive(Default, Clone, Debug)]
 //! struct Velocity { x: f32, y: f32 }
+//!
+//! #[derive(Default, Clone, Debug)]
+//! struct Health { value: f32 }
 //!
 //! // Then, create a world with the `ecs!` macro.
 //! // Resources are stored independently of component data.
@@ -48,21 +51,36 @@
 //! // Spawn entities with components by mask
 //! let entity = world.spawn_entities(POSITION | VELOCITY, 1)[0];
 //!
-//! // Lookup and modify a component
-//! if let Some(pos) = world.get_component_mut::<Position>(entity, POSITION) {
-//!     pos.x += 1.0;
-//! }
-//!
-//! // Or use the shorthand methods
+//! // Lookup and modify a component using generated methods
 //! if let Some(pos) = world.get_position_mut(entity) {
 //!     pos.x += 1.0;
 //! }
 //!
+//! // Read components
+//! if let Some(pos) = world.get_position(entity) {
+//!     println!("Position: ({}, {})", pos.x, pos.y);
+//! }
+//!
+//! // Set components (adds if not present)
+//! world.set_position(entity, Position { x: 10.0, y: 20.0 });
+//! world.set_velocity(entity, Velocity { x: 1.0, y: 0.0 });
+//!
 //! // Add new components to an entity by mask
 //! world.add_components(entity, HEALTH | VELOCITY);
 //!
+//! // Or use the generated add methods
+//! world.add_health(entity);
+//!
 //! // Remove components from an entity by mask
 //! world.remove_components(entity, VELOCITY | POSITION);
+//!
+//! // Or use the generated remove methods
+//! world.remove_velocity(entity);
+//!
+//! // Check if entity has components
+//! if world.entity_has_position(entity) {
+//!     println!("Entity has position component");
+//! }
 //!
 //! // Query all entities
 //! let entities = world.get_all_entities();
@@ -83,8 +101,12 @@
 //! ```rust
 //! fn example_system(world: &mut World) {
 //!   for entity in world.query_entities(POSITION | VELOCITY) {
-//!       if let Some(position) = world.get_component_mut::<Position>(entity, POSITION) {
-//!           position.x += 1.0;
+//!       // Use the generated methods for type-safe access
+//!       if let Some(position) = world.get_position_mut(entity) {
+//!           if let Some(velocity) = world.get_velocity(entity) {
+//!               position.x += velocity.x;
+//!               position.y += velocity.y;
+//!           }
 //!       }
 //!   }
 //! }
@@ -92,55 +114,63 @@
 //!
 //! ## Parallel Processing
 //!
-//! Systems are plain functions that iterate over
-//! the component tables and transform component data.
-//!
-//! Parallelization of systems can be done with [rayon](https://docs.rs/rayon/latest/rayon/).
-//! which lets you replace `.iter_mut()` with `.par_iter_mut()` when iterating over tables.
-//!
-//! > In practice, you should use `.iter_mut()` instead of `.par_iter_mut()`
-//! > because sequential access is typically more performant until
-//! > you are working with extreme numbers of entities.
+//! Systems can process entities in parallel using [rayon](https://docs.rs/rayon/latest/rayon/).
+//! For the best performance with large numbers of entities, you can batch process components.
 //!
 //! ```rust
-//! pub fn run_systems(world: &mut World, dt: f32) {
-//!     use rayon::prelude::*;
+//! use rayon::prelude::*;
 //!
-//!     world.tables.par_iter_mut().for_each(|table| {
-//!         if table_has_components!(table, POSITION | VELOCITY | HEALTH) {
-//!             update_positions_system(&mut table.position, &table.velocity, dt);
-//!         }
-//!         if table_has_components!(table, HEALTH) {
-//!             health_system(&mut table.health);
-//!         }
-//!     });
+//! pub fn run_systems(world: &mut World) {
+//!     update_positions_system(world);
+//!     health_system(world);
 //! }
 //!
-//! // The system itself can also access components in parallel and be inlined for performance.
-//! #[inline]
-//! pub fn update_positions_system(positions: &mut [Position], velocities: &[Velocity], dt: f32) {
-//!     positions
-//!         .par_iter_mut()
-//!         .zip(velocities.par_iter())
-//!         .for_each(|(pos, vel)| {
-//!             pos.x += vel.x * dt;
-//!             pos.y += vel.y * dt;
-//!         });
+//! // Process positions in parallel by collecting data first
+//! pub fn update_positions_system(world: &mut World) {
+//!     let dt = world.resources.delta_time;
+//!     
+//!     // Collect entity data to avoid borrow conflicts
+//!     let mut updates: Vec<(Entity, Position, Velocity)> = world
+//!         .query_entities(POSITION | VELOCITY)
+//!         .into_iter()
+//!         .filter_map(|entity| {
+//!             match (world.get_position(entity), world.get_velocity(entity)) {
+//!                 (Some(pos), Some(vel)) => Some((entity, *pos, *vel)),
+//!                 _ => None
+//!             }
+//!         })
+//!         .collect();
+//!     
+//!     // Process in parallel
+//!     updates.par_iter_mut().for_each(|(_, pos, vel)| {
+//!         pos.x += vel.x * dt;
+//!         pos.y += vel.y * dt;
+//!     });
+//!     
+//!     // Write back results
+//!     for (entity, new_pos, _) in updates {
+//!         world.set_position(entity, new_pos);
+//!     }
 //! }
 //!
-//! #[inline]
-//! pub fn health_system(health: &mut [Health]) {
-//!     health.par_iter_mut().for_each(|health| {
-//!         health.value *= 0.98;
-//!     });
+//! // Simple sequential processing is often sufficient
+//! pub fn health_system(world: &mut World) {
+//!     for entity in world.query_entities(HEALTH) {
+//!         if let Some(health) = world.get_health_mut(entity) {
+//!             health.value *= 0.98;
+//!         }
+//!     }
 //! }
 //! ```
+//!
+//! > Note: Sequential processing is typically more performant than parallel processing
+//! > unless you're working with very large numbers of entities (10,000+).
 //!
 //! ## Change Detection
 //!
 //! ```rust
 //! // Get mutable access and modify a component
-//! if let Some(pos) = world.get_component_mut::<Position>(entity, POSITION) {
+//! if let Some(pos) = world.get_position_mut(entity) {
 //!     pos.x += velocity.x * dt;
 //!     pos.y += velocity.y * dt;
 //! }
@@ -177,7 +207,12 @@
 //! let mut world = World::default();
 //! let entities = EntityBuilder::new()
 //!     .with_position(Position { x: 1.0, y: 2.0 })
+//!     .with_velocity(Velocity { x: 0.0, y: 1.0 })
 //!     .spawn(&mut world, 2);
+//!     
+//! // Access the spawned entities
+//! let first_pos = world.get_position(entities[0]).unwrap();
+//! assert_eq!(first_pos.x, 1.0);
 //! ```
 
 pub use paste;
@@ -291,9 +326,9 @@ macro_rules! ecs {
         #[derive(Default)]
         #[allow(unused)]
         pub struct $world {
-            pub entity_locations: EntityLocations,
-            pub tables: Vec<ComponentArrays>,
-            pub allocator: EntityAllocator,
+            entity_locations: EntityLocations,
+            tables: Vec<ComponentArrays>,
+            allocator: EntityAllocator,
             pub resources: $resources,
             table_edges: Vec<TableEdges>,
             table_lookup: std::collections::HashMap<u64, usize>,
@@ -317,12 +352,31 @@ macro_rules! ecs {
                 $crate::paste::paste! {
                     #[inline]
                     pub fn [<get_ $name>](&self, entity: $crate::Entity) -> Option<&$type> {
-                        self.get_component::<$type>(entity, $mask)
+                        let (table_index, array_index) = get_location(&self.entity_locations, entity)?;
+
+                        if !self.entity_locations.locations[entity.id as usize].allocated {
+                            return None;
+                        }
+
+                        let table = &self.tables[table_index];
+
+                        if table.mask & $mask == 0 {
+                            return None;
+                        }
+
+                        Some(&table.$name[array_index])
                     }
 
                     #[inline]
                     pub fn [<get_ $name _mut>](&mut self, entity: $crate::Entity) -> Option<&mut $type> {
-                        self.get_component_mut::<$type>(entity, $mask)
+                        let (table_index, array_index) = get_location(&self.entity_locations, entity)?;
+                        let table = &mut self.tables[table_index];
+
+                        if table.mask & $mask == 0 {
+                            return None;
+                        }
+
+                        Some(&mut table.$name[array_index])
                     }
 
                     #[inline]
@@ -332,11 +386,19 @@ macro_rules! ecs {
 
                     #[inline]
                     pub fn [<set_ $name>](&mut self, entity: $crate::Entity, value: $type) {
-                        if let Some(component) = self.get_component_mut(entity, $mask) {
-                            *component = value;
-                        } else {
-                            self.add_components(entity, $mask);
-                            *self.get_component_mut(entity, $mask).unwrap() = value;
+                        if let Some((table_index, array_index)) = get_location(&self.entity_locations, entity) {
+                            if self.entity_locations.locations[entity.id as usize].allocated {
+                                let table = &mut self.tables[table_index];
+                                if table.mask & $mask != 0 {
+                                    table.$name[array_index] = value;
+                                    return;
+                                }
+                            }
+                        }
+
+                        self.add_components(entity, $mask);
+                        if let Some((table_index, array_index)) = get_location(&self.entity_locations, entity) {
+                            self.tables[table_index].$name[array_index] = value;
                         }
                     }
 
@@ -351,44 +413,6 @@ macro_rules! ecs {
                     }
                 }
             )*
-
-            pub fn get_component<T: 'static>(&self, entity: $crate::Entity, mask: u64) -> Option<&T> {
-                let (table_index, array_index) = get_location(&self.entity_locations, entity)?;
-
-                if !self.entity_locations.locations[entity.id as usize].allocated {
-                    return None;
-                }
-
-                let table = &self.tables[table_index];
-
-                if table.mask & mask == 0 {
-                    return None;
-                }
-
-                $(
-                    if mask == $mask && std::any::TypeId::of::<T>() == std::any::TypeId::of::<$type>() {
-                        return Some(unsafe { &*(&table.$name[array_index] as *const $type as *const T) });
-                    }
-                )*
-
-                None
-            }
-
-            pub fn get_component_mut<T: 'static>(&mut self, entity: $crate::Entity, mask: u64) -> Option<&mut T> {
-                let (table_index, array_index) = get_location(&self.entity_locations, entity)?;
-                let table = &mut self.tables[table_index];
-                if table.mask & mask == 0 {
-                    return None;
-                }
-
-                $(
-                    if mask == $mask && std::any::TypeId::of::<T>() == std::any::TypeId::of::<$type>() {
-                        return Some(unsafe { &mut *(&mut table.$name[array_index] as *mut $type as *mut T) });
-                    }
-                )*
-
-                None
-            }
 
             pub fn spawn_entities(&mut self, mask: u64, count: usize) -> Vec<$crate::Entity> {
                 let mut entities = Vec::with_capacity(count);
@@ -885,11 +909,11 @@ mod tests {
         let mut world = World::default();
         let entity = world.spawn_entities(POSITION | VELOCITY, 1)[0];
 
-        if let Some(pos) = world.get_component_mut::<Position>(entity, POSITION) {
+        if let Some(pos) = world.get_position_mut(entity) {
             pos.x = 1.0;
             pos.y = 2.0;
         }
-        if let Some(vel) = world.get_component_mut::<Velocity>(entity, VELOCITY) {
+        if let Some(vel) = world.get_velocity_mut(entity) {
             vel.x = 3.0;
             vel.y = 4.0;
         }
@@ -906,9 +930,9 @@ mod tests {
         assert_eq!(world.get_all_entities().len(), 3);
 
         for entity in entities {
-            assert!(world.get_component::<Position>(entity, POSITION).is_some());
-            assert!(world.get_component::<Velocity>(entity, VELOCITY).is_some());
-            assert!(world.get_component::<Health>(entity, HEALTH).is_none());
+            assert!(world.get_position(entity).is_some());
+            assert!(world.get_velocity(entity).is_some());
+            assert!(world.get_health(entity).is_none());
         }
     }
 
@@ -916,15 +940,15 @@ mod tests {
     fn test_component_access() {
         let (mut world, entity) = setup_test_world();
 
-        let pos = world.get_component::<Position>(entity, POSITION).unwrap();
+        let pos = world.get_position(entity).unwrap();
         assert_eq!(pos.x, 1.0);
         assert_eq!(pos.y, 2.0);
 
-        if let Some(pos) = world.get_component_mut::<Position>(entity, POSITION) {
+        if let Some(pos) = world.get_position_mut(entity) {
             pos.x = 5.0;
         }
 
-        let pos = world.get_component::<Position>(entity, POSITION).unwrap();
+        let pos = world.get_position(entity).unwrap();
         assert_eq!(pos.x, 5.0);
     }
 
@@ -932,13 +956,13 @@ mod tests {
     fn test_add_remove_components() {
         let (mut world, entity) = setup_test_world();
 
-        assert!(world.get_component::<Health>(entity, HEALTH).is_none());
+        assert!(world.get_health(entity).is_none());
 
         world.add_components(entity, HEALTH);
-        assert!(world.get_component::<Health>(entity, HEALTH).is_some());
+        assert!(world.get_health(entity).is_some());
 
         world.remove_components(entity, HEALTH);
-        assert!(world.get_component::<Health>(entity, HEALTH).is_none());
+        assert!(world.get_health(entity).is_none());
     }
 
     #[test]
@@ -1005,22 +1029,10 @@ mod tests {
         assert_eq!(despawned.len(), 1);
         assert_eq!(world.get_all_entities().len(), 2);
 
-        assert!(
-            world
-                .get_component::<Position>(entities[1], POSITION)
-                .is_none()
-        );
+        assert!(world.get_position(entities[1]).is_none());
 
-        assert!(
-            world
-                .get_component::<Position>(entities[0], POSITION)
-                .is_some()
-        );
-        assert!(
-            world
-                .get_component::<Position>(entities[2], POSITION)
-                .is_some()
-        );
+        assert!(world.get_position(entities[0]).is_some());
+        assert!(world.get_position(entities[2]).is_some());
     }
 
     #[test]
@@ -1029,22 +1041,22 @@ mod tests {
 
         let entity = world.spawn_entities(POSITION | VELOCITY | HEALTH, 1)[0];
 
-        if let Some(pos) = world.get_component_mut::<Position>(entity, POSITION) {
+        if let Some(pos) = world.get_position_mut(entity) {
             pos.x = 0.0;
             pos.y = 0.0;
         }
-        if let Some(vel) = world.get_component_mut::<Velocity>(entity, VELOCITY) {
+        if let Some(vel) = world.get_velocity_mut(entity) {
             vel.x = 1.0;
             vel.y = 1.0;
         }
-        if let Some(health) = world.get_component_mut::<Health>(entity, HEALTH) {
+        if let Some(health) = world.get_health_mut(entity) {
             health.value = 100.0;
         }
 
         systems::run_systems(&mut world, 1.0);
 
-        let pos = world.get_component::<Position>(entity, POSITION).unwrap();
-        let health = world.get_component::<Health>(entity, HEALTH).unwrap();
+        let pos = world.get_position(entity).unwrap();
+        let health = world.get_health(entity).unwrap();
 
         assert_eq!(pos.x, 1.0);
         assert_eq!(pos.y, 1.0);
@@ -1055,13 +1067,13 @@ mod tests {
     fn test_add_components() {
         let (mut world, entity) = setup_test_world();
 
-        assert!(world.get_component::<Health>(entity, HEALTH).is_none());
+        assert!(world.get_health(entity).is_none());
 
         world.add_components(entity, HEALTH);
-        assert!(world.get_component::<Health>(entity, HEALTH).is_some());
+        assert!(world.get_health(entity).is_some());
 
         world.remove_components(entity, HEALTH);
-        assert!(world.get_component::<Health>(entity, HEALTH).is_none());
+        assert!(world.get_health(entity).is_none());
     }
 
     #[test]
@@ -1071,18 +1083,15 @@ mod tests {
 
         world.add_components(entity, VELOCITY | HEALTH);
 
-        assert!(world.get_component::<Position>(entity, POSITION).is_some());
-        assert!(world.get_component::<Velocity>(entity, VELOCITY).is_some());
-        assert!(world.get_component::<Health>(entity, HEALTH).is_some());
+        assert!(world.get_position(entity).is_some());
+        assert!(world.get_velocity(entity).is_some());
+        assert!(world.get_health(entity).is_some());
 
-        if let Some(pos) = world.get_component_mut::<Position>(entity, POSITION) {
+        if let Some(pos) = world.get_position_mut(entity) {
             pos.x = 1.0;
         }
         world.add_components(entity, VELOCITY);
-        assert_eq!(
-            world.get_component::<Position>(entity, POSITION).unwrap().x,
-            1.0
-        );
+        assert_eq!(world.get_position(entity).unwrap().x, 1.0);
     }
 
     #[test]
@@ -1090,17 +1099,14 @@ mod tests {
         let mut world = World::default();
         let entity = world.spawn_entities(POSITION, 1)[0];
 
-        if let Some(pos) = world.get_component_mut::<Position>(entity, POSITION) {
+        if let Some(pos) = world.get_position_mut(entity) {
             pos.x = 1.0;
         }
 
         world.add_components(entity, VELOCITY);
         world.add_components(entity, HEALTH);
 
-        assert_eq!(
-            world.get_component::<Position>(entity, POSITION).unwrap().x,
-            1.0
-        );
+        assert_eq!(world.get_position(entity).unwrap().x, 1.0);
     }
 
     #[test]
@@ -1110,9 +1116,9 @@ mod tests {
 
         world.remove_components(entity, VELOCITY);
         world.remove_components(entity, HEALTH);
-        assert!(world.get_component::<Position>(entity, POSITION).is_some());
-        assert!(world.get_component::<Velocity>(entity, VELOCITY).is_none());
-        assert!(world.get_component::<Health>(entity, HEALTH).is_none());
+        assert!(world.get_position(entity).is_some());
+        assert!(world.get_velocity(entity).is_none());
+        assert!(world.get_health(entity).is_none());
     }
 
     #[test]
@@ -1122,7 +1128,7 @@ mod tests {
         let empty = world.spawn_entities(0, 1)[0];
 
         world.add_components(empty, POSITION);
-        assert!(world.get_component::<Position>(empty, POSITION).is_some());
+        assert!(world.get_position(empty).is_some());
 
         world.add_components(empty, POSITION);
         world.add_components(empty, POSITION);
@@ -1145,14 +1151,10 @@ mod tests {
         let entity = world.spawn_entities(POSITION | VELOCITY, 1)[0];
 
         {
-            let pos = world
-                .get_component_mut::<Position>(entity, POSITION)
-                .unwrap();
+            let pos = world.get_position_mut(entity).unwrap();
             pos.x = 1.0;
             pos.y = 2.0;
-            let vel = world
-                .get_component_mut::<Velocity>(entity, VELOCITY)
-                .unwrap();
+            let vel = world.get_velocity_mut(entity).unwrap();
             vel.x = 3.0;
             vel.y = 4.0;
         }
@@ -1161,8 +1163,8 @@ mod tests {
         world.remove_components(entity, HEALTH);
         world.add_components(entity, HEALTH);
 
-        let pos = world.get_component::<Position>(entity, POSITION).unwrap();
-        let vel = world.get_component::<Velocity>(entity, VELOCITY).unwrap();
+        let pos = world.get_position(entity).unwrap();
+        let vel = world.get_velocity(entity).unwrap();
         assert_eq!(pos.x, 1.0);
         assert_eq!(pos.y, 2.0);
         assert_eq!(vel.x, 3.0);
@@ -1177,16 +1179,13 @@ mod tests {
         let entity2 = world.spawn_entities(POSITION, 1)[0];
 
         world.add_components(entity1, VELOCITY);
-        if let Some(vel) = world.get_component_mut::<Velocity>(entity1, VELOCITY) {
+        if let Some(vel) = world.get_velocity_mut(entity1) {
             vel.x = entity2.id as f32;
         }
 
         world.add_components(entity2, VELOCITY | HEALTH);
 
-        let stored_id = world
-            .get_component::<Velocity>(entity1, VELOCITY)
-            .unwrap()
-            .x as u32;
+        let stored_id = world.get_velocity(entity1).unwrap().x as u32;
         let entity2_loc = get_location(&world.entity_locations, entity2);
         assert!(entity2_loc.is_some());
         assert_eq!(stored_id, entity2.id);
@@ -1204,10 +1203,10 @@ mod tests {
 
         world.despawn_entities(&[e2]);
 
-        assert!(world.get_component::<Position>(e2, POSITION).is_none());
-        assert!(world.get_component::<Velocity>(e2, VELOCITY).is_none());
+        assert!(world.get_position(e2).is_none());
+        assert!(world.get_velocity(e2).is_none());
 
-        assert!(world.get_component::<Position>(e1, POSITION).is_some());
+        assert!(world.get_position(e1).is_some());
 
         let remaining = world.query_entities(POSITION);
         assert_eq!(remaining.len(), 1);
@@ -1235,10 +1234,10 @@ mod tests {
         let entity1 = world.spawn_entities(POSITION | HEALTH, 1)[0];
         let entity2 = world.spawn_entities(POSITION | HEALTH, 1)[0];
 
-        if let Some(pos) = world.get_component_mut::<Position>(entity1, POSITION) {
+        if let Some(pos) = world.get_position_mut(entity1) {
             pos.x = 1.0;
         }
-        if let Some(health) = world.get_component_mut::<Health>(entity1, HEALTH) {
+        if let Some(health) = world.get_health_mut(entity1) {
             health.value = 100.0;
         }
 
@@ -1254,22 +1253,22 @@ mod tests {
             "Should have incremented generation"
         );
 
-        if let Some(pos) = world.get_component_mut::<Position>(entity3, POSITION) {
+        if let Some(pos) = world.get_position_mut(entity3) {
             pos.x = 3.0;
         }
-        if let Some(health) = world.get_component_mut::<Health>(entity3, HEALTH) {
+        if let Some(health) = world.get_health_mut(entity3) {
             health.value = 50.0;
         }
 
-        if let Some(pos) = world.get_component::<Position>(entity2, POSITION) {
+        if let Some(pos) = world.get_position(entity2) {
             assert_eq!(pos.x, 0.0, "Entity2's data should be unchanged");
         }
 
-        if let Some(pos) = world.get_component::<Position>(entity3, POSITION) {
+        if let Some(pos) = world.get_position(entity3) {
             assert_eq!(pos.x, 3.0, "Should get entity3's data, not entity1's");
         }
         assert!(
-            world.get_component::<Position>(entity1, POSITION).is_none(),
+            world.get_position(entity1).is_none(),
             "Should not be able to access entity1's old data"
         );
     }
@@ -1284,7 +1283,7 @@ mod tests {
             "First use of ID should have generation 0"
         );
 
-        if let Some(pos) = world.get_component_mut::<Position>(entity_a1, POSITION) {
+        if let Some(pos) = world.get_position_mut(entity_a1) {
             pos.x = 1.0;
             pos.y = 1.0;
         }
@@ -1300,15 +1299,13 @@ mod tests {
             "Second use of ID should have generation 1"
         );
 
-        if let Some(pos) = world.get_component_mut::<Position>(entity_a2, POSITION) {
+        if let Some(pos) = world.get_position_mut(entity_a2) {
             pos.x = 2.0;
             pos.y = 2.0;
         }
 
         assert!(
-            world
-                .get_component::<Position>(entity_a1, POSITION)
-                .is_none(),
+            world.get_position(entity_a1).is_none(),
             "Old reference to entity should be invalid"
         );
 
@@ -1321,25 +1318,21 @@ mod tests {
             "Third use of ID should have generation 2"
         );
 
-        if let Some(pos) = world.get_component_mut::<Position>(entity_a3, POSITION) {
+        if let Some(pos) = world.get_position_mut(entity_a3) {
             pos.x = 3.0;
             pos.y = 3.0;
         }
 
         assert!(
-            world
-                .get_component::<Position>(entity_a1, POSITION)
-                .is_none(),
+            world.get_position(entity_a1).is_none(),
             "First generation reference should be invalid"
         );
         assert!(
-            world
-                .get_component::<Position>(entity_a2, POSITION)
-                .is_none(),
+            world.get_position(entity_a2).is_none(),
             "Second generation reference should be invalid"
         );
 
-        let pos = world.get_component::<Position>(entity_a3, POSITION);
+        let pos = world.get_position(entity_a3);
         assert!(
             pos.is_some(),
             "Current generation reference should be valid"
@@ -1430,8 +1423,8 @@ mod tests {
             old_table_idx, new_table_idx
         );
         println!("Tables after operation:");
-        for (i, table) in world.tables.iter().enumerate() {
-            println!("Table {}: mask={:b}", i, table.mask);
+        for (index, table) in world.tables.iter().enumerate() {
+            println!("Table {}: mask={:b}", index, table.mask);
         }
 
         assert_eq!(
@@ -1540,7 +1533,7 @@ mod tests {
 
         assert!(world.try_next_event().is_none());
 
-        if let Some(vel) = world.get_component_mut::<Velocity>(entity, VELOCITY) {
+        if let Some(vel) = world.get_velocity_mut(entity) {
             vel.x = 10.0;
         }
 
@@ -1571,11 +1564,11 @@ mod tests {
 
         let entity = world.spawn_entities(POSITION | VELOCITY, 1)[0];
 
-        if let Some(pos) = world.get_component_mut::<Position>(entity, POSITION) {
+        if let Some(pos) = world.get_position_mut(entity) {
             pos.x = 5.0;
         }
 
-        if let Some(vel) = world.get_component_mut::<Velocity>(entity, VELOCITY) {
+        if let Some(vel) = world.get_velocity_mut(entity) {
             vel.x = 10.0;
         }
 
@@ -1603,10 +1596,10 @@ mod tests {
 
         let entity = world.spawn_entities(POSITION | VELOCITY | HEALTH, 1)[0];
 
-        if let Some(pos) = world.get_component_mut::<Position>(entity, POSITION) {
+        if let Some(pos) = world.get_position_mut(entity) {
             pos.x = 1.0;
         }
-        if let Some(vel) = world.get_component_mut::<Velocity>(entity, VELOCITY) {
+        if let Some(vel) = world.get_velocity_mut(entity) {
             vel.x = 2.0;
         }
 
@@ -1646,24 +1639,12 @@ mod tests {
         let mut world = World::default();
         let entity = world.spawn_entities(POSITION, 1)[0];
         world.set_position(entity, Position { x: 1.0, y: 2.0 });
-        assert_eq!(
-            world.get_component::<Position>(entity, POSITION).unwrap().x,
-            1.0
-        );
-        assert_eq!(
-            world.get_component::<Position>(entity, POSITION).unwrap().y,
-            2.0
-        );
+        assert_eq!(world.get_position(entity).unwrap().x, 1.0);
+        assert_eq!(world.get_position(entity).unwrap().y, 2.0);
 
         world.set_position(entity, Position { x: 3.0, y: 4.0 });
-        assert_eq!(
-            world.get_component::<Position>(entity, POSITION).unwrap().x,
-            3.0
-        );
-        assert_eq!(
-            world.get_component::<Position>(entity, POSITION).unwrap().y,
-            4.0
-        );
+        assert_eq!(world.get_position(entity).unwrap().x, 3.0);
+        assert_eq!(world.get_position(entity).unwrap().y, 4.0);
     }
 
     #[test]
