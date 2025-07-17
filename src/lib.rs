@@ -112,60 +112,6 @@
 //! }
 //! ```
 //!
-//! ## Parallel Processing
-//!
-//! Systems can process entities in parallel using [rayon](https://docs.rs/rayon/latest/rayon/).
-//! For the best performance with large numbers of entities, you can batch process components.
-//!
-//! ```rust
-//! use rayon::prelude::*;
-//!
-//! pub fn run_systems(world: &mut World) {
-//!     update_positions_system(world);
-//!     health_system(world);
-//! }
-//!
-//! // Process positions in parallel by collecting data first
-//! pub fn update_positions_system(world: &mut World) {
-//!     let dt = world.resources.delta_time;
-//!     
-//!     // Collect entity data to avoid borrow conflicts
-//!     let mut updates: Vec<(Entity, Position, Velocity)> = world
-//!         .query_entities(POSITION | VELOCITY)
-//!         .into_iter()
-//!         .filter_map(|entity| {
-//!             match (world.get_position(entity), world.get_velocity(entity)) {
-//!                 (Some(pos), Some(vel)) => Some((entity, *pos, *vel)),
-//!                 _ => None
-//!             }
-//!         })
-//!         .collect();
-//!     
-//!     // Process in parallel
-//!     updates.par_iter_mut().for_each(|(_, pos, vel)| {
-//!         pos.x += vel.x * dt;
-//!         pos.y += vel.y * dt;
-//!     });
-//!     
-//!     // Write back results
-//!     for (entity, new_pos, _) in updates {
-//!         world.set_position(entity, new_pos);
-//!     }
-//! }
-//!
-//! // Simple sequential processing is often sufficient
-//! pub fn health_system(world: &mut World) {
-//!     for entity in world.query_entities(HEALTH) {
-//!         if let Some(health) = world.get_health_mut(entity) {
-//!             health.value *= 0.98;
-//!         }
-//!     }
-//! }
-//! ```
-//!
-//! > Note: Sequential processing is typically more performant than parallel processing
-//! > unless you're working with very large numbers of entities (10,000+).
-//!
 //! ## Change Detection
 //!
 //! ```rust

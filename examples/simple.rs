@@ -1,5 +1,4 @@
 use freecs::{Entity, ecs};
-use rayon::prelude::*;
 
 ecs! {
     World {
@@ -134,36 +133,6 @@ mod systems {
             if let Some(health) = world.get_health_mut(entity) {
                 health.value *= 0.98;
             }
-        }
-    }
-
-    // Alternative: If you need parallel processing for large numbers of entities,
-    // you can batch the entities and process them in parallel
-    #[allow(dead_code)]
-    fn parallel_update_positions_system(world: &mut World) {
-        let dt = world.resources.delta_time;
-
-        // Collect all entity data first
-        let mut entity_data: Vec<(Entity, Position, Velocity)> = world
-            .query_entities(POSITION | VELOCITY)
-            .into_iter()
-            .filter_map(
-                |entity| match (world.get_position(entity), world.get_velocity(entity)) {
-                    (Some(pos), Some(vel)) => Some((entity, *pos, *vel)),
-                    _ => None,
-                },
-            )
-            .collect();
-
-        // Process in parallel
-        entity_data.par_iter_mut().for_each(|(_, pos, vel)| {
-            pos.x += vel.x * dt;
-            pos.y += vel.y * dt;
-        });
-
-        // Write back the results
-        for (entity, new_pos, _) in entity_data {
-            world.set_position(entity, new_pos);
         }
     }
 }
