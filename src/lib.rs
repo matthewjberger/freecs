@@ -112,41 +112,6 @@
 //! }
 //! ```
 //!
-//! ## Change Detection
-//!
-//! ```rust
-//! // Get mutable access and modify a component
-//! if let Some(pos) = world.get_position_mut(entity) {
-//!     pos.x += velocity.x * dt;
-//!     pos.y += velocity.y * dt;
-//! }
-//!
-//! // Explicitly mark the component as changed
-//! world.mark_changed(entity, POSITION);
-//!
-//! // Later, process change events
-//! while let Some(event) = world.try_next_event() {
-//!     match event {
-//!         Event::ComponentChanged { kind, entity } => {
-//!             println!("Component {:b} changed for entity {:?}", kind, entity);
-//!         }
-//!     }
-//! }
-//!
-//! // You can also clear the event queue
-//! world.clear_events();
-//! ```
-//!
-//! You can mark multiple components as changed in a single call:
-//!
-//! ```rust
-//! // Mark both position and velocity as changed
-//! world.mark_changed(entity, POSITION | VELOCITY);
-//! ```
-//!
-//! The event queue is stored in the world's `Resources` struct and is automatically available
-//! when you create a world with the `ecs!` macro.
-//!
 //! ## Entity Builder
 //!
 //! ```rust
@@ -162,11 +127,6 @@
 //! ```
 
 pub use paste;
-
-#[derive(Debug, Clone, PartialEq)]
-pub enum Event {
-    ComponentChanged { kind: u64, entity: Entity },
-}
 
 #[derive(
     Default, Clone, Copy, Debug, Eq, PartialEq, Hash, serde::Serialize, serde::Deserialize,
@@ -282,18 +242,6 @@ macro_rules! ecs {
 
         #[allow(unused)]
         impl $world {
-            pub fn try_next_event(&mut self) -> Option<$crate::Event> {
-                self.resources.events.pop_front()
-            }
-
-            pub fn clear_events(&mut self) {
-                self.resources.events.clear();
-            }
-
-            pub fn mark_changed(&mut self, entity: $crate::Entity, mask: u64) {
-                self.resources.events.push_back($crate::Event::ComponentChanged { kind: mask, entity });
-            }
-
             $(
                 $crate::paste::paste! {
                     #[inline]
@@ -562,7 +510,6 @@ macro_rules! ecs {
 
         #[derive(Default)]
         pub struct $resources {
-            pub events: std::collections::VecDeque<$crate::Event>,
             $($(#[$attr])* pub $resource_name: $resource_type,)*
         }
 
@@ -1467,117 +1414,6 @@ mod tests {
         let entity = world.spawn_entities(POSITION | VELOCITY, 1)[0];
         assert!(world.entity_has_components(entity, POSITION | VELOCITY));
         assert!(!world.entity_has_components(entity, HEALTH));
-    }
-
-    #[test]
-    fn test_change_detection() {
-        let mut world = World::default();
-
-        let entity = world.spawn_entities(POSITION, 1)[0];
-
-        world.add_components(entity, VELOCITY);
-
-        assert!(world.try_next_event().is_none());
-
-        if let Some(vel) = world.get_velocity_mut(entity) {
-            vel.x = 10.0;
-        }
-
-        assert!(world.try_next_event().is_none());
-
-        world.mark_changed(entity, VELOCITY);
-
-        let event = world.try_next_event();
-        assert!(event.is_some());
-
-        if let Some(Event::ComponentChanged {
-            kind,
-            entity: changed_entity,
-        }) = event
-        {
-            assert_eq!(kind, VELOCITY);
-            assert_eq!(changed_entity, entity);
-        } else {
-            panic!("Expected ComponentChanged event");
-        }
-
-        assert!(world.try_next_event().is_none());
-    }
-
-    #[test]
-    fn test_multiple_change_events() {
-        let mut world = World::default();
-
-        let entity = world.spawn_entities(POSITION | VELOCITY, 1)[0];
-
-        if let Some(pos) = world.get_position_mut(entity) {
-            pos.x = 5.0;
-        }
-
-        if let Some(vel) = world.get_velocity_mut(entity) {
-            vel.x = 10.0;
-        }
-
-        world.mark_changed(entity, POSITION);
-        world.mark_changed(entity, VELOCITY);
-
-        let event1 = world.try_next_event();
-        assert!(event1.is_some());
-        if let Some(Event::ComponentChanged { kind, .. }) = event1 {
-            assert_eq!(kind, POSITION);
-        }
-
-        let event2 = world.try_next_event();
-        assert!(event2.is_some());
-        if let Some(Event::ComponentChanged { kind, .. }) = event2 {
-            assert_eq!(kind, VELOCITY);
-        }
-
-        assert!(world.try_next_event().is_none());
-    }
-
-    #[test]
-    fn test_mark_changed_with_combined_mask() {
-        let mut world = World::default();
-
-        let entity = world.spawn_entities(POSITION | VELOCITY | HEALTH, 1)[0];
-
-        if let Some(pos) = world.get_position_mut(entity) {
-            pos.x = 1.0;
-        }
-        if let Some(vel) = world.get_velocity_mut(entity) {
-            vel.x = 2.0;
-        }
-
-        world.mark_changed(entity, POSITION | VELOCITY);
-
-        let event = world.try_next_event();
-        assert!(event.is_some());
-        if let Some(Event::ComponentChanged {
-            kind,
-            entity: changed_entity,
-        }) = event
-        {
-            assert_eq!(kind, POSITION | VELOCITY);
-            assert_eq!(changed_entity, entity);
-        }
-
-        assert!(world.try_next_event().is_none());
-    }
-
-    #[test]
-    fn test_clear_events() {
-        let mut world = World::default();
-
-        let entity = world.spawn_entities(POSITION | VELOCITY, 1)[0];
-
-        world.mark_changed(entity, POSITION);
-        world.mark_changed(entity, VELOCITY);
-        world.mark_changed(entity, POSITION | VELOCITY);
-
-        world.clear_events();
-
-        assert!(world.try_next_event().is_none());
     }
 
     #[test]

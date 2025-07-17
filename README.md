@@ -18,16 +18,12 @@ Add this to your `Cargo.toml`:
 ```toml
 [dependencies]
 freecs = "0.6.0"
-
-# (optional) add rayon if you want to parallelize systems
-rayon = "^1.10.0"
 ```
 
 And in `main.rs`:
 
 ```rust
 use freecs::{ecs, Entity};
-use rayon::prelude::*;
 
 ecs! {
     World {
@@ -166,37 +162,6 @@ mod systems {
             }
         }
     }
-
-    // Alternative: Parallel processing for large numbers of entities
-    #[allow(dead_code)]
-    fn parallel_update_positions_system(world: &mut World) {
-        let dt = world.resources.delta_time;
-        
-        // Collect all entity data first
-        let mut entity_data: Vec<(Entity, Position, Velocity)> = world
-            .query_entities(POSITION | VELOCITY)
-            .into_iter()
-            .filter_map(|entity| {
-                match (world.get_position(entity), world.get_velocity(entity)) {
-                    (Some(pos), Some(vel)) => Some((entity, *pos, *vel)),
-                    _ => None
-                }
-            })
-            .collect();
-        
-        // Process in parallel
-        entity_data
-            .par_iter_mut()
-            .for_each(|(_, pos, vel)| {
-                pos.x += vel.x * dt;
-                pos.y += vel.y * dt;
-            });
-        
-        // Write back the results
-        for (entity, new_pos, _) in entity_data {
-            world.set_position(entity, new_pos);
-        }
-    }
 }
 ```
 
@@ -244,14 +209,12 @@ pub fn query_global_transform(world: &World, entity: EntityId) -> nalgebra_glm::
 }
 ```
 
-## Parallel Processing
+## Batched Processing
 
-For performance-critical systems with large numbers of entities, you can use parallel processing:
+For performance-critical systems with large numbers of entities, you can batch process components:
 
 ```rust
-use rayon::prelude::*;
-
-fn parallel_physics_system(world: &mut World) {
+fn batched_physics_system(world: &mut World) {
     let dt = world.resources.delta_time;
     
     // Collect entity data
@@ -266,11 +229,11 @@ fn parallel_physics_system(world: &mut World) {
         })
         .collect();
     
-    // Process in parallel
-    entities.par_iter_mut().for_each(|(_, pos, vel)| {
+    // Process all entities
+    for (_, pos, vel) in &mut entities {
         pos.x += vel.x * dt;
         pos.y += vel.y * dt;
-    });
+    }
     
     // Write back results
     for (entity, new_pos, _) in entities {
@@ -279,43 +242,7 @@ fn parallel_physics_system(world: &mut World) {
 }
 ```
 
-## Change Detection
-
-`freecs` provides an opt-in change detection system that allows you to track when components are modified.
-This is useful for systems that only need to process entities when their data has changed.
-
-```rust
-// Get mutable access and modify a component
-if let Some(pos) = world.get_position_mut(entity) {
-    pos.x += velocity.x * dt;
-    pos.y += velocity.y * dt;
-}
-
-// Explicitly mark the component as changed
-world.mark_changed(entity, POSITION);
-
-// Later, process change events
-while let Some(event) = world.try_next_event() {
-    match event {
-        Event::ComponentChanged { kind, entity } => {
-            println!("Component {:b} changed for entity {:?}", kind, entity);
-        }
-    }
-}
-
-// You can also clear the event queue
-world.clear_events();
-```
-
-You can mark multiple components as changed in a single call:
-
-```rust
-// Mark both position and velocity as changed
-world.mark_changed(entity, POSITION | VELOCITY);
-```
-
-The event queue is stored in the world's `Resources` struct and is automatically available when you create a world with the `ecs!` macro.
-
+This approach minimizes borrowing conflicts and can improve performance by processing data in batches.
 
 ## Entity Builder
 
