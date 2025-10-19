@@ -1,4 +1,4 @@
-use freecs::{Entity, ecs};
+use freecs::ecs;
 use macroquad::prelude::*;
 
 ecs! {
@@ -26,22 +26,22 @@ ecs! {
 }
 
 #[derive(Default, Debug, Clone, Copy)]
-struct Position {
+pub struct Position {
     x: f32,
     y: f32,
 }
 
 #[derive(Default, Debug, Clone, Copy)]
-struct Velocity {
+pub struct Velocity {
     x: f32,
     y: f32,
 }
 
 #[derive(Default, Debug, Clone, Copy)]
-struct Boid;
+pub struct Boid;
 
 #[derive(Default, Debug, Clone, Copy)]
-struct BoidColor {
+pub struct BoidColor {
     r: f32,
     g: f32,
     b: f32,
@@ -81,16 +81,32 @@ impl Default for BoidParams {
     }
 }
 
+struct BoidCache {
+    velocity_updates: Vec<Velocity>,
+    positions_snapshot: Vec<Position>,
+}
+
+impl BoidCache {
+    fn new() -> Self {
+        Self {
+            velocity_updates: Vec::new(),
+            positions_snapshot: Vec::new(),
+        }
+    }
+}
+
 mod systems {
     use super::*;
 
-    pub fn run_systems(world: &mut World) {
-        process_boids(world);
+    pub fn run_systems(world: &mut World, grid: &mut SpatialGrid, cache: &mut BoidCache) {
+        process_boids(world, grid, cache);
         update_positions(world);
         wrap_positions(world);
     }
 
-    fn process_boids(world: &mut World) {
+    fn process_boids(world: &mut World, grid: &mut SpatialGrid, cache: &mut BoidCache) {
+        const MAX_NEIGHBORS: usize = 7;
+
         let visual_range = world.resources.visual_range;
         let mouse_pos = world.resources.mouse_pos;
         let mouse_attract = world.resources.mouse_attract;
@@ -104,174 +120,188 @@ mod systems {
         let min_speed = world.resources.min_speed;
         let max_speed = world.resources.max_speed;
 
-        let mut grid = SpatialGrid::new(screen_width(), screen_height(), visual_range);
+        grid.clear();
+        cache.positions_snapshot.clear();
 
-        for entity in world.query_entities(POSITION | VELOCITY | BOID) {
-            if let (Some(pos), Some(vel)) = (world.get_position(entity), world.get_velocity(entity))
-            {
-                grid.insert(entity, *pos, *vel);
-            }
-        }
+        world
+            .query()
+            .with(POSITION | VELOCITY | BOID)
+            .iter(|_entity, table, idx| {
+                let pos = table.position[idx];
+                let vel = table.velocity[idx];
+                cache.positions_snapshot.push(pos);
+                grid.insert(pos, vel);
+            });
 
-        let boids: Vec<Entity> = world.query_entities(POSITION | VELOCITY | BOID);
+        cache.velocity_updates.clear();
+        cache
+            .velocity_updates
+            .reserve(cache.positions_snapshot.len());
 
-        for entity in boids {
-            let Some(pos) = world.get_position(entity) else {
-                continue;
-            };
-            let pos = *pos;
+        let mut boid_idx = 0;
+        world
+            .query()
+            .with(POSITION | VELOCITY | BOID)
+            .iter(|_entity, table, idx| {
+                let pos = cache.positions_snapshot[boid_idx];
+                let mut vel = table.velocity[idx];
 
-            let mut alignment = Velocity::default();
-            let mut cohesion = Position::default();
-            let mut separation = Velocity::default();
-            let mut neighbors = 0;
+                let mut alignment = Velocity::default();
+                let mut cohesion = Position::default();
+                let mut separation = Velocity::default();
+                let mut neighbors = 0;
 
-            for (other_entity, other_pos, other_vel) in grid.get_nearby_boids(pos, visual_range) {
-                if entity == *other_entity {
-                    continue;
-                }
+                let nearby = grid.get_nearby_boids(pos, visual_range);
+                for boid_data in nearby {
+                    let dx = boid_data.pos.x - pos.x;
+                    let dy = boid_data.pos.y - pos.y;
+                    let dist_sq = dx * dx + dy * dy;
 
-                let dx = other_pos.x - pos.x;
-                let dy = other_pos.y - pos.y;
-                let dist_sq = dx * dx + dy * dy;
+                    if dist_sq > 0.0 && dist_sq < visual_range * visual_range {
+                        alignment.x += boid_data.vel.x;
+                        alignment.y += boid_data.vel.y;
 
-                if dist_sq < visual_range * visual_range {
-                    alignment.x += other_vel.x;
-                    alignment.y += other_vel.y;
+                        cohesion.x += boid_data.pos.x;
+                        cohesion.y += boid_data.pos.y;
 
-                    cohesion.x += other_pos.x;
-                    cohesion.y += other_pos.y;
-
-                    if dist_sq > 0.0 {
                         let factor = 1.0 / dist_sq.sqrt();
                         separation.x -= dx * factor;
                         separation.y -= dy * factor;
+
+                        neighbors += 1;
+                        if neighbors >= MAX_NEIGHBORS {
+                            break;
+                        }
+                    }
+                }
+
+                let mouse_dx = mouse_pos[0] - pos.x;
+                let mouse_dy = mouse_pos[1] - pos.y;
+                let mouse_dist_sq = mouse_dx * mouse_dx + mouse_dy * mouse_dy;
+                let mouse_range_sq = mouse_influence_range * mouse_influence_range;
+
+                if mouse_dist_sq < mouse_range_sq {
+                    let mouse_influence = 1.0 - (mouse_dist_sq / mouse_range_sq).sqrt();
+
+                    if mouse_attract {
+                        vel.x += mouse_dx * mouse_influence * mouse_attraction_weight;
+                        vel.y += mouse_dy * mouse_influence * mouse_attraction_weight;
                     }
 
-                    neighbors += 1;
-                }
-            }
-
-            let mouse_dx = mouse_pos[0] - pos.x;
-            let mouse_dy = mouse_pos[1] - pos.y;
-            let mouse_dist_sq = mouse_dx * mouse_dx + mouse_dy * mouse_dy;
-            let mouse_range_sq = mouse_influence_range * mouse_influence_range;
-
-            let Some(vel) = world.get_velocity_mut(entity) else {
-                continue;
-            };
-
-            if mouse_dist_sq < mouse_range_sq {
-                let mouse_influence = 1.0 - (mouse_dist_sq / mouse_range_sq).sqrt();
-
-                if mouse_attract {
-                    vel.x += mouse_dx * mouse_influence * mouse_attraction_weight;
-                    vel.y += mouse_dy * mouse_influence * mouse_attraction_weight;
+                    if mouse_repel {
+                        vel.x -= mouse_dx * mouse_influence * mouse_repulsion_weight;
+                        vel.y -= mouse_dy * mouse_influence * mouse_repulsion_weight;
+                    }
                 }
 
-                if mouse_repel {
-                    vel.x -= mouse_dx * mouse_influence * mouse_repulsion_weight;
-                    vel.y -= mouse_dy * mouse_influence * mouse_repulsion_weight;
+                if neighbors > 0 {
+                    let inv_neighbors = 1.0 / neighbors as f32;
+
+                    alignment.x *= inv_neighbors * alignment_weight;
+                    alignment.y *= inv_neighbors * alignment_weight;
+
+                    cohesion.x = (cohesion.x * inv_neighbors - pos.x) * cohesion_weight;
+                    cohesion.y = (cohesion.y * inv_neighbors - pos.y) * cohesion_weight;
+
+                    vel.x += alignment.x + cohesion.x + separation.x * separation_weight;
+                    vel.y += alignment.y + cohesion.y + separation.y * separation_weight;
                 }
-            }
 
-            if neighbors > 0 {
-                let inv_neighbors = 1.0 / neighbors as f32;
+                let speed = (vel.x * vel.x + vel.y * vel.y).sqrt();
+                if speed > max_speed {
+                    let factor = max_speed / speed;
+                    vel.x *= factor;
+                    vel.y *= factor;
+                } else if speed < min_speed && speed > 0.0 {
+                    let factor = min_speed / speed;
+                    vel.x *= factor;
+                    vel.y *= factor;
+                }
 
-                alignment.x *= inv_neighbors * alignment_weight;
-                alignment.y *= inv_neighbors * alignment_weight;
+                cache.velocity_updates.push(vel);
+                boid_idx += 1;
+            });
 
-                cohesion.x = (cohesion.x * inv_neighbors - pos.x) * cohesion_weight;
-                cohesion.y = (cohesion.y * inv_neighbors - pos.y) * cohesion_weight;
-
-                vel.x += alignment.x + cohesion.x + separation.x * separation_weight;
-                vel.y += alignment.y + cohesion.y + separation.y * separation_weight;
-            }
-
-            let speed = (vel.x * vel.x + vel.y * vel.y).sqrt();
-            if speed > max_speed {
-                let factor = max_speed / speed;
-                vel.x *= factor;
-                vel.y *= factor;
-            } else if speed < min_speed && speed > 0.0 {
-                let factor = min_speed / speed;
-                vel.x *= factor;
-                vel.y *= factor;
-            }
-        }
+        let mut update_idx = 0;
+        world
+            .query_mut()
+            .with(POSITION | VELOCITY | BOID)
+            .iter(|_entity, table, idx| {
+                table.velocity[idx] = cache.velocity_updates[update_idx];
+                update_idx += 1;
+            });
     }
 
     fn update_positions(world: &mut World) {
         let dt = world.resources.delta_time;
 
-        let updates: Vec<(Entity, Velocity)> = world
-            .query_entities(POSITION | VELOCITY)
-            .into_iter()
-            .filter_map(|entity| world.get_velocity(entity).map(|vel| (entity, *vel)))
-            .collect();
-
-        for (entity, vel) in updates {
-            if let Some(pos) = world.get_position_mut(entity) {
-                pos.x += vel.x * dt;
-                pos.y += vel.y * dt;
-            }
-        }
+        world
+            .query_mut()
+            .with(POSITION | VELOCITY)
+            .iter(|_entity, table, idx| {
+                table.position[idx].x += table.velocity[idx].x * dt;
+                table.position[idx].y += table.velocity[idx].y * dt;
+            });
     }
 
     fn wrap_positions(world: &mut World) {
         let screen_w = screen_width();
         let screen_h = screen_height();
 
-        for entity in world.query_entities(POSITION) {
-            if let Some(pos) = world.get_position_mut(entity) {
-                if pos.x < 0.0 {
-                    pos.x += screen_w;
+        world
+            .query_mut()
+            .with(POSITION)
+            .iter(|_entity, table, idx| {
+                if table.position[idx].x < 0.0 {
+                    table.position[idx].x += screen_w;
                 }
-                if pos.x > screen_w {
-                    pos.x -= screen_w;
+                if table.position[idx].x > screen_w {
+                    table.position[idx].x -= screen_w;
                 }
-                if pos.y < 0.0 {
-                    pos.y += screen_h;
+                if table.position[idx].y < 0.0 {
+                    table.position[idx].y += screen_h;
                 }
-                if pos.y > screen_h {
-                    pos.y -= screen_h;
+                if table.position[idx].y > screen_h {
+                    table.position[idx].y -= screen_h;
                 }
-            }
-        }
+            });
     }
 }
 
 fn spawn_boids(world: &mut World, count: usize) {
-    let entities = world.spawn_entities(POSITION | VELOCITY | BOID | COLOR, count);
+    let screen_w = screen_width();
+    let screen_h = screen_height();
 
-    for entity in entities {
-        if let Some(pos) = world.get_position_mut(entity) {
-            pos.x = rand::gen_range(0.0, screen_width());
-            pos.y = rand::gen_range(0.0, screen_height());
-        }
+    world.spawn_batch(POSITION | VELOCITY | BOID | COLOR, count, |table, idx| {
+        table.position[idx] = Position {
+            x: rand::gen_range(0.0, screen_w),
+            y: rand::gen_range(0.0, screen_h),
+        };
 
-        if let Some(vel) = world.get_velocity_mut(entity) {
-            let angle = rand::gen_range(0.0, std::f32::consts::PI * 2.0);
-            let speed = rand::gen_range(100.0, 200.0);
-            vel.x = angle.cos() * speed;
-            vel.y = angle.sin() * speed;
-        }
+        let angle = rand::gen_range(0.0, std::f32::consts::PI * 2.0);
+        let speed = rand::gen_range(100.0, 200.0);
+        table.velocity[idx] = Velocity {
+            x: angle.cos() * speed,
+            y: angle.sin() * speed,
+        };
 
-        if let Some(color) = world.get_color_mut(entity) {
-            color.r = rand::gen_range(0.5, 1.0);
-            color.g = rand::gen_range(0.5, 1.0);
-            color.b = rand::gen_range(0.5, 1.0);
-        }
-    }
+        table.color[idx] = BoidColor {
+            r: rand::gen_range(0.5, 1.0),
+            g: rand::gen_range(0.5, 1.0),
+            b: rand::gen_range(0.5, 1.0),
+        };
+    });
 }
 
 fn render_boids(world: &World) {
-    for entity in world.query_entities(POSITION | VELOCITY | COLOR) {
-        if let (Some(pos), Some(vel), Some(color)) = (
-            world.get_position(entity),
-            world.get_velocity(entity),
-            world.get_color(entity),
-        ) {
+    world
+        .query()
+        .with(POSITION | VELOCITY | COLOR)
+        .iter(|_entity, table, idx| {
+            let pos = &table.position[idx];
+            let vel = &table.velocity[idx];
+            let color = &table.color[idx];
+
             let angle = vel.y.atan2(vel.x);
 
             draw_triangle(
@@ -286,8 +316,7 @@ fn render_boids(world: &World) {
                 ),
                 Color::new(color.r, color.g, color.b, 1.0),
             );
-        }
-    }
+        });
 }
 
 fn draw_ui(params: &mut BoidParams, world: &mut World) {
@@ -310,7 +339,7 @@ fn draw_ui(params: &mut BoidParams, world: &mut World) {
         draw_text(text, x, y, 20.0, WHITE);
     };
 
-    let entity_count = world.query_entities(BOID).len();
+    let entity_count = world.query_entities(BOID).count();
     draw_param(y, &format!("Entities: {}", entity_count));
     y += step;
     draw_param(y, &format!("FPS: {:.1}", get_fps()));
@@ -418,12 +447,18 @@ fn draw_ui(params: &mut BoidParams, world: &mut World) {
 }
 
 fn draw_debug(world: &World) {
-    for entity in world.query_entities(POSITION | VELOCITY) {
-        if let (Some(pos), Some(vel)) = (world.get_position(entity), world.get_velocity(entity)) {
+    let visual_range = world.resources.visual_range;
+    world
+        .query()
+        .with(POSITION | VELOCITY)
+        .iter(|_entity, table, idx| {
+            let pos = &table.position[idx];
+            let vel = &table.velocity[idx];
+
             draw_circle_lines(
                 pos.x,
                 pos.y,
-                world.resources.visual_range,
+                visual_range,
                 0.5,
                 Color::new(0.2, 0.2, 0.2, 0.3),
             );
@@ -435,15 +470,21 @@ fn draw_debug(world: &World) {
                 1.0,
                 Color::new(0.0, 1.0, 0.0, 0.3),
             );
-        }
-    }
+        });
 }
 
 struct SpatialGrid {
-    cells: Vec<Vec<(Entity, Position, Velocity)>>,
+    cells: Vec<Vec<BoidData>>,
+    neighbor_buffer: Vec<BoidData>,
     cell_size: f32,
     width: usize,
     height: usize,
+}
+
+#[derive(Clone, Copy)]
+struct BoidData {
+    pos: Position,
+    vel: Velocity,
 }
 
 impl SpatialGrid {
@@ -453,16 +494,23 @@ impl SpatialGrid {
         let cells = vec![Vec::new(); width * height];
         Self {
             cells,
+            neighbor_buffer: Vec::with_capacity(128),
             cell_size,
             width,
             height,
         }
     }
 
-    fn insert(&mut self, entity: Entity, pos: Position, vel: Velocity) {
+    fn clear(&mut self) {
+        for cell in &mut self.cells {
+            cell.clear();
+        }
+    }
+
+    fn insert(&mut self, pos: Position, vel: Velocity) {
         let idx = self.get_cell_index(pos.x, pos.y);
         if let Some(cell) = self.cells.get_mut(idx) {
-            cell.push((entity, pos, vel));
+            cell.push(BoidData { pos, vel });
         }
     }
 
@@ -472,32 +520,28 @@ impl SpatialGrid {
         (cell_x.min(self.width - 1)) + (cell_y.min(self.height - 1)) * self.width
     }
 
-    fn get_nearby_boids(
-        &self,
-        pos: Position,
-        range: f32,
-    ) -> impl Iterator<Item = &(Entity, Position, Velocity)> {
+    fn get_nearby_boids(&mut self, pos: Position, range: f32) -> &[BoidData] {
+        self.neighbor_buffer.clear();
+
         let range_cells = (range / self.cell_size).ceil() as isize;
         let cell_x = (pos.x / self.cell_size).floor() as isize;
         let cell_y = (pos.y / self.cell_size).floor() as isize;
 
-        let mut nearby = Vec::new();
-
-        for dy in -range_cells as isize..=range_cells as isize {
-            for dx in -range_cells as isize..=range_cells as isize {
+        for dy in -range_cells..=range_cells {
+            for dx in -range_cells..=range_cells {
                 let x = cell_x + dx;
                 let y = cell_y + dy;
 
                 if x >= 0 && x < self.width as isize && y >= 0 && y < self.height as isize {
                     let idx = x as usize + y as usize * self.width;
                     if let Some(cell) = self.cells.get(idx) {
-                        nearby.extend(cell.iter());
+                        self.neighbor_buffer.extend_from_slice(cell);
                     }
                 }
             }
         }
 
-        nearby.into_iter()
+        &self.neighbor_buffer
     }
 }
 
@@ -505,6 +549,8 @@ impl SpatialGrid {
 async fn main() {
     let mut world = World::default();
     let mut params = BoidParams::default();
+    let mut grid = SpatialGrid::new(screen_width(), screen_height(), params.visual_range / 2.0);
+    let mut cache = BoidCache::new();
 
     spawn_boids(&mut world, params.spawn_count);
 
@@ -519,7 +565,7 @@ async fn main() {
         world.resources.min_speed = params.min_speed;
         world.resources.max_speed = params.max_speed;
 
-        systems::run_systems(&mut world);
+        systems::run_systems(&mut world, &mut grid, &mut cache);
 
         if params.show_debug {
             draw_debug(&world);

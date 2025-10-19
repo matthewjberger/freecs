@@ -1,6 +1,6 @@
 [package]
 name = "freecs"
-version = "0.6.0"
+version = "1.0.0"
 authors = ["Matthew Berger <matthewjordanberger@gmail.com>"]
 description = """
 A high-performance, archetype-based Entity Component System (ECS) written in Rust.
@@ -17,7 +17,13 @@ doctest = false
 [dependencies]
 paste = "1.0.15"
 serde = { version = "1.0", features = ["derive"] }
+rayon = "1.11"
 
 [dev-dependencies]
 macroquad = "0.4.14"
-rand = "0.9.1"
+rand = "0.9.2"
+criterion = { version = "0.7.0", features = ["html_reports"] }
+
+[[bench]]
+name = "ecs_benchmarks"
+harness = false
