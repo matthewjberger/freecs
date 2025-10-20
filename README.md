@@ -15,7 +15,7 @@ A high-performance, archetype-based Entity Component System (ECS) for Rust
 - Change detection for incremental updates
 - Type-safe double-buffered event system
 
-The `ecs!` macro generates the entire ECS at compile time. The core implementation is ~1,500 LOC,
+The `ecs!` macro generates the entire ECS at compile time. The core implementation is ~1,350 LOC,
 contains only plain data structures and functions, and uses zero unsafe code.
 
 ## Quick Start
@@ -24,7 +24,7 @@ Add this to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-freecs = "1.0.2"
+freecs = "1.1.0"
 ```
 
 And in `main.rs`:
@@ -376,11 +376,11 @@ loop {
     physics_system(&mut world);
     collision_system(&mut world);
 
-    world.step();  // Cleans up events from previous frame
+    world.step();  // Cleans up events and increments tick counter
 }
 ```
 
-The `step()` method handles event lifecycle automatically. For fine-grained control, you can use `update_<event>()` to update individual event types.
+The `step()` method handles event lifecycle and tick counter automatically. For fine-grained control, you can use `update_<event>()` to update individual event types.
 
 ### Double Buffering
 
@@ -589,34 +589,31 @@ Available command buffer operations:
 
 ### Change Detection
 
-Track which components have been modified since a specific tick. Useful for incremental updates, networking, or rendering optimizations:
+Track which components have been modified since the last frame. Useful for incremental updates, networking, or rendering optimizations:
 
 ```rust
 fn render_system(world: &mut World) {
-    let current_tick = world.current_tick();
-
-    // Process only entities whose position changed this frame
-    world.query()
-        .with(POSITION)
-        .changed_since(current_tick - 1)
-        .iter(|entity, table, idx| {
-            update_sprite_position(&table.position[idx]);
-        });
-
-    // Increment the tick counter at the end of the frame
-    world.increment_tick();
+    // Process only entities whose components changed since last step()
+    world.for_each_mut_changed(POSITION, 0, |entity, table, idx| {
+        // Only processes entities where position changed
+        update_sprite_position(&table.position[idx]);
+    });
 }
 
-// You can also use for_each_mut_changed for direct iteration
-world.for_each_mut_changed(POSITION | VELOCITY, last_tick, |entity, table, idx| {
-    // Only processes entities where position OR velocity changed
-    sync_to_physics_engine(entity, &table.position[idx], &table.velocity[idx]);
-});
+fn network_sync_system(world: &mut World) {
+    // Sync changed entities to network clients
+    world.for_each_mut_changed(POSITION | VELOCITY, 0, |entity, table, idx| {
+        sync_to_network(entity, &table.position[idx], &table.velocity[idx]);
+    });
+}
+
+// At the end of your game loop
+world.step();  // Increments tick counter and swaps event buffers
 ```
 
 Change detection tracks modifications at the component table level. Any mutation via `get_*_mut()` or table access marks that component slot as changed for the current tick.
 
-**Performance note**: Change detection adds a small overhead (~20 Melem/s vs normal iteration). Only use it when you need to track changes.
+**Performance note**: Change detection adds a small overhead. Only use it when you need to track changes.
 
 ### System Scheduling
 
@@ -627,40 +624,53 @@ use freecs::Schedule;
 
 fn main() {
     let mut world = World::default();
-    let mut schedule = Schedule::new();
 
-    // Add systems in order
-    schedule
-        .add_system(input_system)
-        .add_system(physics_system)
-        .add_system(collision_system)
-        .add_system(render_system);
+    // Create separate schedules for game logic and rendering
+    let mut game_schedule = Schedule::new();
+    game_schedule
+        .add_system_mut(input_system)      // Mutable systems
+        .add_system_mut(physics_system)
+        .add_system_mut(collision_system);
+
+    let mut render_schedule = Schedule::new();
+    render_schedule
+        .add_system(render_grid)           // Read-only systems
+        .add_system(render_entities);
 
     // Game loop
     loop {
-        schedule.run(&mut world);
+        game_schedule.run(&mut world);     // Run game logic
+        render_schedule.run(&mut world);   // Run rendering
         world.step();
     }
 }
 
 fn input_system(world: &mut World) {
-    // Handle input
+    // Handle input - mutates world state
 }
 
 fn physics_system(world: &mut World) {
-    // Update physics
+    // Update physics - mutates positions
 }
 
 fn collision_system(world: &mut World) {
-    // Check collisions
+    // Check collisions - sends events
 }
 
-fn render_system(world: &mut World) {
-    // Render entities
+fn render_grid(world: &World) {
+    // Render grid - read-only
+}
+
+fn render_entities(world: &World) {
+    // Render entities - read-only
 }
 ```
 
-Systems in a schedule execute sequentially in the order they were added. This provides a simple way to organize your game loop without manually calling each system.
+**Schedule API**:
+- `add_system_mut(fn(&mut World))` - Add a system that can mutate world state
+- `add_system(fn(&World))` - Add a read-only system (enforces immutability)
+
+Systems in a schedule execute sequentially in the order they were added. Use `add_system_mut` for game logic systems that modify state, and `add_system` for rendering and query-only systems that don't need mutation.
 
 ## Entity Builder
 
@@ -808,19 +818,19 @@ if world.entity_has_components(entity, POSITION | VELOCITY | HEALTH) {
 
 ### Tick Management
 
-Advanced tick management for change detection:
+Query the current and previous tick counters for advanced change detection:
 
 ```rust
 let current = world.current_tick();
 let previous = world.last_tick();
 
-// Process only entities changed in the last frame
-world.for_each_mut_changed(POSITION, previous, |entity, table, idx| {
+// Process only entities changed since last frame
+world.for_each_mut_changed(POSITION, 0, |entity, table, idx| {
     sync_transform(entity, &table.position[idx]);
 });
 
-// Manually increment tick
-world.increment_tick();
+// Tick is automatically incremented by world.step()
+world.step();
 ```
 
 ### Event Peeking

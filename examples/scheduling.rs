@@ -102,10 +102,10 @@ fn main() {
 
     let mut schedule = Schedule::new();
     schedule
-        .add_system(frame_counter_system)
-        .add_system(physics_system)
-        .add_system(damage_system)
-        .add_system(health_decay_system);
+        .add_system_mut(frame_counter_system)
+        .add_system_mut(physics_system)
+        .add_system_mut(damage_system)
+        .add_system_mut(health_decay_system);
 
     world.send_damage(DamageEvent {
         entity: entities[0],

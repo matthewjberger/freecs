@@ -547,19 +547,19 @@ fn spawn_tower(
 ) -> freecs::Entity {
     let position = grid_to_base(grid_x, grid_y);
 
-    let entity = world.spawn_entities(POSITION | TOWER | GRID_POSITION, 1)[0];
-    world.set_position(entity, Position(position));
-    world.set_grid_position(entity, GridPosition { x: grid_x, y: grid_y });
-    world.set_tower(
-        entity,
-        Tower {
+    let entities = EntityBuilder::new()
+        .with_position(Position(position))
+        .with_grid_position(GridPosition { x: grid_x, y: grid_y })
+        .with_tower(Tower {
             tower_type,
             cooldown: 0.0,
             target: None,
             fire_animation: 0.0,
             tracking_time: 0.0,
-        },
-    );
+        })
+        .spawn(world, 1);
+
+    let entity = entities[0];
 
     match tower_type {
         TowerType::Basic => world.add_basic_tower(entity),
@@ -601,12 +601,10 @@ fn spawn_enemy(world: &mut GameWorld, enemy_type: EnemyType) -> freecs::Entity {
     let health = enemy_type.health(world.resources.wave);
     let shield = enemy_type.shield();
 
-    let entity = world.spawn_entities(POSITION | VELOCITY | ENEMY | HEALTH_BAR, 1)[0];
-    world.set_position(entity, Position(start_pos));
-    world.set_velocity(entity, Velocity(Vec2::ZERO));
-    world.set_enemy(
-        entity,
-        Enemy {
+    let entities = EntityBuilder::new()
+        .with_position(Position(start_pos))
+        .with_velocity(Velocity(Vec2::ZERO))
+        .with_enemy(Enemy {
             health,
             max_health: health,
             shield_health: shield,
@@ -620,8 +618,10 @@ fn spawn_enemy(world: &mut GameWorld, enemy_type: EnemyType) -> freecs::Entity {
             poison_duration: 0.0,
             poison_damage: 0.0,
             is_flying: enemy_type == EnemyType::Flying,
-        },
-    );
+        })
+        .spawn(world, 1);
+
+    let entity = entities[0];
     world.set_health_bar(entity, HealthBar { enemy_entity: entity });
 
     match enemy_type {
@@ -646,12 +646,10 @@ fn spawn_projectile(
 ) -> freecs::Entity {
     let arc_height = if tower_type == TowerType::Cannon { 50.0 } else { 0.0 };
 
-    let entity = world.spawn_entities(POSITION | VELOCITY | PROJECTILE, 1)[0];
-    world.set_position(entity, Position(from));
-    world.set_velocity(entity, Velocity(Vec2::ZERO));
-    world.set_projectile(
-        entity,
-        Projectile {
+    EntityBuilder::new()
+        .with_position(Position(from))
+        .with_velocity(Velocity(Vec2::ZERO))
+        .with_projectile(Projectile {
             damage: tower_type.damage(),
             target,
             speed: tower_type.projectile_speed(),
@@ -659,36 +657,30 @@ fn spawn_projectile(
             start_position: from,
             arc_height,
             flight_progress: 0.0,
-        },
-    );
-
-    entity
+        })
+        .spawn(world, 1)[0]
 }
 
 fn spawn_visual_effect(world: &mut GameWorld, position: Vec2, effect_type: EffectType, velocity: Vec2, lifetime: f32) {
-    let entity = world.spawn_entities(POSITION | VISUAL_EFFECT, 1)[0];
-    world.set_position(entity, Position(position));
-    world.set_visual_effect(
-        entity,
-        VisualEffect {
+    EntityBuilder::new()
+        .with_position(Position(position))
+        .with_visual_effect(VisualEffect {
             effect_type,
             lifetime,
             age: 0.0,
             velocity,
-        },
-    );
+        })
+        .spawn(world, 1);
 }
 
 fn spawn_money_popup(world: &mut GameWorld, position: Vec2, amount: i32) {
-    let entity = world.spawn_entities(POSITION | MONEY_POPUP, 1)[0];
-    world.set_position(entity, Position(position));
-    world.set_money_popup(
-        entity,
-        MoneyPopup {
+    EntityBuilder::new()
+        .with_position(Position(position))
+        .with_money_popup(MoneyPopup {
             lifetime: 0.0,
             amount,
-        },
-    );
+        })
+        .spawn(world, 1);
 }
 
 fn can_place_tower_at(world: &GameWorld, x: i32, y: i32) -> bool {
@@ -1447,7 +1439,7 @@ fn restart_game(world: &mut GameWorld) {
     world.resources.wave_announce_timer = 0.0;
 }
 
-fn render_grid(world: &mut GameWorld) {
+fn render_grid(world: &GameWorld) {
     let scale = get_scale();
     let offset = get_offset();
 
@@ -1507,7 +1499,7 @@ fn render_grid(world: &mut GameWorld) {
     }
 }
 
-fn render_towers(world: &mut GameWorld) {
+fn render_towers(world: &GameWorld) {
     let scale = get_scale();
     let offset = get_offset();
 
@@ -1569,7 +1561,7 @@ fn render_towers(world: &mut GameWorld) {
     }
 }
 
-fn render_enemies(world: &mut GameWorld) {
+fn render_enemies(world: &GameWorld) {
     let scale = get_scale();
     let offset = get_offset();
 
@@ -1629,7 +1621,7 @@ fn render_enemies(world: &mut GameWorld) {
         });
 }
 
-fn render_projectiles(world: &mut GameWorld) {
+fn render_projectiles(world: &GameWorld) {
     let scale = get_scale();
     let offset = get_offset();
 
@@ -1661,7 +1653,7 @@ fn render_projectiles(world: &mut GameWorld) {
         });
 }
 
-fn render_visual_effects(world: &mut GameWorld) {
+fn render_visual_effects(world: &GameWorld) {
     let scale = get_scale();
     let offset = get_offset();
 
@@ -1710,7 +1702,7 @@ fn render_visual_effects(world: &mut GameWorld) {
         });
 }
 
-fn render_money_popups(world: &mut GameWorld) {
+fn render_money_popups(world: &GameWorld) {
     let scale = get_scale();
     let offset = get_offset();
 
@@ -1774,7 +1766,12 @@ fn enemy_died_event_handler(world: &mut GameWorld) {
     }
 }
 
-fn render_ui(world: &mut GameWorld) {
+fn health_bar_update_system(world: &mut GameWorld) {
+    world.for_each_mut_changed(ENEMY, 0, |_entity, _table, _idx| {
+    });
+}
+
+fn render_ui(world: &GameWorld) {
     let money_text = format!("Money: ${}", world.resources.money);
     draw_text(&money_text, 10.0, 30.0, 30.0, GREEN);
 
@@ -1974,14 +1971,15 @@ async fn main() {
 
     let mut game_schedule = Schedule::new();
     game_schedule
-        .add_system(wave_spawning_system_wrapper)
-        .add_system(enemy_movement_system_wrapper)
-        .add_system(tower_targeting_system)
-        .add_system(tower_shooting_system_wrapper)
-        .add_system(projectile_movement_system_wrapper)
-        .add_system(visual_effects_system_wrapper)
-        .add_system(update_money_popups_wrapper)
-        .add_system(enemy_died_event_handler);
+        .add_system_mut(wave_spawning_system_wrapper)
+        .add_system_mut(enemy_movement_system_wrapper)
+        .add_system_mut(tower_targeting_system)
+        .add_system_mut(tower_shooting_system_wrapper)
+        .add_system_mut(projectile_movement_system_wrapper)
+        .add_system_mut(visual_effects_system_wrapper)
+        .add_system_mut(update_money_popups_wrapper)
+        .add_system_mut(enemy_died_event_handler)
+        .add_system_mut(health_bar_update_system);
 
     let mut render_schedule = Schedule::new();
     render_schedule

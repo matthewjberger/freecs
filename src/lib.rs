@@ -13,7 +13,7 @@
 //! - **Change Detection**: Track component modifications for incremental updates
 //! - **Events**: Type-safe double-buffered event system
 //!
-//! The `ecs!` macro generates the entire ECS at compile time. The core implementation is ~1,500 LOC,
+//! The `ecs!` macro generates the entire ECS at compile time. The core implementation is ~1,350 LOC,
 //! contains only plain data structures and functions, and uses zero unsafe code.
 //!
 //! # Quick Start
@@ -156,7 +156,7 @@
 //!     println!("Collision: {:?} and {:?}", event.entity_a, event.entity_b);
 //! }
 //!
-//! // Clean up events at end of frame
+//! // Clean up events and increment tick at end of frame
 //! world.step();
 //! ```
 //!
@@ -238,21 +238,20 @@
 //!
 //! ## Change Detection
 //!
-//! Track which components have been modified:
+//! Track which components have been modified since the last frame:
 //!
 //! ```rust
 //! # use freecs::{ecs, Entity};
 //! # #[derive(Default, Clone)] struct Position { x: f32, y: f32 }
 //! # ecs! { World { position: Position => POSITION, } Resources { delta_time: f32 } }
 //! # let mut world = World::default();
-//! let current_tick = world.current_tick();
-//!
-//! // Process only changed entities
-//! world.for_each_mut_changed(POSITION, current_tick - 1, |entity, table, idx| {
-//!     // Only processes entities where position changed
+//! // Process only entities with changed components
+//! world.for_each_mut_changed(POSITION, 0, |entity, table, idx| {
+//!     // Only processes entities where position changed since last step()
 //! });
 //!
-//! world.increment_tick();
+//! // Automatically increments tick counter
+//! world.step();
 //! ```
 //!
 //! ## System Scheduling
@@ -265,13 +264,13 @@
 //! # ecs! { World { position: Position => POSITION, } Resources { delta_time: f32 } }
 //! # fn input_system(world: &mut World) {}
 //! # fn physics_system(world: &mut World) {}
-//! # fn render_system(world: &mut World) {}
+//! # fn render_system(world: &World) {}
 //! let mut world = World::default();
 //! let mut schedule = Schedule::new();
 //!
 //! schedule
-//!     .add_system(input_system)
-//!     .add_system(physics_system)
+//!     .add_system_mut(input_system)
+//!     .add_system_mut(physics_system)
 //!     .add_system(render_system);
 //!
 //! // Game loop
@@ -544,15 +543,15 @@ impl<T> EventQueue<T> {
 /// use freecs::Schedule;
 ///
 /// fn physics_system(world: &mut World) {
-///     // Physics logic
+///     // Physics logic - mutates world state
 /// }
 ///
-/// fn render_system(world: &mut World) {
-///     // Rendering logic
+/// fn render_system(world: &World) {
+///     // Rendering logic - read-only
 /// }
 ///
 /// let mut schedule = Schedule::new();
-/// schedule.add_system(physics_system);
+/// schedule.add_system_mut(physics_system);
 /// schedule.add_system(render_system);
 ///
 /// loop {
@@ -584,15 +583,38 @@ impl<W> Schedule<W> {
     /// ```rust
     /// let mut schedule = Schedule::new();
     /// schedule
-    ///     .add_system(physics_system)
-    ///     .add_system(collision_system)
+    ///     .add_system_mut(physics_system)
+    ///     .add_system_mut(collision_system)
     ///     .add_system(render_system);
     /// ```
-    pub fn add_system<F>(&mut self, system: F) -> &mut Self
+    pub fn add_system_mut<F>(&mut self, system: F) -> &mut Self
     where
         F: FnMut(&mut W) + Send + 'static,
     {
         self.systems.push(Box::new(system));
+        self
+    }
+
+    /// Adds a read-only system to the schedule.
+    ///
+    /// Read-only systems take an immutable reference to the world,
+    /// making it clear that they don't modify state (e.g., rendering systems).
+    ///
+    /// # Example
+    /// ```
+    /// # use freecs::Schedule;
+    /// # struct World;
+    /// # fn render_system(world: &World) {}
+    /// let mut schedule = Schedule::new();
+    /// schedule.add_system(render_system);
+    /// ```
+    pub fn add_system<F>(&mut self, mut system: F) -> &mut Self
+    where
+        F: FnMut(&W) + Send + 'static,
+    {
+        self.systems.push(Box::new(move |world: &mut W| {
+            system(&*world);
+        }));
         self
     }
 
@@ -1361,6 +1383,8 @@ macro_rules! ecs_impl {
 
             pub fn step(&mut self) {
                 self.update_events();
+                self.last_tick = self.current_tick;
+                self.current_tick += 1;
             }
 
             pub fn queue_spawn_entities(&mut self, mask: u64, count: usize) {
@@ -2829,7 +2853,7 @@ mod tests {
         let mut world = World::default();
         let entity = world.spawn_entities(POSITION | VELOCITY, 1)[0];
 
-        world.increment_tick();
+        world.step();
 
         world.get_position_mut(entity).unwrap().x = 10.0;
 
@@ -2847,7 +2871,7 @@ mod tests {
         let e1 = world.spawn_entities(POSITION, 1)[0];
         let e2 = world.spawn_entities(POSITION, 1)[0];
 
-        world.increment_tick();
+        world.step();
 
         world.get_position_mut(e1).unwrap().x = 5.0;
 
@@ -2869,15 +2893,15 @@ mod tests {
         assert_eq!(world.current_tick(), 0);
         assert_eq!(world.last_tick(), 0);
 
-        world.increment_tick();
+        world.step();
         assert_eq!(world.current_tick(), 1);
         assert_eq!(world.last_tick(), 0);
 
-        world.increment_tick();
+        world.step();
         assert_eq!(world.current_tick(), 2);
         assert_eq!(world.last_tick(), 1);
 
-        world.increment_tick();
+        world.step();
         world.get_position_mut(entity).unwrap().x = 10.0;
 
         let mut count = 0;
@@ -2886,7 +2910,7 @@ mod tests {
         });
         assert_eq!(count, 1);
 
-        world.increment_tick();
+        world.step();
         count = 0;
         world.for_each_mut_changed(POSITION, 0, |_entity, _table, _idx| {
             count += 1;
@@ -2900,7 +2924,7 @@ mod tests {
         let e1 = world.spawn_entities(POSITION | VELOCITY, 1)[0];
         let e2 = world.spawn_entities(POSITION | VELOCITY, 1)[0];
 
-        world.increment_tick();
+        world.step();
 
         world.get_position_mut(e1).unwrap().x = 5.0;
         world.get_velocity_mut(e2).unwrap().x = 10.0;
@@ -2921,7 +2945,7 @@ mod tests {
         let e1 = world.spawn_entities(POSITION, 1)[0];
         let e2 = world.spawn_entities(POSITION | HEALTH, 1)[0];
 
-        world.increment_tick();
+        world.step();
 
         world.get_position_mut(e1).unwrap().x = 5.0;
         world.get_position_mut(e2).unwrap().x = 10.0;
@@ -3707,7 +3731,7 @@ mod tests {
         world.resources._delta_time = 0.016;
 
         let mut schedule = Schedule::new();
-        schedule.add_system(|world: &mut World| {
+        schedule.add_system_mut(|world: &mut World| {
             world.resources._delta_time += 0.016;
         });
 
@@ -3728,7 +3752,7 @@ mod tests {
 
         let mut schedule = Schedule::new();
 
-        schedule.add_system(|world: &mut World| {
+        schedule.add_system_mut(|world: &mut World| {
             let dt = world.resources._delta_time;
             let updates: Vec<(Entity, Velocity)> = world
                 .query_entities(POSITION | VELOCITY)
@@ -3744,7 +3768,7 @@ mod tests {
             }
         });
 
-        schedule.add_system(|world: &mut World| {
+        schedule.add_system_mut(|world: &mut World| {
             world.resources._delta_time *= 2.0;
         });
 
@@ -3763,10 +3787,10 @@ mod tests {
 
         let mut schedule = Schedule::new();
         schedule
-            .add_system(|world: &mut World| {
+            .add_system_mut(|world: &mut World| {
                 world.resources._delta_time += 1.0;
             })
-            .add_system(|world: &mut World| {
+            .add_system_mut(|world: &mut World| {
                 world.resources._delta_time *= 2.0;
             });
 
@@ -3782,14 +3806,14 @@ mod tests {
 
         let mut schedule = Schedule::new();
 
-        schedule.add_system(|world: &mut World| {
+        schedule.add_system_mut(|world: &mut World| {
             let entities: Vec<Entity> = world.query_entities(POSITION).into_iter().collect();
             if let Some(pos) = world.get_position_mut(entities[0]) {
                 pos.x = 10.0;
             }
         });
 
-        schedule.add_system(|world: &mut World| {
+        schedule.add_system_mut(|world: &mut World| {
             let entities: Vec<Entity> = world.query_entities(POSITION).into_iter().collect();
             if let Some(pos) = world.get_position_mut(entities[0]) {
                 pos.x *= 2.0;
@@ -3810,7 +3834,7 @@ mod tests {
 
         let mut schedule = Schedule::new();
 
-        schedule.add_system(|world: &mut World| {
+        schedule.add_system_mut(|world: &mut World| {
             let entities: Vec<Entity> = world.query_entities(HEALTH).into_iter().collect();
             for entity in entities {
                 if let Some(health) = world.get_health_mut(entity) {
@@ -3819,7 +3843,7 @@ mod tests {
             }
         });
 
-        schedule.add_system(|world: &mut World| {
+        schedule.add_system_mut(|world: &mut World| {
             let entities: Vec<Entity> = world.query_entities(HEALTH).into_iter().collect();
             for entity in entities {
                 if let Some(health) = world.get_health_mut(entity) {
