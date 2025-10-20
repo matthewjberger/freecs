@@ -16,14 +16,12 @@
 //! The `ecs!` macro generates the entire ECS at compile time. The core implementation is ~500 LOC,
 //! contains only plain data structures and functions, and uses zero unsafe code.
 //!
-//! # Creating a World
+//! # Quick Start
 //!
 //! ```rust
 //! use freecs::{ecs, Entity};
 //!
-//! // First, define components.
-//! // They must implement: `Default`
-//!
+//! // First, define components (must implement Default)
 //! #[derive(Default, Clone, Debug)]
 //! struct Position { x: f32, y: f32 }
 //!
@@ -33,18 +31,29 @@
 //! #[derive(Default, Clone, Debug)]
 //! struct Health { value: f32 }
 //!
-//! // Then, create a world with the `ecs!` macro.
-//! // Resources are stored independently of component data.
-//! // The `World` and `Resources` type names can be customized.
+//! // Then, create a world with the `ecs!` macro
 //! ecs! {
 //!   World {
 //!     position: Position => POSITION,
 //!     velocity: Velocity => VELOCITY,
 //!     health: Health => HEALTH,
 //!   }
+//!   Tags {
+//!     player => PLAYER,
+//!     enemy => ENEMY,
+//!   }
+//!   Events {
+//!     collision: CollisionEvent,
+//!   }
 //!   Resources {
 //!     delta_time: f32
 //!   }
+//! }
+//!
+//! #[derive(Debug, Clone)]
+//! struct CollisionEvent {
+//!     entity_a: Entity,
+//!     entity_b: Entity,
 //! }
 //! ```
 //!
@@ -98,6 +107,59 @@
 //! let player = world.query_first_entity(POSITION | VELOCITY);
 //! ```
 //!
+//! ## Tags
+//!
+//! Tags are lightweight markers that don't cause archetype fragmentation:
+//!
+//! ```rust
+//! # use freecs::{ecs, Entity};
+//! # #[derive(Default, Clone)] struct Position { x: f32, y: f32 }
+//! # ecs! { World { position: Position => POSITION, } Tags { player => PLAYER, enemy => ENEMY, } Resources { delta_time: f32 } }
+//! # let mut world = World::default();
+//! # let entity = world.spawn_entities(POSITION, 1)[0];
+//! // Add tags to entities
+//! world.add_player(entity);
+//!
+//! // Check if entity has a tag
+//! if world.has_player(entity) {
+//!     println!("Entity is a player");
+//! }
+//!
+//! // Query entities by tag
+//! for entity in world.query_player() {
+//!     println!("Player: {:?}", entity);
+//! }
+//!
+//! // Remove tags
+//! world.remove_player(entity);
+//! ```
+//!
+//! ## Events
+//!
+//! Events provide type-safe communication between systems:
+//!
+//! ```rust
+//! # use freecs::{ecs, Entity};
+//! # #[derive(Default, Clone)] struct Position { x: f32, y: f32 }
+//! # #[derive(Debug, Clone)] struct CollisionEvent { entity_a: Entity, entity_b: Entity }
+//! # ecs! { World { position: Position => POSITION, } Events { collision: CollisionEvent, } Resources { delta_time: f32 } }
+//! # let mut world = World::default();
+//! # let entity = world.spawn_entities(POSITION, 1)[0];
+//! // Send events
+//! world.send_collision(CollisionEvent {
+//!     entity_a: entity,
+//!     entity_b: entity,
+//! });
+//!
+//! // Process events in systems
+//! for event in world.collect_collision() {
+//!     println!("Collision: {:?} and {:?}", event.entity_a, event.entity_b);
+//! }
+//!
+//! // Clean up events at end of frame
+//! world.step();
+//! ```
+//!
 //! ## Systems
 //!
 //! Systems are functions that query entities and transform their components.
@@ -147,6 +209,79 @@
 //! Parallel iteration is best suited for processing 100K+ entities with non-trivial
 //! per-entity computation.
 //!
+//! ## Command Buffers
+//!
+//! Queue structural changes during iteration to avoid borrow conflicts:
+//!
+//! ```rust
+//! # use freecs::{ecs, Entity};
+//! # #[derive(Default, Clone)] struct Position { x: f32, y: f32 }
+//! # #[derive(Default, Clone)] struct Health { value: f32 }
+//! # ecs! { World { position: Position => POSITION, health: Health => HEALTH, } Resources { delta_time: f32 } }
+//! # let mut world = World::default();
+//! # world.spawn_entities(POSITION | HEALTH, 10);
+//! // Queue despawns during iteration
+//! let entities_to_despawn: Vec<Entity> = world
+//!     .query_entities(HEALTH)
+//!     .filter(|&entity| {
+//!         world.get_health(entity).map_or(false, |h| h.value <= 0.0)
+//!     })
+//!     .collect();
+//!
+//! for entity in entities_to_despawn {
+//!     world.queue_despawn_entity(entity);
+//! }
+//!
+//! // Apply all queued commands at once
+//! world.apply_commands();
+//! ```
+//!
+//! ## Change Detection
+//!
+//! Track which components have been modified:
+//!
+//! ```rust
+//! # use freecs::{ecs, Entity};
+//! # #[derive(Default, Clone)] struct Position { x: f32, y: f32 }
+//! # ecs! { World { position: Position => POSITION, } Resources { delta_time: f32 } }
+//! # let mut world = World::default();
+//! let current_tick = world.current_tick();
+//!
+//! // Process only changed entities
+//! world.for_each_mut_changed(POSITION, current_tick - 1, |entity, table, idx| {
+//!     // Only processes entities where position changed
+//! });
+//!
+//! world.increment_tick();
+//! ```
+//!
+//! ## System Scheduling
+//!
+//! Organize systems into a schedule:
+//!
+//! ```rust
+//! # use freecs::{ecs, Schedule, Entity};
+//! # #[derive(Default, Clone)] struct Position { x: f32, y: f32 }
+//! # ecs! { World { position: Position => POSITION, } Resources { delta_time: f32 } }
+//! # fn input_system(world: &mut World) {}
+//! # fn physics_system(world: &mut World) {}
+//! # fn render_system(world: &mut World) {}
+//! let mut world = World::default();
+//! let mut schedule = Schedule::new();
+//!
+//! schedule
+//!     .add_system(input_system)
+//!     .add_system(physics_system)
+//!     .add_system(render_system);
+//!
+//! // Game loop
+//! loop {
+//!     schedule.run(&mut world);
+//!     world.step();
+//! #   break;
+//! }
+//! ```
+//!
 //! ## Entity Builder
 //!
 //! ```rust
@@ -159,6 +294,107 @@
 //! // Access the spawned entities
 //! let first_pos = world.get_position(entities[0]).unwrap();
 //! assert_eq!(first_pos.x, 1.0);
+//! ```
+//!
+//! # Advanced Features
+//!
+//! ## Batch Spawning
+//!
+//! ```rust
+//! # use freecs::{ecs, Entity};
+//! # #[derive(Default, Clone)] struct Position { x: f32, y: f32 }
+//! # #[derive(Default, Clone)] struct Velocity { x: f32, y: f32 }
+//! # ecs! { World { position: Position => POSITION, velocity: Velocity => VELOCITY, } Resources { delta_time: f32 } }
+//! # let mut world = World::default();
+//! // Spawn with initialization callback
+//! let entities = world.spawn_batch(POSITION | VELOCITY, 1000, |table, idx| {
+//!     table.position[idx] = Position { x: idx as f32, y: 0.0 };
+//!     table.velocity[idx] = Velocity { x: 1.0, y: 0.0 };
+//! });
+//! ```
+//!
+//! ## Per-Component Iteration
+//!
+//! ```rust
+//! # use freecs::{ecs, Entity};
+//! # #[derive(Default, Clone)] struct Position { x: f32, y: f32 }
+//! # ecs! { World { position: Position => POSITION, } Resources { delta_time: f32 } }
+//! # let mut world = World::default();
+//! // Iterate over single component
+//! world.iter_position_mut(|position| {
+//!     position.x += 1.0;
+//! });
+//!
+//! // Slice-based iteration (most efficient)
+//! for slice in world.iter_position_slices_mut() {
+//!     for position in slice {
+//!         position.x *= 2.0;
+//!     }
+//! }
+//! ```
+//!
+//! ## Low-Level Iteration
+//!
+//! ```rust
+//! # use freecs::{ecs, Entity};
+//! # #[derive(Default, Clone)] struct Position { x: f32, y: f32 }
+//! # #[derive(Default, Clone)] struct Velocity { x: f32, y: f32 }
+//! # ecs! { World { position: Position => POSITION, velocity: Velocity => VELOCITY, } Tags { player => PLAYER, } Resources { delta_time: f32 } }
+//! # let mut world = World::default();
+//! // Include/exclude with masks
+//! world.for_each_mut(POSITION | VELOCITY, PLAYER, |entity, table, idx| {
+//!     // Process non-player entities
+//!     table.position[idx].x += table.velocity[idx].x;
+//! });
+//! ```
+//!
+//! ## Advanced Command Operations
+//!
+//! ```rust
+//! # use freecs::{ecs, Entity};
+//! # #[derive(Default, Clone)] struct Position { x: f32, y: f32 }
+//! # ecs! { World { position: Position => POSITION, } Tags { player => PLAYER, } Resources { delta_time: f32 } }
+//! # let mut world = World::default();
+//! # let entity = world.spawn_entities(POSITION, 1)[0];
+//! // Queue batch operations
+//! world.queue_spawn_entities(POSITION, 100);
+//! world.queue_set_position(entity, Position { x: 10.0, y: 20.0 });
+//! world.queue_add_player(entity);
+//!
+//! // Check command buffer status
+//! if world.command_count() > 100 {
+//!     world.apply_commands();
+//! }
+//!
+//! // Clear without applying
+//! world.clear_commands();
+//! ```
+//!
+//! ## Event Management
+//!
+//! ```rust
+//! # use freecs::{ecs, Entity};
+//! # #[derive(Default, Clone)] struct Position { x: f32, y: f32 }
+//! # #[derive(Debug, Clone)] struct CollisionEvent { entity_a: Entity, entity_b: Entity }
+//! # ecs! { World { position: Position => POSITION, } Events { collision: CollisionEvent, } Resources { delta_time: f32 } }
+//! # let mut world = World::default();
+//! # let entity = world.spawn_entities(POSITION, 1)[0];
+//! # world.send_collision(CollisionEvent { entity_a: entity, entity_b: entity });
+//! // Peek at events without consuming
+//! if let Some(event) = world.peek_collision() {
+//!     println!("Next collision: {:?}", event.entity_a);
+//! }
+//!
+//! // Check event count
+//! if !world.is_empty_collision() {
+//!     let count = world.len_collision();
+//!     println!("Processing {} events", count);
+//! }
+//!
+//! // Drain events (takes ownership)
+//! for event in world.drain_collision() {
+//!     // Process event
+//! }
 //! ```
 
 pub use paste;
