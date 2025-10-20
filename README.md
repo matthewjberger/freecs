@@ -7,6 +7,7 @@
 A high-performance, archetype-based Entity Component System (ECS) for Rust
 
 **Key Features**:
+
 - Zero-cost abstractions with static dispatch
 - Multi-threaded parallel processing using Rayon
 - Sparse set tags that don't fragment archetypes
