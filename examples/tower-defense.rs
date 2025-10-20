@@ -36,6 +36,7 @@ ecs! {
         projectile_hit: ProjectileHitEvent,
         tower_placed: TowerPlacedEvent,
         tower_sold: TowerSoldEvent,
+        tower_upgraded: TowerUpgradedEvent,
         wave_completed: WaveCompletedEvent,
         wave_started: WaveStartedEvent,
     }
@@ -77,34 +78,41 @@ impl TowerType {
         }
     }
 
-    fn damage(&self) -> f32 {
-        match self {
+    fn upgrade_cost(&self, current_level: u32) -> u32 {
+        (self.cost() as f32 * 0.5 * current_level as f32) as u32
+    }
+
+    fn damage(&self, level: u32) -> f32 {
+        let base = match self {
             TowerType::Basic => 15.0,
             TowerType::Frost => 8.0,
             TowerType::Cannon => 50.0,
             TowerType::Sniper => 80.0,
             TowerType::Poison => 5.0,
-        }
+        };
+        base * (1.0 + 0.25 * (level - 1) as f32)
     }
 
-    fn range(&self) -> f32 {
-        match self {
+    fn range(&self, level: u32) -> f32 {
+        let base = match self {
             TowerType::Basic => 100.0,
             TowerType::Frost => 80.0,
             TowerType::Cannon => 120.0,
             TowerType::Sniper => 180.0,
             TowerType::Poison => 90.0,
-        }
+        };
+        base * (1.0 + 0.15 * (level - 1) as f32)
     }
 
-    fn fire_rate(&self) -> f32 {
-        match self {
+    fn fire_rate(&self, level: u32) -> f32 {
+        let base = match self {
             TowerType::Basic => 0.5,
             TowerType::Frost => 1.0,
             TowerType::Cannon => 2.0,
             TowerType::Sniper => 3.0,
             TowerType::Poison => 0.8,
-        }
+        };
+        base * (1.0 - 0.1 * (level - 1) as f32).max(0.2)
     }
 
     fn color(&self) -> Color {
@@ -246,6 +254,7 @@ pub struct Velocity(pub Vec2);
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Tower {
     pub tower_type: TowerType,
+    pub level: u32,
     pub cooldown: f32,
     pub target: Option<freecs::Entity>,
     pub fire_animation: f32,
@@ -377,6 +386,15 @@ pub struct TowerSoldEvent {
     pub grid_x: i32,
     pub grid_y: i32,
     pub refund: u32,
+}
+
+#[derive(Debug, Clone)]
+pub struct TowerUpgradedEvent {
+    pub entity: Entity,
+    pub tower_type: TowerType,
+    pub old_level: u32,
+    pub new_level: u32,
+    pub cost: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -552,6 +570,7 @@ fn spawn_tower(
         .with_grid_position(GridPosition { x: grid_x, y: grid_y })
         .with_tower(Tower {
             tower_type,
+            level: 1,
             cooldown: 0.0,
             target: None,
             fire_animation: 0.0,
@@ -643,6 +662,7 @@ fn spawn_projectile(
     from: Vec2,
     target: freecs::Entity,
     tower_type: TowerType,
+    level: u32,
 ) -> freecs::Entity {
     let arc_height = if tower_type == TowerType::Cannon { 50.0 } else { 0.0 };
 
@@ -650,7 +670,7 @@ fn spawn_projectile(
         .with_position(Position(from))
         .with_velocity(Velocity(Vec2::ZERO))
         .with_projectile(Projectile {
-            damage: tower_type.damage(),
+            damage: tower_type.damage(level),
             target,
             speed: tower_type.projectile_speed(),
             tower_type,
@@ -848,6 +868,24 @@ fn input_system(world: &mut GameWorld) {
 
             if let Some(tower_entity) = tower_entity {
                 sell_tower(world, tower_entity, grid_x, grid_y);
+            }
+        }
+    }
+
+    if is_key_pressed(KeyCode::U) || is_mouse_button_pressed(MouseButton::Middle) {
+        if let Some((grid_x, grid_y)) = world.resources.mouse_grid_pos {
+            let mut tower_entity = None;
+            world
+                .query()
+                .with(TOWER | GRID_POSITION)
+                .iter(|entity, table, index| {
+                    if table.grid_position[index].x == grid_x && table.grid_position[index].y == grid_y {
+                        tower_entity = Some(entity);
+                    }
+                });
+
+            if let Some(tower_entity) = tower_entity {
+                upgrade_tower(world, tower_entity, grid_x, grid_y);
             }
         }
     }
@@ -1060,7 +1098,7 @@ fn tower_targeting_system(world: &mut GameWorld) {
     for tower_entity in tower_entities {
         let tower_data = world.get_tower(tower_entity).unwrap();
         let tower_pos = world.get_position(tower_entity).unwrap().0;
-        let range = tower_data.tower_type.range();
+        let range = tower_data.tower_type.range(tower_data.level);
         let range_squared = range * range;
 
         let mut closest_enemy = None;
@@ -1107,8 +1145,8 @@ fn tower_shooting_system(world: &mut GameWorld, delta_time: f32) {
                 };
 
                 if can_fire {
-                    projectiles_to_spawn.push((tower_pos, tower.target.unwrap(), tower.tower_type));
-                    tower.cooldown = tower.tower_type.fire_rate();
+                    projectiles_to_spawn.push((tower_pos, tower.target.unwrap(), tower.tower_type, tower.level));
+                    tower.cooldown = tower.tower_type.fire_rate(tower.level);
                     tower.fire_animation = 1.0;
                     tower.tracking_time = 0.0;
                 }
@@ -1116,8 +1154,8 @@ fn tower_shooting_system(world: &mut GameWorld, delta_time: f32) {
         }
     }
 
-    for (from, target, tower_type) in projectiles_to_spawn {
-        spawn_projectile(world, from, target, tower_type);
+    for (from, target, tower_type, level) in projectiles_to_spawn {
+        spawn_projectile(world, from, target, tower_type, level);
 
         if tower_type == TowerType::Cannon {
             for _ in 0..6 {
@@ -1350,6 +1388,42 @@ fn update_money_popups(world: &mut GameWorld, delta_time: f32) {
 }
 
 
+fn upgrade_tower(world: &mut GameWorld, tower_entity: freecs::Entity, grid_x: i32, grid_y: i32) -> bool {
+    if let Some(tower) = world.get_tower(tower_entity) {
+        let current_level = tower.level;
+        if current_level >= 4 {
+            return false;
+        }
+
+        let upgrade_cost = tower.tower_type.upgrade_cost(current_level);
+        if world.resources.money < upgrade_cost {
+            return false;
+        }
+
+        let tower_type = tower.tower_type;
+        world.resources.money -= upgrade_cost;
+
+        if let Some(tower) = world.get_tower_mut(tower_entity) {
+            tower.level += 1;
+            let new_level = tower.level;
+
+            world.send_tower_upgraded(TowerUpgradedEvent {
+                entity: tower_entity,
+                tower_type,
+                old_level: current_level,
+                new_level,
+                cost: upgrade_cost,
+            });
+
+            let position = grid_to_base(grid_x, grid_y);
+            spawn_money_popup(world, position, -(upgrade_cost as i32));
+
+            return true;
+        }
+    }
+    false
+}
+
 fn sell_tower(world: &mut GameWorld, tower_entity: freecs::Entity, grid_x: i32, grid_y: i32) {
     if let Some(tower) = world.get_tower(tower_entity) {
         let tower_type = tower.tower_type;
@@ -1493,7 +1567,7 @@ fn render_grid(world: &GameWorld) {
                     Color::new(tower_type.color().r, tower_type.color().g, tower_type.color().b, 0.3),
                 );
 
-                draw_circle_lines(pos.x, pos.y, tower_type.range() * scale, 2.0, Color::new(tower_type.color().r, tower_type.color().g, tower_type.color().b, 0.5));
+                draw_circle_lines(pos.x, pos.y, tower_type.range(1) * scale, 2.0, Color::new(tower_type.color().r, tower_type.color().g, tower_type.color().b, 0.5));
             }
         }
     }
@@ -1513,9 +1587,26 @@ fn render_towers(world: &GameWorld) {
                 offset.x + pos.0.x * scale,
                 offset.y + pos.0.y * scale,
             );
-            let size = (20.0 + tower.fire_animation * 4.0) * scale;
-            draw_circle(screen_pos.x, screen_pos.y, size / 2.0, tower.tower_type.color());
+
+            let base_size = 20.0 + tower.fire_animation * 4.0;
+            let size = base_size * (1.0 + 0.15 * (tower.level - 1) as f32) * scale;
+
+            let color = tower.tower_type.color();
+            let level_brightness = 1.0 + 0.2 * (tower.level - 1) as f32;
+            let upgraded_color = Color::new(
+                (color.r * level_brightness).min(1.0),
+                (color.g * level_brightness).min(1.0),
+                (color.b * level_brightness).min(1.0),
+                color.a,
+            );
+
+            draw_circle(screen_pos.x, screen_pos.y, size / 2.0, upgraded_color);
             draw_circle_lines(screen_pos.x, screen_pos.y, size / 2.0, 2.0, BLACK);
+
+            for ring in 1..tower.level {
+                let ring_radius = size / 2.0 + ring as f32 * 3.0 * scale;
+                draw_circle_lines(screen_pos.x, screen_pos.y, ring_radius, 1.5, upgraded_color);
+            }
 
             if tower.tower_type == TowerType::Sniper {
                 if let Some(target_entity) = tower.target {
@@ -1546,7 +1637,19 @@ fn render_towers(world: &GameWorld) {
                 offset.x + pos.0.x * scale,
                 offset.y + pos.0.y * scale,
             );
-            draw_circle_lines(screen_pos.x, screen_pos.y, tower.tower_type.range() * scale, 2.0, tower.tower_type.color());
+
+            let range = tower.tower_type.range(tower.level);
+            draw_circle_lines(screen_pos.x, screen_pos.y, range * scale, 2.0, tower.tower_type.color());
+
+            if tower.level < 4 {
+                let upgrade_cost = tower.tower_type.upgrade_cost(tower.level);
+                let text = format!("U: Upgrade (${}) Lv{}", upgrade_cost, tower.level);
+                let can_afford = world.resources.money >= upgrade_cost;
+                let text_color = if can_afford { GREEN } else { RED };
+                draw_text(&text, screen_pos.x - 60.0 * scale, screen_pos.y - 35.0 * scale, 20.0 * scale, text_color);
+            } else {
+                draw_text("MAX LEVEL", screen_pos.x - 40.0 * scale, screen_pos.y - 35.0 * scale, 20.0 * scale, GOLD);
+            }
 
             if let Some(target_entity) = tower.target {
                 if let Some(target_pos) = world.get_position(target_entity) {
@@ -1919,7 +2022,7 @@ fn render_ui(world: &GameWorld) {
         _ => {}
     }
 
-    let controls_text = "Controls: 1-5: Tower Type | Left Click: Place | Right Click: Sell | [/]: Speed | P: Pause | R: Restart";
+    let controls_text = "Controls: 1-5: Tower Type | Left Click: Place | Right Click: Sell | U/Middle Click: Upgrade | [/]: Speed | P: Pause | R: Restart";
     draw_text(controls_text, 10.0, screen_height() - 10.0, 15.0, LIGHTGRAY);
 }
 
