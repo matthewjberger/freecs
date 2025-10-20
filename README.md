@@ -14,7 +14,8 @@ A high-performance, archetype-based Entity Component System (ECS) for Rust
 - Change detection for incremental updates
 - Type-safe double-buffered event system
 
-A macro generates the ECS as part of your source code at compile time. Zero-unsafe, table-based architecture with no generics, traits, or dynamic dispatch.
+The `ecs!` macro generates the entire ECS at compile time. The core implementation is ~1,500 LOC,
+contains only plain data structures and functions, and uses zero unsafe code.
 
 ## Quick Start
 
@@ -22,7 +23,7 @@ Add this to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-freecs = "1.0.1"
+freecs = "1.0.2"
 ```
 
 And in `main.rs`:

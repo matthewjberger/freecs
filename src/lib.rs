@@ -6,14 +6,14 @@
 //!
 //! # Key Features
 //!
-//! - **Zero-cost Abstractions**: Fully statically dispatched, no generics or traits
+//! - **Zero-cost Abstractions**: Fully statically dispatched, no custom traits
 //! - **Parallel Processing**: Multi-threaded iteration using Rayon
 //! - **Sparse Set Tags**: Lightweight markers that don't fragment archetypes
 //! - **Command Buffers**: Queue structural changes during iteration
 //! - **Change Detection**: Track component modifications for incremental updates
 //! - **Events**: Type-safe double-buffered event system
 //!
-//! The `ecs!` macro generates the entire ECS at compile time. The core implementation is ~500 LOC,
+//! The `ecs!` macro generates the entire ECS at compile time. The core implementation is ~1,500 LOC,
 //! contains only plain data structures and functions, and uses zero unsafe code.
 //!
 //! # Quick Start
@@ -1652,50 +1652,6 @@ macro_rules! ecs_impl {
             }
         }
 
-        pub struct Read<T>(std::marker::PhantomData<T>);
-        pub struct Write<T>(std::marker::PhantomData<T>);
-
-        pub trait SystemParam {
-            const READ_MASK: u64;
-            const WRITE_MASK: u64;
-        }
-
-        pub trait SystemConflict<Other: SystemParam> {
-            const CONFLICTS: bool;
-        }
-
-        $(
-            $crate::paste::paste! {
-                pub struct [<$mask:camel Query>];
-
-                impl SystemParam for Read<[<$mask:camel Query>]> {
-                    const READ_MASK: u64 = $mask;
-                    const WRITE_MASK: u64 = 0;
-                }
-
-                impl SystemParam for Write<[<$mask:camel Query>]> {
-                    const READ_MASK: u64 = 0;
-                    const WRITE_MASK: u64 = $mask;
-                }
-
-                impl<T: SystemParam> SystemConflict<T> for Read<[<$mask:camel Query>]> {
-                    const CONFLICTS: bool = T::WRITE_MASK & $mask != 0;
-                }
-
-                impl<T: SystemParam> SystemConflict<T> for Write<[<$mask:camel Query>]> {
-                    const CONFLICTS: bool = (T::READ_MASK | T::WRITE_MASK) & $mask != 0;
-                }
-            }
-        )*
-
-        impl SystemParam for () {
-            const READ_MASK: u64 = 0;
-            const WRITE_MASK: u64 = 0;
-        }
-
-        impl<T: SystemParam> SystemConflict<T> for () {
-            const CONFLICTS: bool = false;
-        }
 
         pub struct QueryBuilder<'a> {
             world: &'a $world,
@@ -1770,24 +1726,6 @@ macro_rules! ecs_impl {
 
             pub fn query_mut(&mut self) -> QueryBuilderMut<'_> {
                 QueryBuilderMut::new(self)
-            }
-
-            pub fn check_query_conflicts<T1, T2>() -> bool
-            where
-                T1: SystemParam + SystemConflict<T2>,
-                T2: SystemParam + SystemConflict<T1>,
-            {
-                <T1 as SystemConflict<T2>>::CONFLICTS || <T2 as SystemConflict<T1>>::CONFLICTS
-            }
-
-            pub fn verify_parallel_safety<T1, T2>()
-            where
-                T1: SystemParam + SystemConflict<T2>,
-                T2: SystemParam + SystemConflict<T1>,
-            {
-                if Self::check_query_conflicts::<T1, T2>() {
-                    panic!("Parallel safety violation: systems access overlapping mutable components");
-                }
             }
 
             $(
@@ -3527,111 +3465,6 @@ mod tests {
         world.apply_commands();
 
         assert_eq!(world.get_all_entities().len(), 100 - command_count_before);
-    }
-
-    #[test]
-    fn test_parallel_safety_no_conflict_read_read() {
-        assert!(!World::check_query_conflicts::<
-            Read<PositionQuery>,
-            Read<PositionQuery>,
-        >());
-        assert!(!World::check_query_conflicts::<
-            Read<PositionQuery>,
-            Read<VelocityQuery>,
-        >());
-    }
-
-    #[test]
-    fn test_parallel_safety_conflict_write_write() {
-        assert!(World::check_query_conflicts::<
-            Write<PositionQuery>,
-            Write<PositionQuery>,
-        >());
-    }
-
-    #[test]
-    fn test_parallel_safety_conflict_read_write() {
-        assert!(World::check_query_conflicts::<
-            Read<PositionQuery>,
-            Write<PositionQuery>,
-        >());
-        assert!(World::check_query_conflicts::<
-            Write<PositionQuery>,
-            Read<PositionQuery>,
-        >());
-    }
-
-    #[test]
-    fn test_parallel_safety_no_conflict_different_components() {
-        assert!(!World::check_query_conflicts::<
-            Write<PositionQuery>,
-            Write<VelocityQuery>,
-        >());
-        assert!(!World::check_query_conflicts::<
-            Write<PositionQuery>,
-            Read<VelocityQuery>,
-        >());
-        assert!(!World::check_query_conflicts::<
-            Read<PositionQuery>,
-            Write<VelocityQuery>,
-        >());
-    }
-
-    #[test]
-    fn test_parallel_safety_verify_safe() {
-        World::verify_parallel_safety::<Read<PositionQuery>, Read<VelocityQuery>>();
-        World::verify_parallel_safety::<Write<PositionQuery>, Read<VelocityQuery>>();
-        World::verify_parallel_safety::<Write<PositionQuery>, Write<VelocityQuery>>();
-    }
-
-    #[test]
-    #[should_panic(expected = "Parallel safety violation")]
-    fn test_parallel_safety_verify_conflict_write_write() {
-        World::verify_parallel_safety::<Write<PositionQuery>, Write<PositionQuery>>();
-    }
-
-    #[test]
-    #[should_panic(expected = "Parallel safety violation")]
-    fn test_parallel_safety_verify_conflict_read_write() {
-        World::verify_parallel_safety::<Read<PositionQuery>, Write<PositionQuery>>();
-    }
-
-    #[test]
-    fn test_parallel_safety_component_access() {
-        assert_eq!(Read::<PositionQuery>::READ_MASK, POSITION);
-        assert_eq!(Read::<PositionQuery>::WRITE_MASK, 0);
-        assert_eq!(Write::<PositionQuery>::READ_MASK, 0);
-        assert_eq!(Write::<PositionQuery>::WRITE_MASK, POSITION);
-        assert_eq!(Read::<VelocityQuery>::READ_MASK, VELOCITY);
-        assert_eq!(Write::<VelocityQuery>::WRITE_MASK, VELOCITY);
-    }
-
-    #[test]
-    fn test_parallel_safety_multiple_reads() {
-        assert!(!World::check_query_conflicts::<
-            Read<PositionQuery>,
-            Read<PositionQuery>,
-        >());
-        assert!(!World::check_query_conflicts::<
-            Read<VelocityQuery>,
-            Read<HealthQuery>,
-        >());
-    }
-
-    #[test]
-    fn test_parallel_safety_mixed_access() {
-        assert!(World::check_query_conflicts::<
-            Write<PositionQuery>,
-            Read<PositionQuery>,
-        >());
-        assert!(!World::check_query_conflicts::<
-            Write<PositionQuery>,
-            Read<HealthQuery>,
-        >());
-        assert!(!World::check_query_conflicts::<
-            Write<VelocityQuery>,
-            Write<PositionQuery>,
-        >());
     }
 
     #[test]
