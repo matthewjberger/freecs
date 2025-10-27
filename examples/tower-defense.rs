@@ -1,4 +1,4 @@
-use freecs::{ecs, Entity, Schedule};
+use freecs::{Entity, Schedule, ecs};
 use macroquad::prelude::*;
 use std::collections::HashMap;
 
@@ -146,8 +146,9 @@ pub enum GameState {
     Paused,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum EnemyType {
+    #[default]
     Normal,
     Fast,
     Tank,
@@ -233,12 +234,6 @@ impl EnemyType {
     }
 }
 
-impl Default for EnemyType {
-    fn default() -> Self {
-        EnemyType::Normal
-    }
-}
-
 #[derive(Debug, Clone)]
 pub struct EnemySpawnInfo {
     enemy_type: EnemyType,
@@ -308,17 +303,12 @@ pub struct HealthBar {
     pub enemy_entity: freecs::Entity,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum EffectType {
+    #[default]
     Explosion,
     PoisonBubble,
     DeathParticle,
-}
-
-impl Default for EffectType {
-    fn default() -> Self {
-        EffectType::Explosion
-    }
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -447,10 +437,7 @@ fn grid_to_screen(grid_x: i32, grid_y: i32) -> Vec2 {
     let base_pos = grid_to_base(grid_x, grid_y);
     let scale = get_scale();
     let offset = get_offset();
-    Vec2::new(
-        offset.x + base_pos.x * scale,
-        offset.y + base_pos.y * scale,
-    )
+    Vec2::new(offset.x + base_pos.x * scale, offset.y + base_pos.y * scale)
 }
 
 fn screen_to_grid(screen_pos: Vec2) -> Option<(i32, i32)> {
@@ -500,7 +487,7 @@ fn initialize_grid(world: &mut GameWorld) {
 }
 
 fn create_path(world: &mut GameWorld) {
-    let path = vec![
+    let path = [
         Vec2::new(-6.0, 0.0),
         Vec2::new(-3.0, 0.0),
         Vec2::new(-3.0, -4.0),
@@ -517,12 +504,15 @@ fn create_path(world: &mut GameWorld) {
     let grid_offset_x = (BASE_WIDTH - grid_width) / 2.0;
     let grid_offset_y = (BASE_HEIGHT - grid_height) / 2.0;
 
-    let screen_path: Vec<Vec2> = path.iter().map(|&p| {
-        Vec2::new(
-            grid_offset_x + (p.x + GRID_SIZE as f32 / 2.0 + 0.5) * TILE_SIZE,
-            grid_offset_y + (p.y + GRID_SIZE as f32 / 2.0 + 0.5) * TILE_SIZE,
-        )
-    }).collect();
+    let screen_path: Vec<Vec2> = path
+        .iter()
+        .map(|&p| {
+            Vec2::new(
+                grid_offset_x + (p.x + GRID_SIZE as f32 / 2.0 + 0.5) * TILE_SIZE,
+                grid_offset_y + (p.y + GRID_SIZE as f32 / 2.0 + 0.5) * TILE_SIZE,
+            )
+        })
+        .collect();
 
     world.resources.path = screen_path;
 
@@ -567,7 +557,10 @@ fn spawn_tower(
 
     let entities = EntityBuilder::new()
         .with_position(Position(position))
-        .with_grid_position(GridPosition { x: grid_x, y: grid_y })
+        .with_grid_position(GridPosition {
+            x: grid_x,
+            y: grid_y,
+        })
         .with_tower(Tower {
             tower_type,
             level: 1,
@@ -641,7 +634,12 @@ fn spawn_enemy(world: &mut GameWorld, enemy_type: EnemyType) -> freecs::Entity {
         .spawn(world, 1);
 
     let entity = entities[0];
-    world.set_health_bar(entity, HealthBar { enemy_entity: entity });
+    world.set_health_bar(
+        entity,
+        HealthBar {
+            enemy_entity: entity,
+        },
+    );
 
     match enemy_type {
         EnemyType::Normal => world.add_basic_enemy(entity),
@@ -664,7 +662,11 @@ fn spawn_projectile(
     tower_type: TowerType,
     level: u32,
 ) -> freecs::Entity {
-    let arc_height = if tower_type == TowerType::Cannon { 50.0 } else { 0.0 };
+    let arc_height = if tower_type == TowerType::Cannon {
+        50.0
+    } else {
+        0.0
+    };
 
     EntityBuilder::new()
         .with_position(Position(from))
@@ -681,7 +683,13 @@ fn spawn_projectile(
         .spawn(world, 1)[0]
 }
 
-fn spawn_visual_effect(world: &mut GameWorld, position: Vec2, effect_type: EffectType, velocity: Vec2, lifetime: f32) {
+fn spawn_visual_effect(
+    world: &mut GameWorld,
+    position: Vec2,
+    effect_type: EffectType,
+    velocity: Vec2,
+    lifetime: f32,
+) {
     EntityBuilder::new()
         .with_position(Position(position))
         .with_visual_effect(VisualEffect {
@@ -719,14 +727,14 @@ fn can_place_tower_at(world: &GameWorld, x: i32, y: i32) -> bool {
     }
 
     let mut can_place = false;
-    world
-        .query()
-        .with(GRID_CELL)
-        .iter(|_entity, table, index| {
-            if table.grid_cell[index].x == x && table.grid_cell[index].y == y && !table.grid_cell[index].occupied {
-                can_place = true;
-            }
-        });
+    world.query().with(GRID_CELL).iter(|_entity, table, index| {
+        if table.grid_cell[index].x == x
+            && table.grid_cell[index].y == y
+            && !table.grid_cell[index].occupied
+        {
+            can_place = true;
+        }
+    });
     can_place
 }
 
@@ -839,54 +847,53 @@ fn input_system(world: &mut GameWorld) {
     let left_clicked = is_mouse_button_pressed(MouseButton::Left);
     let right_clicked = is_mouse_button_pressed(MouseButton::Right);
 
-    if left_clicked {
-        if let Some((grid_x, grid_y)) = world.resources.mouse_grid_pos {
-            if can_place_tower_at(world, grid_x, grid_y) {
-                let tower_type = world.resources.selected_tower_type;
-                if world.resources.money >= tower_type.cost() {
-                    let cost = tower_type.cost();
-                    spawn_tower(world, grid_x, grid_y, tower_type);
-                    mark_cell_occupied(world, grid_x, grid_y);
-                    let pos = grid_to_base(grid_x, grid_y);
-                    spawn_money_popup(world, pos, -(cost as i32));
+    if left_clicked
+        && let Some((grid_x, grid_y)) = world.resources.mouse_grid_pos
+        && can_place_tower_at(world, grid_x, grid_y)
+    {
+        let tower_type = world.resources.selected_tower_type;
+        if world.resources.money >= tower_type.cost() {
+            let cost = tower_type.cost();
+            spawn_tower(world, grid_x, grid_y, tower_type);
+            mark_cell_occupied(world, grid_x, grid_y);
+            let pos = grid_to_base(grid_x, grid_y);
+            spawn_money_popup(world, pos, -(cost as i32));
+        }
+    }
+
+    if right_clicked && let Some((grid_x, grid_y)) = world.resources.mouse_grid_pos {
+        let mut tower_entity = None;
+        world
+            .query()
+            .with(TOWER | GRID_POSITION)
+            .iter(|entity, table, index| {
+                if table.grid_position[index].x == grid_x && table.grid_position[index].y == grid_y
+                {
+                    tower_entity = Some(entity);
                 }
-            }
+            });
+
+        if let Some(tower_entity) = tower_entity {
+            sell_tower(world, tower_entity, grid_x, grid_y);
         }
     }
 
-    if right_clicked {
-        if let Some((grid_x, grid_y)) = world.resources.mouse_grid_pos {
-            let mut tower_entity = None;
-            world
-                .query()
-                .with(TOWER | GRID_POSITION)
-                .iter(|entity, table, index| {
-                    if table.grid_position[index].x == grid_x && table.grid_position[index].y == grid_y {
-                        tower_entity = Some(entity);
-                    }
-                });
+    if (is_key_pressed(KeyCode::U) || is_mouse_button_pressed(MouseButton::Middle))
+        && let Some((grid_x, grid_y)) = world.resources.mouse_grid_pos
+    {
+        let mut tower_entity = None;
+        world
+            .query()
+            .with(TOWER | GRID_POSITION)
+            .iter(|entity, table, index| {
+                if table.grid_position[index].x == grid_x && table.grid_position[index].y == grid_y
+                {
+                    tower_entity = Some(entity);
+                }
+            });
 
-            if let Some(tower_entity) = tower_entity {
-                sell_tower(world, tower_entity, grid_x, grid_y);
-            }
-        }
-    }
-
-    if is_key_pressed(KeyCode::U) || is_mouse_button_pressed(MouseButton::Middle) {
-        if let Some((grid_x, grid_y)) = world.resources.mouse_grid_pos {
-            let mut tower_entity = None;
-            world
-                .query()
-                .with(TOWER | GRID_POSITION)
-                .iter(|entity, table, index| {
-                    if table.grid_position[index].x == grid_x && table.grid_position[index].y == grid_y {
-                        tower_entity = Some(entity);
-                    }
-                });
-
-            if let Some(tower_entity) = tower_entity {
-                upgrade_tower(world, tower_entity, grid_x, grid_y);
-            }
+        if let Some(tower_entity) = tower_entity {
+            upgrade_tower(world, tower_entity, grid_x, grid_y);
         }
     }
 
@@ -918,10 +925,13 @@ fn input_system(world: &mut GameWorld) {
         }
     }
 
-    if is_key_pressed(KeyCode::R) {
-        if matches!(world.resources.game_state, GameState::GameOver | GameState::Victory) {
-            restart_game(world);
-        }
+    if is_key_pressed(KeyCode::R)
+        && matches!(
+            world.resources.game_state,
+            GameState::GameOver | GameState::Victory
+        )
+    {
+        restart_game(world);
     }
 }
 
@@ -974,7 +984,11 @@ fn enemy_movement_system(world: &mut GameWorld, delta_time: f32) {
         .query()
         .with(ENEMY | POSITION)
         .iter(|entity, table, index| {
-            enemy_positions.push((entity, table.position[index].0, table.enemy[index].enemy_type));
+            enemy_positions.push((
+                entity,
+                table.position[index].0,
+                table.enemy[index].enemy_type,
+            ));
         });
 
     for (healer_entity, healer_pos, enemy_type) in &enemy_positions {
@@ -982,10 +996,10 @@ fn enemy_movement_system(world: &mut GameWorld, delta_time: f32) {
             for (other_entity, other_pos, _) in &enemy_positions {
                 if healer_entity != other_entity {
                     let distance = (*other_pos - *healer_pos).length();
-                    if distance < 60.0 {
-                        if let Some(enemy) = world.get_enemy_mut(*other_entity) {
-                            enemy.health = (enemy.health + 10.0 * delta_time).min(enemy.max_health);
-                        }
+                    if distance < 60.0
+                        && let Some(enemy) = world.get_enemy_mut(*other_entity)
+                    {
+                        enemy.health = (enemy.health + 10.0 * delta_time).min(enemy.max_health);
                     }
                 }
             }
@@ -1015,10 +1029,7 @@ fn enemy_movement_system(world: &mut GameWorld, delta_time: f32) {
                 if path_index >= path.len() - 1 {
                     enemies_to_remove.push(entity);
                     hp_damage += 1;
-                    world.send_enemy_reached_end(EnemyReachedEndEvent {
-                        entity,
-                        damage: 1,
-                    });
+                    world.send_enemy_reached_end(EnemyReachedEndEvent { entity, damage: 1 });
                     continue;
                 }
             }
@@ -1050,10 +1061,8 @@ fn enemy_movement_system(world: &mut GameWorld, delta_time: f32) {
 
             if poison_death {
                 enemies_to_remove.push(entity);
-            } else {
-                if let Some(pos) = world.get_position_mut(entity) {
-                    pos.0 = base_position;
-                }
+            } else if let Some(pos) = world.get_position_mut(entity) {
+                pos.0 = base_position;
             }
         }
     }
@@ -1091,7 +1100,11 @@ fn tower_targeting_system(world: &mut GameWorld) {
         .query()
         .with(ENEMY | POSITION)
         .iter(|entity, table, index| {
-            enemy_data.push((entity, table.position[index].0, table.enemy[index].is_flying));
+            enemy_data.push((
+                entity,
+                table.position[index].0,
+                table.enemy[index].is_flying,
+            ));
         });
 
     let tower_entities: Vec<_> = world.query_entities(TOWER | POSITION).collect();
@@ -1145,7 +1158,12 @@ fn tower_shooting_system(world: &mut GameWorld, delta_time: f32) {
                 };
 
                 if can_fire {
-                    projectiles_to_spawn.push((tower_pos, tower.target.unwrap(), tower.tower_type, tower.level));
+                    projectiles_to_spawn.push((
+                        tower_pos,
+                        tower.target.unwrap(),
+                        tower.tower_type,
+                        tower.level,
+                    ));
                     tower.cooldown = tower.tower_type.fire_rate(tower.level);
                     tower.fire_animation = 1.0;
                     tower.tracking_time = 0.0;
@@ -1159,17 +1177,8 @@ fn tower_shooting_system(world: &mut GameWorld, delta_time: f32) {
 
         if tower_type == TowerType::Cannon {
             for _ in 0..6 {
-                let offset = Vec2::new(
-                    rand::gen_range(-5.0, 5.0),
-                    rand::gen_range(-5.0, 5.0),
-                );
-                spawn_visual_effect(
-                    world,
-                    from + offset,
-                    EffectType::Explosion,
-                    Vec2::ZERO,
-                    0.3,
-                );
+                let offset = Vec2::new(rand::gen_range(-5.0, 5.0), rand::gen_range(-5.0, 5.0));
+                spawn_visual_effect(world, from + offset, EffectType::Explosion, Vec2::ZERO, 0.3);
             }
         }
     }
@@ -1197,19 +1206,25 @@ fn projectile_movement_system(world: &mut GameWorld, delta_time: f32) {
             let distance_to_target = (target_pos - old_pos).length();
 
             let new_pos = if projectile_data.arc_height > 0.0 {
-                projectile_data.flight_progress += (projectile_data.speed * delta_time) / total_distance;
+                projectile_data.flight_progress +=
+                    (projectile_data.speed * delta_time) / total_distance;
                 projectile_data.flight_progress = projectile_data.flight_progress.min(1.0);
 
-                let horizontal_pos = projectile_data.start_position
-                    + (target_pos - projectile_data.start_position) * projectile_data.flight_progress;
-                horizontal_pos
+                projectile_data.start_position
+                    + (target_pos - projectile_data.start_position)
+                        * projectile_data.flight_progress
             } else {
                 let direction = (target_pos - old_pos).normalize();
                 old_pos + direction * projectile_data.speed * delta_time
             };
 
             if distance_to_target < 10.0 || projectile_data.flight_progress >= 1.0 {
-                hits.push((projectile_data.target, projectile_data.damage, projectile_data.tower_type, target_pos));
+                hits.push((
+                    projectile_data.target,
+                    projectile_data.damage,
+                    projectile_data.tower_type,
+                    target_pos,
+                ));
                 projectiles_to_remove.push(projectile_entity);
                 world.send_projectile_hit(ProjectileHitEvent {
                     projectile: projectile_entity,
@@ -1248,32 +1263,16 @@ fn projectile_movement_system(world: &mut GameWorld, delta_time: f32) {
                 apply_damage_to_enemy(world, enemy_entity, damage);
 
                 for _ in 0..3 {
-                    let velocity = Vec2::new(
-                        rand::gen_range(-20.0, 20.0),
-                        rand::gen_range(-20.0, 20.0),
-                    );
-                    spawn_visual_effect(
-                        world,
-                        hit_pos,
-                        EffectType::PoisonBubble,
-                        velocity,
-                        2.0,
-                    );
+                    let velocity =
+                        Vec2::new(rand::gen_range(-20.0, 20.0), rand::gen_range(-20.0, 20.0));
+                    spawn_visual_effect(world, hit_pos, EffectType::PoisonBubble, velocity, 2.0);
                 }
             }
             TowerType::Cannon => {
                 for _ in 0..8 {
-                    let velocity = Vec2::new(
-                        rand::gen_range(-30.0, 30.0),
-                        rand::gen_range(-30.0, 30.0),
-                    );
-                    spawn_visual_effect(
-                        world,
-                        hit_pos,
-                        EffectType::Explosion,
-                        velocity,
-                        0.5,
-                    );
+                    let velocity =
+                        Vec2::new(rand::gen_range(-30.0, 30.0), rand::gen_range(-30.0, 30.0));
+                    spawn_visual_effect(world, hit_pos, EffectType::Explosion, velocity, 0.5);
                 }
 
                 for (&enemy_entity, &enemy_pos) in &enemy_positions {
@@ -1387,8 +1386,12 @@ fn update_money_popups(world: &mut GameWorld, delta_time: f32) {
     world.apply_commands();
 }
 
-
-fn upgrade_tower(world: &mut GameWorld, tower_entity: freecs::Entity, grid_x: i32, grid_y: i32) -> bool {
+fn upgrade_tower(
+    world: &mut GameWorld,
+    tower_entity: freecs::Entity,
+    grid_x: i32,
+    grid_y: i32,
+) -> bool {
     if let Some(tower) = world.get_tower(tower_entity) {
         let current_level = tower.level;
         if current_level >= 4 {
@@ -1450,10 +1453,11 @@ fn sell_tower(world: &mut GameWorld, tower_entity: freecs::Entity, grid_x: i32, 
                 }
             });
 
-        let range_indicators_to_remove: Vec<_> = world.query_entities(RANGE_INDICATOR)
-            .into_iter()
+        let range_indicators_to_remove: Vec<_> = world
+            .query_entities(RANGE_INDICATOR)
             .filter_map(|range_entity| {
-                world.get_range_indicator(range_entity)
+                world
+                    .get_range_indicator(range_entity)
                     .filter(|indicator| indicator.tower_entity == tower_entity)
                     .map(|_| range_entity)
             })
@@ -1469,7 +1473,7 @@ fn sell_tower(world: &mut GameWorld, tower_entity: freecs::Entity, grid_x: i32, 
 }
 
 fn restart_game(world: &mut GameWorld) {
-    let towers_to_remove: Vec<_> = world.query_entities(TOWER).into_iter().collect();
+    let towers_to_remove: Vec<_> = world.query_entities(TOWER).collect();
     for entity in towers_to_remove {
         world.queue_despawn_entity(entity);
     }
@@ -1489,12 +1493,12 @@ fn restart_game(world: &mut GameWorld) {
         world.queue_despawn_entity(entity);
     }
 
-    let money_popups_to_remove: Vec<_> = world.query_entities(MONEY_POPUP).into_iter().collect();
+    let money_popups_to_remove: Vec<_> = world.query_entities(MONEY_POPUP).collect();
     for entity in money_popups_to_remove {
         world.queue_despawn_entity(entity);
     }
 
-    let range_indicators_to_remove: Vec<_> = world.query_entities(RANGE_INDICATOR).into_iter().collect();
+    let range_indicators_to_remove: Vec<_> = world.query_entities(RANGE_INDICATOR).collect();
     for entity in range_indicators_to_remove {
         world.queue_despawn_entity(entity);
     }
@@ -1554,21 +1558,37 @@ fn render_grid(world: &GameWorld) {
         }
     }
 
-    if let Some((grid_x, grid_y)) = world.resources.mouse_grid_pos {
-        if can_place_tower_at(world, grid_x, grid_y) {
-            let tower_type = world.resources.selected_tower_type;
-            if world.resources.money >= tower_type.cost() {
-                let pos = grid_to_screen(grid_x, grid_y);
-                draw_rectangle(
-                    pos.x - TILE_SIZE * scale / 2.0 + scale,
-                    pos.y - TILE_SIZE * scale / 2.0 + scale,
-                    (TILE_SIZE - 2.0) * scale,
-                    (TILE_SIZE - 2.0) * scale,
-                    Color::new(tower_type.color().r, tower_type.color().g, tower_type.color().b, 0.3),
-                );
+    if let Some((grid_x, grid_y)) = world.resources.mouse_grid_pos
+        && can_place_tower_at(world, grid_x, grid_y)
+    {
+        let tower_type = world.resources.selected_tower_type;
+        if world.resources.money >= tower_type.cost() {
+            let pos = grid_to_screen(grid_x, grid_y);
+            draw_rectangle(
+                pos.x - TILE_SIZE * scale / 2.0 + scale,
+                pos.y - TILE_SIZE * scale / 2.0 + scale,
+                (TILE_SIZE - 2.0) * scale,
+                (TILE_SIZE - 2.0) * scale,
+                Color::new(
+                    tower_type.color().r,
+                    tower_type.color().g,
+                    tower_type.color().b,
+                    0.3,
+                ),
+            );
 
-                draw_circle_lines(pos.x, pos.y, tower_type.range(1) * scale, 2.0, Color::new(tower_type.color().r, tower_type.color().g, tower_type.color().b, 0.5));
-            }
+            draw_circle_lines(
+                pos.x,
+                pos.y,
+                tower_type.range(1) * scale,
+                2.0,
+                Color::new(
+                    tower_type.color().r,
+                    tower_type.color().g,
+                    tower_type.color().b,
+                    0.5,
+                ),
+            );
         }
     }
 }
@@ -1583,10 +1603,7 @@ fn render_towers(world: &GameWorld) {
         .iter(|_entity, table, index| {
             let tower = &table.tower[index];
             let pos = &table.position[index];
-            let screen_pos = Vec2::new(
-                offset.x + pos.0.x * scale,
-                offset.y + pos.0.y * scale,
-            );
+            let screen_pos = Vec2::new(offset.x + pos.0.x * scale, offset.y + pos.0.y * scale);
 
             let base_size = 20.0 + tower.fire_animation * 4.0;
             let size = base_size * (1.0 + 0.15 * (tower.level - 1) as f32) * scale;
@@ -1608,16 +1625,22 @@ fn render_towers(world: &GameWorld) {
                 draw_circle_lines(screen_pos.x, screen_pos.y, ring_radius, 1.5, upgraded_color);
             }
 
-            if tower.tower_type == TowerType::Sniper {
-                if let Some(target_entity) = tower.target {
-                    if let Some(target_pos) = world.get_position(target_entity) {
-                        let target_screen_pos = Vec2::new(
-                            offset.x + target_pos.0.x * scale,
-                            offset.y + target_pos.0.y * scale,
-                        );
-                        draw_line(screen_pos.x, screen_pos.y, target_screen_pos.x, target_screen_pos.y, 2.0, RED);
-                    }
-                }
+            if tower.tower_type == TowerType::Sniper
+                && let Some(target_entity) = tower.target
+                && let Some(target_pos) = world.get_position(target_entity)
+            {
+                let target_screen_pos = Vec2::new(
+                    offset.x + target_pos.0.x * scale,
+                    offset.y + target_pos.0.y * scale,
+                );
+                draw_line(
+                    screen_pos.x,
+                    screen_pos.y,
+                    target_screen_pos.x,
+                    target_screen_pos.y,
+                    2.0,
+                    RED,
+                );
             }
         });
 
@@ -1627,38 +1650,61 @@ fn render_towers(world: &GameWorld) {
             .query()
             .with(TOWER | GRID_POSITION | POSITION)
             .iter(|_entity, table, index| {
-                if table.grid_position[index].x == grid_x && table.grid_position[index].y == grid_y {
+                if table.grid_position[index].x == grid_x && table.grid_position[index].y == grid_y
+                {
                     tower_data = Some((table.tower[index], table.position[index]));
                 }
             });
 
         if let Some((tower, pos)) = tower_data {
-            let screen_pos = Vec2::new(
-                offset.x + pos.0.x * scale,
-                offset.y + pos.0.y * scale,
-            );
+            let screen_pos = Vec2::new(offset.x + pos.0.x * scale, offset.y + pos.0.y * scale);
 
             let range = tower.tower_type.range(tower.level);
-            draw_circle_lines(screen_pos.x, screen_pos.y, range * scale, 2.0, tower.tower_type.color());
+            draw_circle_lines(
+                screen_pos.x,
+                screen_pos.y,
+                range * scale,
+                2.0,
+                tower.tower_type.color(),
+            );
 
             if tower.level < 4 {
                 let upgrade_cost = tower.tower_type.upgrade_cost(tower.level);
                 let text = format!("U: Upgrade (${}) Lv{}", upgrade_cost, tower.level);
                 let can_afford = world.resources.money >= upgrade_cost;
                 let text_color = if can_afford { GREEN } else { RED };
-                draw_text(&text, screen_pos.x - 60.0 * scale, screen_pos.y - 35.0 * scale, 20.0 * scale, text_color);
+                draw_text(
+                    &text,
+                    screen_pos.x - 60.0 * scale,
+                    screen_pos.y - 35.0 * scale,
+                    20.0 * scale,
+                    text_color,
+                );
             } else {
-                draw_text("MAX LEVEL", screen_pos.x - 40.0 * scale, screen_pos.y - 35.0 * scale, 20.0 * scale, GOLD);
+                draw_text(
+                    "MAX LEVEL",
+                    screen_pos.x - 40.0 * scale,
+                    screen_pos.y - 35.0 * scale,
+                    20.0 * scale,
+                    GOLD,
+                );
             }
 
-            if let Some(target_entity) = tower.target {
-                if let Some(target_pos) = world.get_position(target_entity) {
-                    let target_screen_pos = Vec2::new(
-                        offset.x + target_pos.0.x * scale,
-                        offset.y + target_pos.0.y * scale,
-                    );
-                    draw_line(screen_pos.x, screen_pos.y, target_screen_pos.x, target_screen_pos.y, 2.0, RED);
-                }
+            if let Some(target_entity) = tower.target
+                && let Some(target_pos) = world.get_position(target_entity)
+            {
+                let target_screen_pos = Vec2::new(
+                    offset.x + target_pos.0.x * scale,
+                    offset.y + target_pos.0.y * scale,
+                );
+                draw_line(
+                    screen_pos.x,
+                    screen_pos.y,
+                    target_screen_pos.x,
+                    target_screen_pos.y,
+                    2.0,
+                    RED,
+                );
             }
         }
     }
@@ -1674,10 +1720,7 @@ fn render_enemies(world: &GameWorld) {
         .iter(|_entity, table, index| {
             let enemy = &table.enemy[index];
             let pos = &table.position[index];
-            let screen_pos = Vec2::new(
-                offset.x + pos.0.x * scale,
-                offset.y + pos.0.y * scale,
-            );
+            let screen_pos = Vec2::new(offset.x + pos.0.x * scale, offset.y + pos.0.y * scale);
             let size = enemy.enemy_type.size() * scale;
             draw_circle(screen_pos.x, screen_pos.y, size, enemy.enemy_type.color());
             draw_circle_lines(screen_pos.x, screen_pos.y, size, 2.0, BLACK);
@@ -1734,10 +1777,7 @@ fn render_projectiles(world: &GameWorld) {
         .iter(|_entity, table, index| {
             let projectile = &table.projectile[index];
             let pos = &table.position[index];
-            let screen_pos = Vec2::new(
-                offset.x + pos.0.x * scale,
-                offset.y + pos.0.y * scale,
-            );
+            let screen_pos = Vec2::new(offset.x + pos.0.x * scale, offset.y + pos.0.y * scale);
             let color = match projectile.tower_type {
                 TowerType::Basic => YELLOW,
                 TowerType::Frost => SKYBLUE,
@@ -1766,10 +1806,7 @@ fn render_visual_effects(world: &GameWorld) {
         .iter(|_entity, table, index| {
             let effect = &table.visual_effect[index];
             let pos = &table.position[index];
-            let screen_pos = Vec2::new(
-                offset.x + pos.0.x * scale,
-                offset.y + pos.0.y * scale,
-            );
+            let screen_pos = Vec2::new(offset.x + pos.0.x * scale, offset.y + pos.0.y * scale);
             let progress = effect.age / effect.lifetime;
             let alpha = 1.0 - progress;
 
@@ -1815,10 +1852,7 @@ fn render_money_popups(world: &GameWorld) {
         .iter(|_entity, table, index| {
             let popup = &table.money_popup[index];
             let pos = &table.position[index];
-            let screen_pos = Vec2::new(
-                offset.x + pos.0.x * scale,
-                offset.y + pos.0.y * scale,
-            );
+            let screen_pos = Vec2::new(offset.x + pos.0.x * scale, offset.y + pos.0.y * scale);
             let progress = popup.lifetime / 2.0;
             let alpha = 1.0 - progress.min(1.0);
             let text_scale = 1.0 + progress * 0.5;
@@ -1850,10 +1884,7 @@ fn enemy_died_event_handler(world: &mut GameWorld) {
         world.resources.money += event.reward;
 
         for _ in 0..6 {
-            let velocity = Vec2::new(
-                rand::gen_range(-40.0, 40.0),
-                rand::gen_range(-40.0, 40.0),
-            );
+            let velocity = Vec2::new(rand::gen_range(-40.0, 40.0), rand::gen_range(-40.0, 40.0));
             spawn_visual_effect(
                 world,
                 event.position,
@@ -1869,9 +1900,108 @@ fn enemy_died_event_handler(world: &mut GameWorld) {
     }
 }
 
-fn health_bar_update_system(world: &mut GameWorld) {
-    world.for_each_mut_changed(ENEMY, 0, |_entity, _table, _idx| {
-    });
+fn enemy_spawned_event_handler(world: &mut GameWorld) {
+    for event in world.collect_enemy_spawned() {
+        let position = world.get_position(event.entity).map(|p| p.0);
+        if let Some(pos) = position {
+            for _ in 0..4 {
+                let velocity =
+                    Vec2::new(rand::gen_range(-30.0, 30.0), rand::gen_range(-30.0, 30.0));
+                spawn_visual_effect(world, pos, EffectType::DeathParticle, velocity, 0.5);
+            }
+        }
+    }
+}
+
+fn enemy_reached_end_event_handler(world: &mut GameWorld) {
+    for event in world.collect_enemy_reached_end() {
+        let position = world.get_position(event.entity).map(|p| p.0);
+        if let Some(pos) = position {
+            for _ in 0..8 {
+                let velocity =
+                    Vec2::new(rand::gen_range(-50.0, 50.0), rand::gen_range(-50.0, 50.0));
+                spawn_visual_effect(world, pos, EffectType::Explosion, velocity, 0.6);
+            }
+        }
+    }
+}
+
+fn projectile_hit_event_handler(world: &mut GameWorld) {
+    for event in world.collect_projectile_hit() {
+        for _ in 0..3 {
+            let velocity = Vec2::new(rand::gen_range(-25.0, 25.0), rand::gen_range(-25.0, 25.0));
+            spawn_visual_effect(world, event.position, EffectType::Explosion, velocity, 0.3);
+        }
+    }
+}
+
+fn tower_placed_event_handler(world: &mut GameWorld) {
+    for event in world.collect_tower_placed() {
+        let pos = grid_to_base(event.grid_x, event.grid_y);
+        for _ in 0..5 {
+            let offset = Vec2::new(rand::gen_range(-15.0, 15.0), rand::gen_range(-15.0, 15.0));
+            spawn_visual_effect(world, pos + offset, EffectType::Explosion, Vec2::ZERO, 0.4);
+        }
+    }
+}
+
+fn tower_sold_event_handler(world: &mut GameWorld) {
+    for event in world.collect_tower_sold() {
+        let pos = grid_to_base(event.grid_x, event.grid_y);
+        for _ in 0..8 {
+            let velocity = Vec2::new(rand::gen_range(-40.0, 40.0), rand::gen_range(-40.0, 40.0));
+            spawn_visual_effect(world, pos, EffectType::DeathParticle, velocity, 0.7);
+        }
+    }
+}
+
+fn tower_upgraded_event_handler(world: &mut GameWorld) {
+    for event in world.collect_tower_upgraded() {
+        let position = world.get_position(event.entity).map(|p| p.0);
+        if let Some(pos) = position {
+            for _ in 0..12 {
+                let angle = rand::gen_range(0.0, std::f32::consts::TAU);
+                let speed = rand::gen_range(20.0, 60.0);
+                let velocity = Vec2::new(angle.cos() * speed, angle.sin() * speed);
+                spawn_visual_effect(world, pos, EffectType::Explosion, velocity, 0.8);
+            }
+        }
+    }
+}
+
+fn wave_started_event_handler(world: &mut GameWorld) {
+    for event in world.collect_wave_started() {
+        world.resources.wave_announce_timer = 2.0;
+        world.resources.wave = event.wave;
+    }
+}
+
+fn wave_completed_event_handler(world: &mut GameWorld) {
+    for event in world.collect_wave_completed() {
+        let bonus = 20 + event.wave * 5;
+        world.resources.money += bonus;
+    }
+}
+
+fn tag_query_example_system(world: &GameWorld) {
+    let flying_enemy_count = world.query_entities(FLYING_ENEMY).count();
+    let healer_enemy_count = world.query_entities(HEALER_ENEMY).count();
+    let tank_enemy_count = world.query_entities(TANK_ENEMY).count();
+
+    let sniper_tower_count = world.query_entities(SNIPER_TOWER).count();
+    let frost_tower_count = world.query_entities(FROST_TOWER).count();
+
+    let _ = flying_enemy_count > 0 && sniper_tower_count == 0;
+    let _ = healer_enemy_count > 0 && tank_enemy_count > 2;
+
+    if frost_tower_count > 0 {
+        world
+            .query()
+            .with(FROST_TOWER | TOWER)
+            .iter(|_entity, table, index| {
+                let _tower = &table.tower[index];
+            });
+    }
 }
 
 fn render_ui(world: &GameWorld) {
@@ -1881,7 +2011,10 @@ fn render_ui(world: &GameWorld) {
     let lives_text = format!("Lives: {}", world.resources.lives);
     draw_text(&lives_text, 10.0, 60.0, 25.0, RED);
 
-    let hp_text = format!("HP: {}/{}", world.resources.current_hp, world.resources.max_hp);
+    let hp_text = format!(
+        "HP: {}/{}",
+        world.resources.current_hp, world.resources.max_hp
+    );
     draw_text(&hp_text, 10.0, 90.0, 25.0, YELLOW);
 
     let wave_text = format!("Wave: {}", world.resources.wave);
@@ -1890,7 +2023,8 @@ fn render_ui(world: &GameWorld) {
     let speed_text = format!("Speed: {}x", world.resources.game_speed);
     draw_text(&speed_text, screen_width() - 150.0, 60.0, 20.0, WHITE);
 
-    let total_hp = (world.resources.lives - 1) * world.resources.max_hp + world.resources.current_hp;
+    let total_hp =
+        (world.resources.lives - 1) * world.resources.max_hp + world.resources.current_hp;
     let max_total_hp = world.resources.lives * world.resources.max_hp;
     let health_percentage = total_hp as f32 / max_total_hp as f32;
 
@@ -1948,7 +2082,13 @@ fn render_ui(world: &GameWorld) {
         draw_rectangle_lines(x, tower_ui_y, 50.0, 50.0, 2.0, BLACK);
 
         draw_text(key, x + 5.0, tower_ui_y + 20.0, 20.0, BLACK);
-        draw_text(&format!("${}", tower_type.cost()), x + 5.0, tower_ui_y + 45.0, 15.0, BLACK);
+        draw_text(
+            &format!("${}", tower_type.cost()),
+            x + 5.0,
+            tower_ui_y + 45.0,
+            15.0,
+            BLACK,
+        );
     }
 
     if world.resources.wave_announce_timer > 0.0 {
@@ -2082,7 +2222,15 @@ async fn main() {
         .add_system_mut(visual_effects_system_wrapper)
         .add_system_mut(update_money_popups_wrapper)
         .add_system_mut(enemy_died_event_handler)
-        .add_system_mut(health_bar_update_system);
+        .add_system_mut(enemy_spawned_event_handler)
+        .add_system_mut(enemy_reached_end_event_handler)
+        .add_system_mut(projectile_hit_event_handler)
+        .add_system_mut(tower_placed_event_handler)
+        .add_system_mut(tower_sold_event_handler)
+        .add_system_mut(tower_upgraded_event_handler)
+        .add_system_mut(wave_started_event_handler)
+        .add_system_mut(wave_completed_event_handler)
+        .add_system(tag_query_example_system);
 
     let mut render_schedule = Schedule::new();
     render_schedule
@@ -2107,10 +2255,9 @@ async fn main() {
             world.resources.wave_announce_timer -= get_frame_time();
         }
 
-        if is_key_pressed(KeyCode::Space) {
-            if world.resources.game_state == GameState::WaitingForWave {
-                plan_wave(&mut world);
-            }
+        if is_key_pressed(KeyCode::Space) && world.resources.game_state == GameState::WaitingForWave
+        {
+            plan_wave(&mut world);
         }
 
         render_schedule.run(&mut world);

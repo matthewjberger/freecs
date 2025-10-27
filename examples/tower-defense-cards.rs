@@ -1,4 +1,4 @@
-use freecs::{ecs, Entity, Schedule};
+use freecs::{Entity, Schedule, ecs};
 use macroquad::prelude::*;
 
 ecs! {
@@ -384,8 +384,7 @@ pub struct GridPosition {
 }
 
 #[derive(Debug, Clone, Copy, Default)]
-pub struct HealthBar {
-}
+pub struct HealthBar {}
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum EffectType {
@@ -579,7 +578,10 @@ impl EconomyState {
 
     pub fn spend(&mut self, cost: u32) -> Result<(), String> {
         if !self.can_afford(cost) {
-            return Err(format!("Insufficient funds: have {}, need {}", self.money, cost));
+            return Err(format!(
+                "Insufficient funds: have {}, need {}",
+                self.money, cost
+            ));
         }
         self.money -= cost;
         Ok(())
@@ -613,7 +615,10 @@ pub struct CombatState {
 
 impl CombatState {
     pub fn is_combat_active(&self) -> bool {
-        matches!(self.game_state, GameState::WaitingForWave | GameState::WaveInProgress)
+        matches!(
+            self.game_state,
+            GameState::WaitingForWave | GameState::WaveInProgress
+        )
     }
 
     pub fn take_damage(&mut self, damage: u32) -> bool {
@@ -796,13 +801,55 @@ pub struct EnemyConfigs {
 impl Default for EnemyConfigs {
     fn default() -> Self {
         Self {
-            normal: EnemyStats { base_health: 50.0, speed: 40.0, base_value: 10, shield: 0.0, size: 15.0 },
-            fast: EnemyStats { base_health: 30.0, speed: 80.0, base_value: 15, shield: 0.0, size: 12.0 },
-            tank: EnemyStats { base_health: 150.0, speed: 20.0, base_value: 30, shield: 0.0, size: 20.0 },
-            flying: EnemyStats { base_health: 40.0, speed: 60.0, base_value: 20, shield: 0.0, size: 15.0 },
-            shielded: EnemyStats { base_health: 80.0, speed: 30.0, base_value: 25, shield: 50.0, size: 18.0 },
-            healer: EnemyStats { base_health: 60.0, speed: 35.0, base_value: 40, shield: 0.0, size: 16.0 },
-            boss: EnemyStats { base_health: 500.0, speed: 15.0, base_value: 100, shield: 100.0, size: 30.0 },
+            normal: EnemyStats {
+                base_health: 50.0,
+                speed: 40.0,
+                base_value: 10,
+                shield: 0.0,
+                size: 15.0,
+            },
+            fast: EnemyStats {
+                base_health: 30.0,
+                speed: 80.0,
+                base_value: 15,
+                shield: 0.0,
+                size: 12.0,
+            },
+            tank: EnemyStats {
+                base_health: 150.0,
+                speed: 20.0,
+                base_value: 30,
+                shield: 0.0,
+                size: 20.0,
+            },
+            flying: EnemyStats {
+                base_health: 40.0,
+                speed: 60.0,
+                base_value: 20,
+                shield: 0.0,
+                size: 15.0,
+            },
+            shielded: EnemyStats {
+                base_health: 80.0,
+                speed: 30.0,
+                base_value: 25,
+                shield: 50.0,
+                size: 18.0,
+            },
+            healer: EnemyStats {
+                base_health: 60.0,
+                speed: 35.0,
+                base_value: 40,
+                shield: 0.0,
+                size: 16.0,
+            },
+            boss: EnemyStats {
+                base_health: 500.0,
+                speed: 15.0,
+                base_value: 100,
+                shield: 100.0,
+                size: 30.0,
+            },
         }
     }
 }
@@ -943,12 +990,32 @@ pub struct DamageEvent {
 
 #[derive(Debug, Clone)]
 pub enum ShopOffering {
-    Card { name: String, pattern: Vec<Option<TowerType>>, rarity: CardRarity, cost: u32 },
-    UpgradeCard { card_entity: Entity, current_rarity: CardRarity, cost: u32 },
-    RemoveCard { cost: u32 },
-    Heal { amount: u32, cost: u32 },
-    MaxHealth { amount: u32, cost: u32 },
-    Relic { relic_type: RelicType, cost: u32 },
+    Card {
+        name: String,
+        pattern: Vec<Option<TowerType>>,
+        rarity: CardRarity,
+        cost: u32,
+    },
+    UpgradeCard {
+        card_entity: Entity,
+        current_rarity: CardRarity,
+        cost: u32,
+    },
+    RemoveCard {
+        cost: u32,
+    },
+    Heal {
+        amount: u32,
+        cost: u32,
+    },
+    MaxHealth {
+        amount: u32,
+        cost: u32,
+    },
+    Relic {
+        relic_type: RelicType,
+        cost: u32,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -1021,24 +1088,28 @@ pub struct CommandExecutor;
 impl CommandExecutor {
     pub fn execute(command: GameCommand, world: &mut GameWorld) -> Result<(), String> {
         match command {
-            GameCommand::PlaceTower { grid_x, grid_y, tower_type } => {
-                Self::execute_place_tower(world, grid_x, grid_y, tower_type)
-            }
-            GameCommand::UpgradeTower { tower_entity, grid_x, grid_y } => {
-                Self::execute_upgrade_tower(world, tower_entity, grid_x, grid_y)
-            }
-            GameCommand::SellTower { tower_entity, grid_x, grid_y } => {
-                Self::execute_sell_tower(world, tower_entity, grid_x, grid_y)
-            }
-            GameCommand::DrawCard { count } => {
-                Self::execute_draw_card(world, count)
-            }
-            GameCommand::PlayCard { card_index, grid_x, grid_y } => {
-                Self::execute_play_card(world, card_index, grid_x, grid_y)
-            }
-            GameCommand::StartWave => {
-                Self::execute_start_wave(world)
-            }
+            GameCommand::PlaceTower {
+                grid_x,
+                grid_y,
+                tower_type,
+            } => Self::execute_place_tower(world, grid_x, grid_y, tower_type),
+            GameCommand::UpgradeTower {
+                tower_entity,
+                grid_x,
+                grid_y,
+            } => Self::execute_upgrade_tower(world, tower_entity, grid_x, grid_y),
+            GameCommand::SellTower {
+                tower_entity,
+                grid_x,
+                grid_y,
+            } => Self::execute_sell_tower(world, tower_entity, grid_x, grid_y),
+            GameCommand::DrawCard { count } => Self::execute_draw_card(world, count),
+            GameCommand::PlayCard {
+                card_index,
+                grid_x,
+                grid_y,
+            } => Self::execute_play_card(world, card_index, grid_x, grid_y),
+            GameCommand::StartWave => Self::execute_start_wave(world),
             GameCommand::ChangeGameSpeed { speed } => {
                 world.resources.combat.game_speed = speed;
                 Ok(())
@@ -1047,7 +1118,12 @@ impl CommandExecutor {
         }
     }
 
-    fn execute_place_tower(world: &mut GameWorld, grid_x: i32, grid_y: i32, tower_type: TowerType) -> Result<(), String> {
+    fn execute_place_tower(
+        world: &mut GameWorld,
+        grid_x: i32,
+        grid_y: i32,
+        tower_type: TowerType,
+    ) -> Result<(), String> {
         if !can_place_tower_at(world, grid_x, grid_y) {
             return Err("Cannot place tower at this position".to_string());
         }
@@ -1059,9 +1135,13 @@ impl CommandExecutor {
         Ok(())
     }
 
-    fn execute_upgrade_tower(world: &mut GameWorld, tower_entity: Entity, grid_x: i32, grid_y: i32) -> Result<(), String> {
-        let tower = world.get_tower(tower_entity)
-            .ok_or("Tower not found")?;
+    fn execute_upgrade_tower(
+        world: &mut GameWorld,
+        tower_entity: Entity,
+        grid_x: i32,
+        grid_y: i32,
+    ) -> Result<(), String> {
+        let tower = world.get_tower(tower_entity).ok_or("Tower not found")?;
 
         let current_level = tower.level;
         let max_level = world.resources.config.gameplay_constants.max_tower_level;
@@ -1070,7 +1150,12 @@ impl CommandExecutor {
             return Err("Tower is already at max level".to_string());
         }
 
-        let upgrade_cost = world.resources.config.tower_configs.get(tower.tower_type).upgrade_cost(current_level);
+        let upgrade_cost = world
+            .resources
+            .config
+            .tower_configs
+            .get(tower.tower_type)
+            .upgrade_cost(current_level);
         world.resources.economy.spend(upgrade_cost)?;
 
         if let Some(tower_mut) = world.get_tower_mut(tower_entity) {
@@ -1083,12 +1168,25 @@ impl CommandExecutor {
         Ok(())
     }
 
-    fn execute_sell_tower(world: &mut GameWorld, tower_entity: Entity, grid_x: i32, grid_y: i32) -> Result<(), String> {
-        let tower = world.get_tower(tower_entity)
-            .ok_or("Tower not found")?;
+    fn execute_sell_tower(
+        world: &mut GameWorld,
+        tower_entity: Entity,
+        grid_x: i32,
+        grid_y: i32,
+    ) -> Result<(), String> {
+        let tower = world.get_tower(tower_entity).ok_or("Tower not found")?;
 
-        let cost = world.resources.config.tower_configs.get(tower.tower_type).cost;
-        let refund_percent = world.resources.config.gameplay_constants.tower_sell_refund_percent;
+        let cost = world
+            .resources
+            .config
+            .tower_configs
+            .get(tower.tower_type)
+            .cost;
+        let refund_percent = world
+            .resources
+            .config
+            .gameplay_constants
+            .tower_sell_refund_percent;
         let refund = (cost as f32 * refund_percent) as u32;
 
         world.resources.economy.earn(refund);
@@ -1096,10 +1194,13 @@ impl CommandExecutor {
         let position = grid_to_base(grid_x, grid_y);
         spawn_money_popup(world, position, refund as i32);
 
-        world.query_mut()
+        world
+            .query_mut()
             .with(GRID_CELL)
             .iter(|_entity, table, index| {
-                if table.grid_cell[index].coord.x == grid_x && table.grid_cell[index].coord.y == grid_y {
+                if table.grid_cell[index].coord.x == grid_x
+                    && table.grid_cell[index].coord.y == grid_y
+                {
                     table.grid_cell[index].occupied = false;
                 }
             });
@@ -1114,7 +1215,12 @@ impl CommandExecutor {
         Ok(())
     }
 
-    fn execute_play_card(_world: &mut GameWorld, _card_index: usize, _grid_x: i32, _grid_y: i32) -> Result<(), String> {
+    fn execute_play_card(
+        _world: &mut GameWorld,
+        _card_index: usize,
+        _grid_x: i32,
+        _grid_y: i32,
+    ) -> Result<(), String> {
         Ok(())
     }
 
@@ -1165,10 +1271,7 @@ fn grid_to_screen(grid_x: i32, grid_y: i32) -> Vec2 {
     let base_pos = grid_to_base(grid_x, grid_y);
     let scale = get_scale();
     let offset = get_offset();
-    Vec2::new(
-        offset.x + base_pos.x * scale,
-        offset.y + base_pos.y * scale,
-    )
+    Vec2::new(offset.x + base_pos.x * scale, offset.y + base_pos.y * scale)
 }
 
 fn screen_to_grid(screen_pos: Vec2) -> Option<(i32, i32)> {
@@ -1234,12 +1337,15 @@ fn create_path(world: &mut GameWorld) {
     let grid_offset_x = (BASE_WIDTH - grid_width) / 2.0;
     let grid_offset_y = (BASE_HEIGHT - grid_height) / 2.0;
 
-    let screen_path: Vec<Vec2> = path.iter().map(|&p| {
-        Vec2::new(
-            grid_offset_x + (p.x + GRID_SIZE as f32 / 2.0 + 0.5) * TILE_SIZE,
-            grid_offset_y + (p.y + GRID_SIZE as f32 / 2.0 + 0.5) * TILE_SIZE,
-        )
-    }).collect();
+    let screen_path: Vec<Vec2> = path
+        .iter()
+        .map(|&p| {
+            Vec2::new(
+                grid_offset_x + (p.x + GRID_SIZE as f32 / 2.0 + 0.5) * TILE_SIZE,
+                grid_offset_y + (p.y + GRID_SIZE as f32 / 2.0 + 0.5) * TILE_SIZE,
+            )
+        })
+        .collect();
 
     world.resources.combat.path = screen_path;
 
@@ -1281,12 +1387,19 @@ fn spawn_tower(
     tower_type: TowerType,
 ) -> freecs::Entity {
     let position = grid_to_base(grid_x, grid_y);
-    let fire_rate = world.resources.config.tower_configs.get(tower_type).fire_rate(1);
+    let fire_rate = world
+        .resources
+        .config
+        .tower_configs
+        .get(tower_type)
+        .fire_rate(1);
     let cost = world.resources.config.tower_configs.get(tower_type).cost;
 
     let entities = EntityBuilder::new()
         .with_position(Position(position))
-        .with_grid_position(GridPosition { coord: GridCoord::new(grid_x, grid_y) })
+        .with_grid_position(GridPosition {
+            coord: GridCoord::new(grid_x, grid_y),
+        })
         .with_tower(Tower {
             tower_type,
             level: 1,
@@ -1373,12 +1486,15 @@ fn spawn_enemy(world: &mut GameWorld, enemy_type: EnemyType) -> freecs::Entity {
         EnemyType::Flying => world.add_flying_enemy(entity),
         EnemyType::Healer => {
             world.add_healer_enemy(entity);
-            world.set_heal_aura(entity, HealAura {
-                cooldown: 0.0,
-                heal_amount: 30.0,
-                range: 60.0,
-            });
-        },
+            world.set_heal_aura(
+                entity,
+                HealAura {
+                    cooldown: 0.0,
+                    heal_amount: 30.0,
+                    range: 60.0,
+                },
+            );
+        }
         _ => world.add_basic_enemy(entity),
     }
 
@@ -1394,7 +1510,11 @@ fn spawn_projectile(
     tower_type: TowerType,
     level: u32,
 ) -> freecs::Entity {
-    let arc_height = if tower_type == TowerType::Cannon { 50.0 } else { 0.0 };
+    let arc_height = if tower_type == TowerType::Cannon {
+        50.0
+    } else {
+        0.0
+    };
     let tower_stats = world.resources.config.tower_configs.get(tower_type);
     let damage = tower_stats.damage(level);
     let speed = tower_stats.projectile_speed;
@@ -1414,7 +1534,13 @@ fn spawn_projectile(
         .spawn(world, 1)[0]
 }
 
-fn spawn_visual_effect(world: &mut GameWorld, position: Vec2, effect_type: EffectType, velocity: Vec2, lifetime: f32) {
+fn spawn_visual_effect(
+    world: &mut GameWorld,
+    position: Vec2,
+    effect_type: EffectType,
+    velocity: Vec2,
+    lifetime: f32,
+) {
     EntityBuilder::new()
         .with_position(Position(position))
         .with_visual_effect(VisualEffect {
@@ -1441,108 +1567,180 @@ fn get_all_card_definitions() -> Vec<(&'static str, Vec<Option<TowerType>>, Card
         (
             "Sniper",
             vec![
-                None, None, None,
-                None, Some(TowerType::Sniper), None,
-                None, None, None,
+                None,
+                None,
+                None,
+                None,
+                Some(TowerType::Sniper),
+                None,
+                None,
+                None,
+                None,
             ],
             CardRarity::Common,
         ),
         (
             "Frost Line",
             vec![
-                Some(TowerType::Frost), Some(TowerType::Frost), Some(TowerType::Frost),
-                None, None, None,
-                None, None, None,
+                Some(TowerType::Frost),
+                Some(TowerType::Frost),
+                Some(TowerType::Frost),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
             ],
             CardRarity::Common,
         ),
         (
             "Frost Corners",
             vec![
-                Some(TowerType::Frost), None, Some(TowerType::Frost),
-                None, None, None,
-                Some(TowerType::Frost), None, Some(TowerType::Frost),
+                Some(TowerType::Frost),
+                None,
+                Some(TowerType::Frost),
+                None,
+                None,
+                None,
+                Some(TowerType::Frost),
+                None,
+                Some(TowerType::Frost),
             ],
             CardRarity::Rare,
         ),
         (
             "Artillery Stack",
             vec![
-                None, Some(TowerType::Cannon), None,
-                None, Some(TowerType::Cannon), None,
-                None, Some(TowerType::Cannon), None,
+                None,
+                Some(TowerType::Cannon),
+                None,
+                None,
+                Some(TowerType::Cannon),
+                None,
+                None,
+                Some(TowerType::Cannon),
+                None,
             ],
             CardRarity::Rare,
         ),
         (
             "Support Grid",
             vec![
-                Some(TowerType::Basic), None, Some(TowerType::Basic),
-                None, Some(TowerType::Cannon), None,
-                Some(TowerType::Basic), None, Some(TowerType::Basic),
+                Some(TowerType::Basic),
+                None,
+                Some(TowerType::Basic),
+                None,
+                Some(TowerType::Cannon),
+                None,
+                Some(TowerType::Basic),
+                None,
+                Some(TowerType::Basic),
             ],
             CardRarity::Epic,
         ),
         (
             "Poison Triangle",
             vec![
-                None, Some(TowerType::Poison), None,
-                Some(TowerType::Poison), None, Some(TowerType::Poison),
-                None, None, None,
+                None,
+                Some(TowerType::Poison),
+                None,
+                Some(TowerType::Poison),
+                None,
+                Some(TowerType::Poison),
+                None,
+                None,
+                None,
             ],
             CardRarity::Rare,
         ),
         (
             "Sniper Nest",
             vec![
-                Some(TowerType::Basic), Some(TowerType::Sniper), Some(TowerType::Basic),
-                Some(TowerType::Basic), Some(TowerType::Sniper), Some(TowerType::Basic),
-                None, None, None,
+                Some(TowerType::Basic),
+                Some(TowerType::Sniper),
+                Some(TowerType::Basic),
+                Some(TowerType::Basic),
+                Some(TowerType::Sniper),
+                Some(TowerType::Basic),
+                None,
+                None,
+                None,
             ],
             CardRarity::Epic,
         ),
         (
             "Full House",
             vec![
-                Some(TowerType::Basic), Some(TowerType::Frost), Some(TowerType::Basic),
-                Some(TowerType::Cannon), Some(TowerType::Poison), Some(TowerType::Cannon),
-                Some(TowerType::Basic), Some(TowerType::Frost), Some(TowerType::Basic),
+                Some(TowerType::Basic),
+                Some(TowerType::Frost),
+                Some(TowerType::Basic),
+                Some(TowerType::Cannon),
+                Some(TowerType::Poison),
+                Some(TowerType::Cannon),
+                Some(TowerType::Basic),
+                Some(TowerType::Frost),
+                Some(TowerType::Basic),
             ],
             CardRarity::Legendary,
         ),
         (
             "Cross Formation",
             vec![
-                None, Some(TowerType::Basic), None,
-                Some(TowerType::Basic), Some(TowerType::Cannon), Some(TowerType::Basic),
-                None, Some(TowerType::Basic), None,
+                None,
+                Some(TowerType::Basic),
+                None,
+                Some(TowerType::Basic),
+                Some(TowerType::Cannon),
+                Some(TowerType::Basic),
+                None,
+                Some(TowerType::Basic),
+                None,
             ],
             CardRarity::Common,
         ),
         (
             "Poison Wall",
             vec![
-                Some(TowerType::Poison), Some(TowerType::Poison), Some(TowerType::Poison),
-                Some(TowerType::Poison), Some(TowerType::Poison), Some(TowerType::Poison),
-                None, None, None,
+                Some(TowerType::Poison),
+                Some(TowerType::Poison),
+                Some(TowerType::Poison),
+                Some(TowerType::Poison),
+                Some(TowerType::Poison),
+                Some(TowerType::Poison),
+                None,
+                None,
+                None,
             ],
             CardRarity::Epic,
         ),
         (
             "Diagonal Strike",
             vec![
-                Some(TowerType::Sniper), None, None,
-                None, Some(TowerType::Sniper), None,
-                None, None, Some(TowerType::Sniper),
+                Some(TowerType::Sniper),
+                None,
+                None,
+                None,
+                Some(TowerType::Sniper),
+                None,
+                None,
+                None,
+                Some(TowerType::Sniper),
             ],
             CardRarity::Rare,
         ),
         (
             "Frost Fortress",
             vec![
-                Some(TowerType::Frost), Some(TowerType::Frost), Some(TowerType::Frost),
-                Some(TowerType::Frost), Some(TowerType::Cannon), Some(TowerType::Frost),
-                Some(TowerType::Frost), Some(TowerType::Frost), Some(TowerType::Frost),
+                Some(TowerType::Frost),
+                Some(TowerType::Frost),
+                Some(TowerType::Frost),
+                Some(TowerType::Frost),
+                Some(TowerType::Cannon),
+                Some(TowerType::Frost),
+                Some(TowerType::Frost),
+                Some(TowerType::Frost),
+                Some(TowerType::Frost),
             ],
             CardRarity::Legendary,
         ),
@@ -1554,11 +1752,31 @@ fn get_enemy_deck_for_encounter(layer: usize, is_elite: bool, is_boss: bool) -> 
         EnemyDeck {
             encounter_name: "The Final Swarm".to_string(),
             cards: vec![
-                EnemyCard { enemy_types: vec![EnemyType::Normal, EnemyType::Normal, EnemyType::Fast], count: 3, play_delay: 2.0 },
-                EnemyCard { enemy_types: vec![EnemyType::Tank, EnemyType::Healer], count: 2, play_delay: 3.0 },
-                EnemyCard { enemy_types: vec![EnemyType::Flying, EnemyType::Flying, EnemyType::Fast], count: 3, play_delay: 2.5 },
-                EnemyCard { enemy_types: vec![EnemyType::Tank, EnemyType::Tank], count: 2, play_delay: 4.0 },
-                EnemyCard { enemy_types: vec![EnemyType::Healer, EnemyType::Normal, EnemyType::Normal], count: 2, play_delay: 3.0 },
+                EnemyCard {
+                    enemy_types: vec![EnemyType::Normal, EnemyType::Normal, EnemyType::Fast],
+                    count: 3,
+                    play_delay: 2.0,
+                },
+                EnemyCard {
+                    enemy_types: vec![EnemyType::Tank, EnemyType::Healer],
+                    count: 2,
+                    play_delay: 3.0,
+                },
+                EnemyCard {
+                    enemy_types: vec![EnemyType::Flying, EnemyType::Flying, EnemyType::Fast],
+                    count: 3,
+                    play_delay: 2.5,
+                },
+                EnemyCard {
+                    enemy_types: vec![EnemyType::Tank, EnemyType::Tank],
+                    count: 2,
+                    play_delay: 4.0,
+                },
+                EnemyCard {
+                    enemy_types: vec![EnemyType::Healer, EnemyType::Normal, EnemyType::Normal],
+                    count: 2,
+                    play_delay: 3.0,
+                },
             ],
         }
     } else if is_elite {
@@ -1567,27 +1785,63 @@ fn get_enemy_deck_for_encounter(layer: usize, is_elite: bool, is_boss: bool) -> 
             0 => EnemyDeck {
                 encounter_name: "Aerial Assault".to_string(),
                 cards: vec![
-                    EnemyCard { enemy_types: vec![EnemyType::Flying, EnemyType::Flying], count: 2, play_delay: 2.0 },
-                    EnemyCard { enemy_types: vec![EnemyType::Fast, EnemyType::Flying], count: 2, play_delay: 2.5 },
-                    EnemyCard { enemy_types: vec![EnemyType::Flying, EnemyType::Flying, EnemyType::Flying], count: 2, play_delay: 3.0 },
+                    EnemyCard {
+                        enemy_types: vec![EnemyType::Flying, EnemyType::Flying],
+                        count: 2,
+                        play_delay: 2.0,
+                    },
+                    EnemyCard {
+                        enemy_types: vec![EnemyType::Fast, EnemyType::Flying],
+                        count: 2,
+                        play_delay: 2.5,
+                    },
+                    EnemyCard {
+                        enemy_types: vec![EnemyType::Flying, EnemyType::Flying, EnemyType::Flying],
+                        count: 2,
+                        play_delay: 3.0,
+                    },
                 ],
             },
             1 => EnemyDeck {
                 encounter_name: "Tank Battalion".to_string(),
                 cards: vec![
-                    EnemyCard { enemy_types: vec![EnemyType::Tank], count: 1, play_delay: 2.0 },
-                    EnemyCard { enemy_types: vec![EnemyType::Tank, EnemyType::Healer], count: 2, play_delay: 3.0 },
-                    EnemyCard { enemy_types: vec![EnemyType::Tank, EnemyType::Tank], count: 2, play_delay: 4.0 },
+                    EnemyCard {
+                        enemy_types: vec![EnemyType::Tank],
+                        count: 1,
+                        play_delay: 2.0,
+                    },
+                    EnemyCard {
+                        enemy_types: vec![EnemyType::Tank, EnemyType::Healer],
+                        count: 2,
+                        play_delay: 3.0,
+                    },
+                    EnemyCard {
+                        enemy_types: vec![EnemyType::Tank, EnemyType::Tank],
+                        count: 2,
+                        play_delay: 4.0,
+                    },
                 ],
             },
             _ => EnemyDeck {
                 encounter_name: "Speed Runners".to_string(),
                 cards: vec![
-                    EnemyCard { enemy_types: vec![EnemyType::Fast, EnemyType::Fast, EnemyType::Fast], count: 3, play_delay: 1.5 },
-                    EnemyCard { enemy_types: vec![EnemyType::Fast, EnemyType::Normal], count: 2, play_delay: 2.0 },
-                    EnemyCard { enemy_types: vec![EnemyType::Fast, EnemyType::Fast], count: 2, play_delay: 1.8 },
+                    EnemyCard {
+                        enemy_types: vec![EnemyType::Fast, EnemyType::Fast, EnemyType::Fast],
+                        count: 3,
+                        play_delay: 1.5,
+                    },
+                    EnemyCard {
+                        enemy_types: vec![EnemyType::Fast, EnemyType::Normal],
+                        count: 2,
+                        play_delay: 2.0,
+                    },
+                    EnemyCard {
+                        enemy_types: vec![EnemyType::Fast, EnemyType::Fast],
+                        count: 2,
+                        play_delay: 1.8,
+                    },
                 ],
-            }
+            },
         }
     } else {
         let difficulty_tier = (layer / 3).min(3);
@@ -1597,57 +1851,134 @@ fn get_enemy_deck_for_encounter(layer: usize, is_elite: bool, is_boss: bool) -> 
             (0, _) => EnemyDeck {
                 encounter_name: "Scouting Party".to_string(),
                 cards: vec![
-                    EnemyCard { enemy_types: vec![EnemyType::Normal, EnemyType::Normal], count: 2, play_delay: 2.0 },
-                    EnemyCard { enemy_types: vec![EnemyType::Normal, EnemyType::Fast], count: 2, play_delay: 2.5 },
-                    EnemyCard { enemy_types: vec![EnemyType::Normal], count: 1, play_delay: 1.5 },
+                    EnemyCard {
+                        enemy_types: vec![EnemyType::Normal, EnemyType::Normal],
+                        count: 2,
+                        play_delay: 2.0,
+                    },
+                    EnemyCard {
+                        enemy_types: vec![EnemyType::Normal, EnemyType::Fast],
+                        count: 2,
+                        play_delay: 2.5,
+                    },
+                    EnemyCard {
+                        enemy_types: vec![EnemyType::Normal],
+                        count: 1,
+                        play_delay: 1.5,
+                    },
                 ],
             },
             (1, 0) => EnemyDeck {
                 encounter_name: "Mixed Squad".to_string(),
                 cards: vec![
-                    EnemyCard { enemy_types: vec![EnemyType::Normal, EnemyType::Tank], count: 2, play_delay: 2.5 },
-                    EnemyCard { enemy_types: vec![EnemyType::Fast, EnemyType::Fast], count: 2, play_delay: 2.0 },
-                    EnemyCard { enemy_types: vec![EnemyType::Flying], count: 1, play_delay: 3.0 },
+                    EnemyCard {
+                        enemy_types: vec![EnemyType::Normal, EnemyType::Tank],
+                        count: 2,
+                        play_delay: 2.5,
+                    },
+                    EnemyCard {
+                        enemy_types: vec![EnemyType::Fast, EnemyType::Fast],
+                        count: 2,
+                        play_delay: 2.0,
+                    },
+                    EnemyCard {
+                        enemy_types: vec![EnemyType::Flying],
+                        count: 1,
+                        play_delay: 3.0,
+                    },
                 ],
             },
             (1, _) => EnemyDeck {
                 encounter_name: "Reinforced Line".to_string(),
                 cards: vec![
-                    EnemyCard { enemy_types: vec![EnemyType::Tank, EnemyType::Normal], count: 2, play_delay: 2.5 },
-                    EnemyCard { enemy_types: vec![EnemyType::Healer, EnemyType::Normal, EnemyType::Normal], count: 1, play_delay: 3.0 },
-                    EnemyCard { enemy_types: vec![EnemyType::Tank], count: 1, play_delay: 2.0 },
+                    EnemyCard {
+                        enemy_types: vec![EnemyType::Tank, EnemyType::Normal],
+                        count: 2,
+                        play_delay: 2.5,
+                    },
+                    EnemyCard {
+                        enemy_types: vec![EnemyType::Healer, EnemyType::Normal, EnemyType::Normal],
+                        count: 1,
+                        play_delay: 3.0,
+                    },
+                    EnemyCard {
+                        enemy_types: vec![EnemyType::Tank],
+                        count: 1,
+                        play_delay: 2.0,
+                    },
                 ],
             },
             (2, 0) => EnemyDeck {
                 encounter_name: "Sky Raiders".to_string(),
                 cards: vec![
-                    EnemyCard { enemy_types: vec![EnemyType::Flying, EnemyType::Fast], count: 2, play_delay: 2.0 },
-                    EnemyCard { enemy_types: vec![EnemyType::Flying, EnemyType::Flying], count: 2, play_delay: 2.5 },
-                    EnemyCard { enemy_types: vec![EnemyType::Tank, EnemyType::Flying], count: 1, play_delay: 3.0 },
+                    EnemyCard {
+                        enemy_types: vec![EnemyType::Flying, EnemyType::Fast],
+                        count: 2,
+                        play_delay: 2.0,
+                    },
+                    EnemyCard {
+                        enemy_types: vec![EnemyType::Flying, EnemyType::Flying],
+                        count: 2,
+                        play_delay: 2.5,
+                    },
+                    EnemyCard {
+                        enemy_types: vec![EnemyType::Tank, EnemyType::Flying],
+                        count: 1,
+                        play_delay: 3.0,
+                    },
                 ],
             },
             (2, _) => EnemyDeck {
                 encounter_name: "Heavy Support".to_string(),
                 cards: vec![
-                    EnemyCard { enemy_types: vec![EnemyType::Tank, EnemyType::Healer], count: 2, play_delay: 3.0 },
-                    EnemyCard { enemy_types: vec![EnemyType::Fast, EnemyType::Fast, EnemyType::Healer], count: 2, play_delay: 2.5 },
-                    EnemyCard { enemy_types: vec![EnemyType::Tank], count: 1, play_delay: 2.0 },
+                    EnemyCard {
+                        enemy_types: vec![EnemyType::Tank, EnemyType::Healer],
+                        count: 2,
+                        play_delay: 3.0,
+                    },
+                    EnemyCard {
+                        enemy_types: vec![EnemyType::Fast, EnemyType::Fast, EnemyType::Healer],
+                        count: 2,
+                        play_delay: 2.5,
+                    },
+                    EnemyCard {
+                        enemy_types: vec![EnemyType::Tank],
+                        count: 1,
+                        play_delay: 2.0,
+                    },
                 ],
             },
             _ => EnemyDeck {
                 encounter_name: "Elite Vanguard".to_string(),
                 cards: vec![
-                    EnemyCard { enemy_types: vec![EnemyType::Tank, EnemyType::Flying, EnemyType::Healer], count: 2, play_delay: 3.0 },
-                    EnemyCard { enemy_types: vec![EnemyType::Fast, EnemyType::Flying], count: 2, play_delay: 2.0 },
-                    EnemyCard { enemy_types: vec![EnemyType::Tank, EnemyType::Tank], count: 1, play_delay: 3.5 },
+                    EnemyCard {
+                        enemy_types: vec![EnemyType::Tank, EnemyType::Flying, EnemyType::Healer],
+                        count: 2,
+                        play_delay: 3.0,
+                    },
+                    EnemyCard {
+                        enemy_types: vec![EnemyType::Fast, EnemyType::Flying],
+                        count: 2,
+                        play_delay: 2.0,
+                    },
+                    EnemyCard {
+                        enemy_types: vec![EnemyType::Tank, EnemyType::Tank],
+                        count: 1,
+                        play_delay: 3.5,
+                    },
                 ],
-            }
+            },
         }
     }
 }
 
-fn calculate_card_cost(pattern: &[Option<TowerType>], rarity: CardRarity, tower_configs: &TowerConfigs) -> u32 {
-    let base_cost: u32 = pattern.iter()
+fn calculate_card_cost(
+    pattern: &[Option<TowerType>],
+    rarity: CardRarity,
+    tower_configs: &TowerConfigs,
+) -> u32 {
+    let base_cost: u32 = pattern
+        .iter()
         .filter_map(|&tower_type| tower_type.map(|t| tower_configs.get(t).cost))
         .sum();
 
@@ -1659,21 +1990,30 @@ fn calculate_card_cost(pattern: &[Option<TowerType>], rarity: CardRarity, tower_
     }
 }
 
-fn create_card(world: &mut GameWorld, name: &str, pattern: Vec<Option<TowerType>>, rarity: CardRarity) {
-    let discounted_cost = calculate_card_cost(&pattern, rarity, &world.resources.config.tower_configs);
+fn create_card(
+    world: &mut GameWorld,
+    name: &str,
+    pattern: Vec<Option<TowerType>>,
+    rarity: CardRarity,
+) {
+    let discounted_cost =
+        calculate_card_cost(&pattern, rarity, &world.resources.config.tower_configs);
 
     let entity = world.spawn_entities(CARD, 1)[0];
-    world.set_card(entity, Card {
-        card_index: 0,
-        tower_pattern: pattern,
-        cost: discounted_cost,
-        rarity,
-        name: name.to_string(),
-        in_hand: false,
-        card_state: CardState::InDeck,
-        draw_animation_progress: 0.0,
-        hand_position_index: 0,
-    });
+    world.set_card(
+        entity,
+        Card {
+            card_index: 0,
+            tower_pattern: pattern,
+            cost: discounted_cost,
+            rarity,
+            name: name.to_string(),
+            in_hand: false,
+            card_state: CardState::InDeck,
+            draw_animation_progress: 0.0,
+            hand_position_index: 0,
+        },
+    );
 }
 
 fn create_starter_cards(world: &mut GameWorld) {
@@ -1681,45 +2021,75 @@ fn create_starter_cards(world: &mut GameWorld) {
         (
             "Single Tower",
             vec![
-                None, None, None,
-                None, Some(TowerType::Basic), None,
-                None, None, None,
+                None,
+                None,
+                None,
+                None,
+                Some(TowerType::Basic),
+                None,
+                None,
+                None,
+                None,
             ],
             CardRarity::Common,
         ),
         (
             "Single Tower",
             vec![
-                None, None, None,
-                None, Some(TowerType::Basic), None,
-                None, None, None,
+                None,
+                None,
+                None,
+                None,
+                Some(TowerType::Basic),
+                None,
+                None,
+                None,
+                None,
             ],
             CardRarity::Common,
         ),
         (
             "Single Tower",
             vec![
-                None, None, None,
-                None, Some(TowerType::Basic), None,
-                None, None, None,
+                None,
+                None,
+                None,
+                None,
+                Some(TowerType::Basic),
+                None,
+                None,
+                None,
+                None,
             ],
             CardRarity::Common,
         ),
         (
             "Cross Formation",
             vec![
-                None, Some(TowerType::Basic), None,
-                Some(TowerType::Basic), Some(TowerType::Cannon), Some(TowerType::Basic),
-                None, Some(TowerType::Basic), None,
+                None,
+                Some(TowerType::Basic),
+                None,
+                Some(TowerType::Basic),
+                Some(TowerType::Cannon),
+                Some(TowerType::Basic),
+                None,
+                Some(TowerType::Basic),
+                None,
             ],
             CardRarity::Common,
         ),
         (
             "Frost Line",
             vec![
-                Some(TowerType::Frost), Some(TowerType::Frost), Some(TowerType::Frost),
-                None, None, None,
-                None, None, None,
+                Some(TowerType::Frost),
+                Some(TowerType::Frost),
+                Some(TowerType::Frost),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
             ],
             CardRarity::Common,
         ),
@@ -1733,14 +2103,13 @@ fn create_starter_cards(world: &mut GameWorld) {
 fn add_card_reward(world: &mut GameWorld, node_layer: usize) {
     let all_cards = get_all_card_definitions();
 
-    let available_cards: Vec<_> = all_cards.iter()
-        .filter(|(_, _, rarity)| {
-            match rarity {
-                CardRarity::Common => true,
-                CardRarity::Rare => node_layer >= 3,
-                CardRarity::Epic => node_layer >= 7,
-                CardRarity::Legendary => node_layer >= 12,
-            }
+    let available_cards: Vec<_> = all_cards
+        .iter()
+        .filter(|(_, _, rarity)| match rarity {
+            CardRarity::Common => true,
+            CardRarity::Rare => node_layer >= 3,
+            CardRarity::Epic => node_layer >= 7,
+            CardRarity::Legendary => node_layer >= 12,
         })
         .collect();
 
@@ -1890,7 +2259,8 @@ fn validate_map_connectivity(map_data: &mut MapData) {
 }
 
 fn draw_random_cards(world: &mut GameWorld, count: usize) {
-    let mut deck_cards: Vec<_> = world.query_entities(CARD)
+    let mut deck_cards: Vec<_> = world
+        .query_entities(CARD)
         .filter_map(|entity| {
             world.get_card(entity).and_then(|card| {
                 if card.card_state == CardState::InDeck {
@@ -1904,7 +2274,9 @@ fn draw_random_cards(world: &mut GameWorld, count: usize) {
 
     let mut drawn = 0;
     for _ in 0..count {
-        if drawn >= count || world.resources.card_system.hand_size >= world.resources.card_system.max_hand_size {
+        if drawn >= count
+            || world.resources.card_system.hand_size >= world.resources.card_system.max_hand_size
+        {
             break;
         }
 
@@ -1947,7 +2319,11 @@ fn update_card_animations_wrapper(world: &mut GameWorld) {
     update_card_animations(world, delta_time);
 }
 
-fn get_card_placements(center_x: i32, center_y: i32, pattern: &[Option<TowerType>]) -> Vec<(i32, i32, TowerType)> {
+fn get_card_placements(
+    center_x: i32,
+    center_y: i32,
+    pattern: &[Option<TowerType>],
+) -> Vec<(i32, i32, TowerType)> {
     let mut placements = Vec::new();
 
     for row in 0..3 {
@@ -1980,14 +2356,14 @@ fn can_place_tower_at(world: &GameWorld, x: i32, y: i32) -> bool {
     }
 
     let mut can_place = false;
-    world
-        .query()
-        .with(GRID_CELL)
-        .iter(|_entity, table, index| {
-            if table.grid_cell[index].coord.x == x && table.grid_cell[index].coord.y == y && !table.grid_cell[index].occupied {
-                can_place = true;
-            }
-        });
+    world.query().with(GRID_CELL).iter(|_entity, table, index| {
+        if table.grid_cell[index].coord.x == x
+            && table.grid_cell[index].coord.y == y
+            && !table.grid_cell[index].occupied
+        {
+            can_place = true;
+        }
+    });
     can_place
 }
 
@@ -2007,20 +2383,28 @@ fn mouse_input_system(world: &mut GameWorld) {
     world.resources.ui.mouse_grid_pos = screen_to_grid(mouse_pos);
 
     if is_mouse_button_pressed(MouseButton::Left) {
-        if world.resources.combat.game_state == GameState::WaitingForWave && world.resources.combat.wave == 0 {
+        if world.resources.combat.game_state == GameState::WaitingForWave
+            && world.resources.combat.wave == 0
+        {
             let button_width = 300.0;
             let button_height = 80.0;
             let button_x = (screen_width() - button_width) / 2.0;
             let button_y = screen_height() / 2.0 - button_height / 2.0;
 
-            if mouse_pos.x >= button_x && mouse_pos.x <= button_x + button_width
-                && mouse_pos.y >= button_y && mouse_pos.y <= button_y + button_height {
+            if mouse_pos.x >= button_x
+                && mouse_pos.x <= button_x + button_width
+                && mouse_pos.y >= button_y
+                && mouse_pos.y <= button_y + button_height
+            {
                 let _ = CommandExecutor::execute(GameCommand::StartWave, world);
             }
         }
     }
 
-    if world.resources.combat.game_state == GameState::WaitingForWave && world.resources.combat.wave > 0 && world.resources.combat.wave < 5 {
+    if world.resources.combat.game_state == GameState::WaitingForWave
+        && world.resources.combat.wave > 0
+        && world.resources.combat.wave < 5
+    {
         let _ = CommandExecutor::execute(GameCommand::StartWave, world);
     }
 }
@@ -2036,22 +2420,28 @@ fn card_interaction_system(world: &mut GameWorld) {
         let card_spacing = 10.0;
         let card_y = screen_height() - card_height - 40.0;
 
-        let cards: Vec<_> = world.query_entities(CARD)
-            .filter_map(|entity| world.get_card(entity).and_then(|card| {
-                if card.in_hand {
-                    Some((entity, card.clone()))
-                } else {
-                    None
-                }
-            }))
+        let cards: Vec<_> = world
+            .query_entities(CARD)
+            .filter_map(|entity| {
+                world.get_card(entity).and_then(|card| {
+                    if card.in_hand {
+                        Some((entity, card.clone()))
+                    } else {
+                        None
+                    }
+                })
+            })
             .collect();
 
         let mut clicked_card = None;
         for (card_index, (card_entity, card)) in cards.iter().enumerate() {
             let card_x = 10.0 + card_index as f32 * (card_width + card_spacing);
 
-            if mouse_pos.x >= card_x && mouse_pos.x <= card_x + card_width
-                && mouse_pos.y >= card_y && mouse_pos.y <= card_y + card_height {
+            if mouse_pos.x >= card_x
+                && mouse_pos.x <= card_x + card_width
+                && mouse_pos.y >= card_y
+                && mouse_pos.y <= card_y + card_height
+            {
                 if world.resources.economy.money >= card.cost {
                     clicked_card = Some((card_index, *card_entity));
                 }
@@ -2085,7 +2475,8 @@ fn card_interaction_system(world: &mut GameWorld) {
                                 mark_cell_occupied(world, place_x, place_y);
                             }
 
-                            world.resources.economy.money = world.resources.economy.money.saturating_sub(card.cost);
+                            world.resources.economy.money =
+                                world.resources.economy.money.saturating_sub(card.cost);
                             let pos = grid_to_base(grid_x, grid_y);
                             spawn_money_popup(world, pos, -(card.cost as i32));
                             world.resources.card_system.selected_card = None;
@@ -2094,7 +2485,8 @@ fn card_interaction_system(world: &mut GameWorld) {
                                 used_card.in_hand = false;
                                 used_card.card_state = CardState::InDeck;
                                 used_card.draw_animation_progress = 0.0;
-                                world.resources.card_system.hand_size = world.resources.card_system.hand_size.saturating_sub(1);
+                                world.resources.card_system.hand_size =
+                                    world.resources.card_system.hand_size.saturating_sub(1);
                             }
 
                             draw_random_cards(world, 1);
@@ -2104,12 +2496,12 @@ fn card_interaction_system(world: &mut GameWorld) {
             }
         }
     }
-
 }
 
 fn tower_interaction_system(world: &mut GameWorld) {
     let right_clicked = is_mouse_button_pressed(MouseButton::Right);
-    let upgrade_pressed = is_key_pressed(KeyCode::U) || is_mouse_button_pressed(MouseButton::Middle);
+    let upgrade_pressed =
+        is_key_pressed(KeyCode::U) || is_mouse_button_pressed(MouseButton::Middle);
 
     if right_clicked {
         if let Some((grid_x, grid_y)) = world.resources.ui.mouse_grid_pos {
@@ -2118,7 +2510,9 @@ fn tower_interaction_system(world: &mut GameWorld) {
                 .query()
                 .with(TOWER | GRID_POSITION)
                 .iter(|entity, table, index| {
-                    if table.grid_position[index].coord.x == grid_x && table.grid_position[index].coord.y == grid_y {
+                    if table.grid_position[index].coord.x == grid_x
+                        && table.grid_position[index].coord.y == grid_y
+                    {
                         tower_entity = Some(entity);
                     }
                 });
@@ -2136,7 +2530,9 @@ fn tower_interaction_system(world: &mut GameWorld) {
                 .query()
                 .with(TOWER | GRID_POSITION)
                 .iter(|entity, table, index| {
-                    if table.grid_position[index].coord.x == grid_x && table.grid_position[index].coord.y == grid_y {
+                    if table.grid_position[index].coord.x == grid_x
+                        && table.grid_position[index].coord.y == grid_y
+                    {
                         tower_entity = Some(entity);
                     }
                 });
@@ -2166,7 +2562,10 @@ fn keyboard_input_system(world: &mut GameWorld) {
     }
 
     if is_key_pressed(KeyCode::R) {
-        if matches!(world.resources.combat.game_state, GameState::GameOver | GameState::Victory) {
+        if matches!(
+            world.resources.combat.game_state,
+            GameState::GameOver | GameState::Victory
+        ) {
             restart_game(world);
         }
     }
@@ -2214,7 +2613,11 @@ fn enemy_deck_system(world: &mut GameWorld, delta_time: f32) {
 
     world.resources.combat.enemy_deck_play_timer += delta_time;
 
-    let cards_to_play: Vec<_> = world.resources.combat.enemy_deck.iter()
+    let cards_to_play: Vec<_> = world
+        .resources
+        .combat
+        .enemy_deck
+        .iter()
         .filter(|card| card.play_delay <= world.resources.combat.enemy_deck_play_timer)
         .cloned()
         .collect();
@@ -2227,7 +2630,11 @@ fn enemy_deck_system(world: &mut GameWorld, delta_time: f32) {
         }
     }
 
-    world.resources.combat.enemy_deck.retain(|card| card.play_delay > world.resources.combat.enemy_deck_play_timer);
+    world
+        .resources
+        .combat
+        .enemy_deck
+        .retain(|card| card.play_delay > world.resources.combat.enemy_deck_play_timer);
 
     let enemy_count = world.query_entities(ENEMY).count();
 
@@ -2333,7 +2740,11 @@ fn enemy_movement_system(world: &mut GameWorld, delta_time: f32) {
         let mut path_index = path_follower.path_index;
         let mut path_progress = path_follower.path_progress;
 
-        let speed_multiplier = if status_effects.slow_duration > 0.0 { 0.5 } else { 1.0 };
+        let speed_multiplier = if status_effects.slow_duration > 0.0 {
+            0.5
+        } else {
+            1.0
+        };
         let speed = speed_comp.base_speed * speed_multiplier;
 
         path_progress += speed * delta_time;
@@ -2350,10 +2761,7 @@ fn enemy_movement_system(world: &mut GameWorld, delta_time: f32) {
                 if path_index >= path.len() - 1 {
                     enemies_to_remove.push(entity);
                     hp_damage += 1;
-                    world.send_enemy_reached_end(EnemyReachedEndEvent {
-                        entity,
-                        damage: 1,
-                    });
+                    world.send_enemy_reached_end(EnemyReachedEndEvent { entity, damage: 1 });
                     continue;
                 }
             }
@@ -2440,21 +2848,40 @@ fn tower_targeting_system(world: &mut GameWorld) {
         .query()
         .with(ENEMY | POSITION | ENEMY_DATA)
         .iter(|entity, table, index| {
-            enemy_data.push((entity, table.position[index].0, table.enemy_data[index].is_flying));
+            enemy_data.push((
+                entity,
+                table.position[index].0,
+                table.enemy_data[index].is_flying,
+            ));
         });
 
     let tower_entities: Vec<_> = world.query_entities(TOWER | POSITION).collect();
     for tower_entity in tower_entities {
         let tower_data = world.get_tower(tower_entity).unwrap();
         let tower_pos = world.get_position(tower_entity).unwrap().0;
-        let tower_stats = world.resources.config.tower_configs.get(tower_data.tower_type);
+        let tower_stats = world
+            .resources
+            .config
+            .tower_configs
+            .get(tower_data.tower_type);
         let mut range = tower_stats.range(tower_data.level);
 
-        if world.resources.economy.owned_relics.contains(&RelicType::RangeExtender) {
+        if world
+            .resources
+            .economy
+            .owned_relics
+            .contains(&RelicType::RangeExtender)
+        {
             range *= 1.2;
         }
 
-        if tower_data.tower_type == TowerType::Sniper && world.resources.economy.owned_relics.contains(&RelicType::SniperNest) {
+        if tower_data.tower_type == TowerType::Sniper
+            && world
+                .resources
+                .economy
+                .owned_relics
+                .contains(&RelicType::SniperNest)
+        {
             range *= 1.5;
         }
 
@@ -2485,10 +2912,20 @@ fn tower_targeting_system(world: &mut GameWorld) {
 fn tower_shooting_system(world: &mut GameWorld, delta_time: f32) {
     let mut projectiles_to_spawn = Vec::new();
 
-    let has_double_tap = world.resources.economy.owned_relics.contains(&RelicType::DoubleTap);
-    let has_rapid_fire = world.resources.economy.owned_relics.contains(&RelicType::RapidFire);
+    let has_double_tap = world
+        .resources
+        .economy
+        .owned_relics
+        .contains(&RelicType::DoubleTap);
+    let has_rapid_fire = world
+        .resources
+        .economy
+        .owned_relics
+        .contains(&RelicType::RapidFire);
 
-    let tower_entities: Vec<_> = world.query_entities(TOWER | POSITION | COOLDOWN | ANIMATION | TARGETING).collect();
+    let tower_entities: Vec<_> = world
+        .query_entities(TOWER | POSITION | COOLDOWN | ANIMATION | TARGETING)
+        .collect();
     for entity in tower_entities {
         let tower_pos = world.get_position(entity).unwrap().0;
         let tower_type = world.get_tower(entity).unwrap().tower_type;
@@ -2514,10 +2951,20 @@ fn tower_shooting_system(world: &mut GameWorld, delta_time: f32) {
             };
 
             if can_fire {
-                projectiles_to_spawn.push((tower_pos, target_position.unwrap(), tower_type, tower_level));
+                projectiles_to_spawn.push((
+                    tower_pos,
+                    target_position.unwrap(),
+                    tower_type,
+                    tower_level,
+                ));
 
                 if has_double_tap {
-                    projectiles_to_spawn.push((tower_pos, target_position.unwrap(), tower_type, tower_level));
+                    projectiles_to_spawn.push((
+                        tower_pos,
+                        target_position.unwrap(),
+                        tower_type,
+                        tower_level,
+                    ));
                 }
 
                 let tower_stats = world.resources.config.tower_configs.get(tower_type);
@@ -2547,17 +2994,8 @@ fn tower_shooting_system(world: &mut GameWorld, delta_time: f32) {
 
         if tower_type == TowerType::Cannon {
             for _ in 0..6 {
-                let offset = Vec2::new(
-                    rand::gen_range(-5.0, 5.0),
-                    rand::gen_range(-5.0, 5.0),
-                );
-                spawn_visual_effect(
-                    world,
-                    from + offset,
-                    EffectType::Explosion,
-                    Vec2::ZERO,
-                    0.3,
-                );
+                let offset = Vec2::new(rand::gen_range(-5.0, 5.0), rand::gen_range(-5.0, 5.0));
+                spawn_visual_effect(world, from + offset, EffectType::Explosion, Vec2::ZERO, 0.3);
             }
         }
     }
@@ -2585,7 +3023,8 @@ fn projectile_movement_system(world: &mut GameWorld, delta_time: f32) {
         let distance_to_target = (target_pos - old_pos).length();
 
         let new_pos = if projectile_comp.arc_height > 0.0 {
-            projectile_comp.flight_progress += (projectile_comp.speed * delta_time) / total_distance;
+            projectile_comp.flight_progress +=
+                (projectile_comp.speed * delta_time) / total_distance;
             projectile_comp.flight_progress = projectile_comp.flight_progress.min(1.0);
 
             let horizontal_pos = projectile_comp.start_position
@@ -2608,7 +3047,12 @@ fn projectile_movement_system(world: &mut GameWorld, delta_time: f32) {
             }
 
             if let Some((enemy_entity, enemy_pos)) = hit_enemy {
-                hits.push((enemy_entity, projectile_comp.damage, projectile_comp.tower_type, enemy_pos));
+                hits.push((
+                    enemy_entity,
+                    projectile_comp.damage,
+                    projectile_comp.tower_type,
+                    enemy_pos,
+                ));
                 world.send_projectile_hit(ProjectileHitEvent {
                     projectile: projectile_entity,
                     target: enemy_entity,
@@ -2640,54 +3084,50 @@ fn projectile_movement_system(world: &mut GameWorld, delta_time: f32) {
                     effects.slow_duration = 2.0;
                     effects.slow_factor = 0.5;
                 }
-                world.send_damage(DamageEvent { target: enemy_entity, damage });
+                world.send_damage(DamageEvent {
+                    target: enemy_entity,
+                    damage,
+                });
             }
             TowerType::Poison => {
                 if let Some(effects) = world.get_status_effects_mut(enemy_entity) {
                     effects.poison_duration = 3.0;
                     effects.poison_damage_per_second = 5.0;
                 }
-                world.send_damage(DamageEvent { target: enemy_entity, damage });
+                world.send_damage(DamageEvent {
+                    target: enemy_entity,
+                    damage,
+                });
 
                 for _ in 0..3 {
-                    let velocity = Vec2::new(
-                        rand::gen_range(-20.0, 20.0),
-                        rand::gen_range(-20.0, 20.0),
-                    );
-                    spawn_visual_effect(
-                        world,
-                        hit_pos,
-                        EffectType::PoisonBubble,
-                        velocity,
-                        2.0,
-                    );
+                    let velocity =
+                        Vec2::new(rand::gen_range(-20.0, 20.0), rand::gen_range(-20.0, 20.0));
+                    spawn_visual_effect(world, hit_pos, EffectType::PoisonBubble, velocity, 2.0);
                 }
             }
             TowerType::Cannon => {
                 for _ in 0..8 {
-                    let velocity = Vec2::new(
-                        rand::gen_range(-30.0, 30.0),
-                        rand::gen_range(-30.0, 30.0),
-                    );
-                    spawn_visual_effect(
-                        world,
-                        hit_pos,
-                        EffectType::Explosion,
-                        velocity,
-                        0.5,
-                    );
+                    let velocity =
+                        Vec2::new(rand::gen_range(-30.0, 30.0), rand::gen_range(-30.0, 30.0));
+                    spawn_visual_effect(world, hit_pos, EffectType::Explosion, velocity, 0.5);
                 }
 
                 for &(enemy_entity, enemy_pos) in &enemy_data {
                     let distance = (enemy_pos - hit_pos).length();
                     if distance < 60.0 {
                         let damage_falloff = 1.0 - (distance / 60.0);
-                        world.send_damage(DamageEvent { target: enemy_entity, damage: damage * damage_falloff });
+                        world.send_damage(DamageEvent {
+                            target: enemy_entity,
+                            damage: damage * damage_falloff,
+                        });
                     }
                 }
             }
             _ => {
-                world.send_damage(DamageEvent { target: enemy_entity, damage });
+                world.send_damage(DamageEvent {
+                    target: enemy_entity,
+                    damage,
+                });
             }
         }
     }
@@ -2700,9 +3140,21 @@ fn projectile_movement_system(world: &mut GameWorld, delta_time: f32) {
 }
 
 fn damage_handler_system(world: &mut GameWorld) {
-    let has_overcharge = world.resources.economy.owned_relics.contains(&RelicType::Overcharge);
-    let has_critical_strike = world.resources.economy.owned_relics.contains(&RelicType::CriticalStrike);
-    let has_golden_touch = world.resources.economy.owned_relics.contains(&RelicType::GoldenTouch);
+    let has_overcharge = world
+        .resources
+        .economy
+        .owned_relics
+        .contains(&RelicType::Overcharge);
+    let has_critical_strike = world
+        .resources
+        .economy
+        .owned_relics
+        .contains(&RelicType::CriticalStrike);
+    let has_golden_touch = world
+        .resources
+        .economy
+        .owned_relics
+        .contains(&RelicType::GoldenTouch);
 
     for event in world.collect_damage() {
         let mut should_remove = false;
@@ -2803,8 +3255,12 @@ fn update_money_popups(world: &mut GameWorld, delta_time: f32) {
     world.apply_commands();
 }
 
-
-fn upgrade_tower(world: &mut GameWorld, tower_entity: freecs::Entity, grid_x: i32, grid_y: i32) -> bool {
+fn upgrade_tower(
+    world: &mut GameWorld,
+    tower_entity: freecs::Entity,
+    grid_x: i32,
+    grid_y: i32,
+) -> bool {
     if let Some(tower) = world.get_tower(tower_entity) {
         let current_level = tower.level;
         if current_level >= 4 {
@@ -2863,16 +3319,20 @@ fn sell_tower(world: &mut GameWorld, tower_entity: freecs::Entity, grid_x: i32, 
             .query_mut()
             .with(GRID_CELL)
             .iter(|_entity, table, index| {
-                if table.grid_cell[index].coord.x == grid_x && table.grid_cell[index].coord.y == grid_y {
+                if table.grid_cell[index].coord.x == grid_x
+                    && table.grid_cell[index].coord.y == grid_y
+                {
                     table.grid_cell[index].occupied = false;
                 }
             });
 
         let grid_coord = GridCoord::new(grid_x, grid_y);
-        let range_indicators_to_remove: Vec<_> = world.query_entities(RANGE_INDICATOR)
+        let range_indicators_to_remove: Vec<_> = world
+            .query_entities(RANGE_INDICATOR)
             .into_iter()
             .filter_map(|range_entity| {
-                world.get_range_indicator(range_entity)
+                world
+                    .get_range_indicator(range_entity)
                     .filter(|indicator| indicator.tower_grid_coord == grid_coord)
                     .map(|_| range_entity)
             })
@@ -2913,7 +3373,8 @@ fn restart_game(world: &mut GameWorld) {
         world.queue_despawn_entity(entity);
     }
 
-    let range_indicators_to_remove: Vec<_> = world.query_entities(RANGE_INDICATOR).into_iter().collect();
+    let range_indicators_to_remove: Vec<_> =
+        world.query_entities(RANGE_INDICATOR).into_iter().collect();
     for entity in range_indicators_to_remove {
         world.queue_despawn_entity(entity);
     }
@@ -2982,7 +3443,8 @@ fn render_grid(world: &GameWorld) {
 
     if let Some((grid_x, grid_y)) = world.resources.ui.mouse_grid_pos {
         if let Some(selected_card_index) = world.resources.card_system.selected_card {
-            let cards_in_hand: Vec<_> = world.query_entities(CARD)
+            let cards_in_hand: Vec<_> = world
+                .query_entities(CARD)
                 .filter_map(|entity| {
                     world.get_card(entity).and_then(|card| {
                         if card.card_state == CardState::InHand {
@@ -3011,14 +3473,27 @@ fn render_grid(world: &GameWorld) {
                     if all_placeable {
                         let tower_size = 20.0 * scale;
                         let tower_color = tower_type.color();
-                        let preview_color = Color::new(tower_color.r, tower_color.g, tower_color.b, 0.5);
+                        let preview_color =
+                            Color::new(tower_color.r, tower_color.g, tower_color.b, 0.5);
 
                         draw_circle(pos.x, pos.y, tower_size / 2.0, preview_color);
-                        draw_circle_lines(pos.x, pos.y, tower_size / 2.0, 2.0, Color::new(tower_color.r, tower_color.g, tower_color.b, 0.7));
+                        draw_circle_lines(
+                            pos.x,
+                            pos.y,
+                            tower_size / 2.0,
+                            2.0,
+                            Color::new(tower_color.r, tower_color.g, tower_color.b, 0.7),
+                        );
 
                         let tower_stats = world.resources.config.tower_configs.get(*tower_type);
                         let range = tower_stats.range(1);
-                        draw_circle_lines(pos.x, pos.y, range * scale, 1.5, Color::new(tower_color.r, tower_color.g, tower_color.b, 0.3));
+                        draw_circle_lines(
+                            pos.x,
+                            pos.y,
+                            range * scale,
+                            1.5,
+                            Color::new(tower_color.r, tower_color.g, tower_color.b, 0.3),
+                        );
                     } else {
                         let preview_color = Color::new(1.0, 0.0, 0.0, 0.3);
                         draw_rectangle(
@@ -3047,10 +3522,7 @@ fn render_towers(world: &GameWorld) {
             let animation = &table.animation[index];
             let targeting = &table.targeting[index];
             let pos = &table.position[index];
-            let screen_pos = Vec2::new(
-                offset.x + pos.0.x * scale,
-                offset.y + pos.0.y * scale,
-            );
+            let screen_pos = Vec2::new(offset.x + pos.0.x * scale, offset.y + pos.0.y * scale);
 
             let base_size = 20.0 + animation.fire_animation * 4.0;
             let size = base_size * (1.0 + 0.15 * (tower.level - 1) as f32) * scale;
@@ -3078,7 +3550,14 @@ fn render_towers(world: &GameWorld) {
                         offset.x + target_pos.x * scale,
                         offset.y + target_pos.y * scale,
                     );
-                    draw_line(screen_pos.x, screen_pos.y, target_screen_pos.x, target_screen_pos.y, 2.0, RED);
+                    draw_line(
+                        screen_pos.x,
+                        screen_pos.y,
+                        target_screen_pos.x,
+                        target_screen_pos.y,
+                        2.0,
+                        RED,
+                    );
                 }
             }
         });
@@ -3089,29 +3568,50 @@ fn render_towers(world: &GameWorld) {
             .query()
             .with(TOWER | GRID_POSITION | POSITION | TARGETING)
             .iter(|_entity, table, index| {
-                if table.grid_position[index].coord.x == grid_x && table.grid_position[index].coord.y == grid_y {
-                    tower_data = Some((table.tower[index], table.position[index], table.targeting[index]));
+                if table.grid_position[index].coord.x == grid_x
+                    && table.grid_position[index].coord.y == grid_y
+                {
+                    tower_data = Some((
+                        table.tower[index],
+                        table.position[index],
+                        table.targeting[index],
+                    ));
                 }
             });
 
         if let Some((tower, pos, targeting)) = tower_data {
-            let screen_pos = Vec2::new(
-                offset.x + pos.0.x * scale,
-                offset.y + pos.0.y * scale,
-            );
+            let screen_pos = Vec2::new(offset.x + pos.0.x * scale, offset.y + pos.0.y * scale);
 
             let tower_stats = world.resources.config.tower_configs.get(tower.tower_type);
             let range = tower_stats.range(tower.level);
-            draw_circle_lines(screen_pos.x, screen_pos.y, range * scale, 2.0, tower.tower_type.color());
+            draw_circle_lines(
+                screen_pos.x,
+                screen_pos.y,
+                range * scale,
+                2.0,
+                tower.tower_type.color(),
+            );
 
             if tower.level < 4 {
                 let upgrade_cost = tower_stats.upgrade_cost(tower.level);
                 let text = format!("U: Upgrade (${}) Lv{}", upgrade_cost, tower.level);
                 let can_afford = world.resources.economy.money >= upgrade_cost;
                 let text_color = if can_afford { GREEN } else { RED };
-                draw_text(&text, screen_pos.x - 60.0 * scale, screen_pos.y - 35.0 * scale, 20.0 * scale, text_color);
+                draw_text(
+                    &text,
+                    screen_pos.x - 60.0 * scale,
+                    screen_pos.y - 35.0 * scale,
+                    20.0 * scale,
+                    text_color,
+                );
             } else {
-                draw_text("MAX LEVEL", screen_pos.x - 40.0 * scale, screen_pos.y - 35.0 * scale, 20.0 * scale, GOLD);
+                draw_text(
+                    "MAX LEVEL",
+                    screen_pos.x - 40.0 * scale,
+                    screen_pos.y - 35.0 * scale,
+                    20.0 * scale,
+                    GOLD,
+                );
             }
 
             if let Some(target_pos) = targeting.target_position {
@@ -3119,7 +3619,14 @@ fn render_towers(world: &GameWorld) {
                     offset.x + target_pos.x * scale,
                     offset.y + target_pos.y * scale,
                 );
-                draw_line(screen_pos.x, screen_pos.y, target_screen_pos.x, target_screen_pos.y, 2.0, RED);
+                draw_line(
+                    screen_pos.x,
+                    screen_pos.y,
+                    target_screen_pos.x,
+                    target_screen_pos.y,
+                    2.0,
+                    RED,
+                );
             }
         }
     }
@@ -3136,13 +3643,19 @@ fn render_enemies(world: &GameWorld) {
             let enemy_data = &table.enemy_data[index];
             let health = &table.health[index];
             let pos = &table.position[index];
-            let screen_pos = Vec2::new(
-                offset.x + pos.0.x * scale,
-                offset.y + pos.0.y * scale,
-            );
-            let enemy_stats = world.resources.config.enemy_configs.get(enemy_data.enemy_type);
+            let screen_pos = Vec2::new(offset.x + pos.0.x * scale, offset.y + pos.0.y * scale);
+            let enemy_stats = world
+                .resources
+                .config
+                .enemy_configs
+                .get(enemy_data.enemy_type);
             let size = enemy_stats.size * scale;
-            draw_circle(screen_pos.x, screen_pos.y, size, enemy_data.enemy_type.color());
+            draw_circle(
+                screen_pos.x,
+                screen_pos.y,
+                size,
+                enemy_data.enemy_type.color(),
+            );
             draw_circle_lines(screen_pos.x, screen_pos.y, size, 2.0, BLACK);
 
             if health.shield_current > 0.0 {
@@ -3197,10 +3710,7 @@ fn render_projectiles(world: &GameWorld) {
         .iter(|_entity, table, index| {
             let projectile = &table.projectile[index];
             let pos = &table.position[index];
-            let screen_pos = Vec2::new(
-                offset.x + pos.0.x * scale,
-                offset.y + pos.0.y * scale,
-            );
+            let screen_pos = Vec2::new(offset.x + pos.0.x * scale, offset.y + pos.0.y * scale);
             let color = match projectile.tower_type {
                 TowerType::Basic => YELLOW,
                 TowerType::Frost => SKYBLUE,
@@ -3229,10 +3739,7 @@ fn render_visual_effects(world: &GameWorld) {
         .iter(|_entity, table, index| {
             let effect = &table.visual_effect[index];
             let pos = &table.position[index];
-            let screen_pos = Vec2::new(
-                offset.x + pos.0.x * scale,
-                offset.y + pos.0.y * scale,
-            );
+            let screen_pos = Vec2::new(offset.x + pos.0.x * scale, offset.y + pos.0.y * scale);
             let progress = effect.age / effect.lifetime;
             let alpha = 1.0 - progress;
 
@@ -3278,10 +3785,7 @@ fn render_money_popups(world: &GameWorld) {
         .iter(|_entity, table, index| {
             let popup = &table.money_popup[index];
             let pos = &table.position[index];
-            let screen_pos = Vec2::new(
-                offset.x + pos.0.x * scale,
-                offset.y + pos.0.y * scale,
-            );
+            let screen_pos = Vec2::new(offset.x + pos.0.x * scale, offset.y + pos.0.y * scale);
             let progress = popup.lifetime / 2.0;
             let alpha = 1.0 - progress.min(1.0);
             let text_scale = 1.0 + progress * 0.5;
@@ -3313,10 +3817,7 @@ fn enemy_died_event_handler(world: &mut GameWorld) {
         world.resources.economy.money += event.reward;
 
         for _ in 0..6 {
-            let velocity = Vec2::new(
-                rand::gen_range(-40.0, 40.0),
-                rand::gen_range(-40.0, 40.0),
-            );
+            let velocity = Vec2::new(rand::gen_range(-40.0, 40.0), rand::gen_range(-40.0, 40.0));
             spawn_visual_effect(
                 world,
                 event.position,
@@ -3333,8 +3834,7 @@ fn enemy_died_event_handler(world: &mut GameWorld) {
 }
 
 fn health_bar_update_system(world: &mut GameWorld) {
-    world.for_each_mut_changed(ENEMY, 0, |_entity, _table, _idx| {
-    });
+    world.for_each_mut_changed(ENEMY, 0, |_entity, _table, _idx| {});
 }
 
 fn get_pattern_bounds(pattern: &[Option<TowerType>]) -> (usize, usize, usize, usize) {
@@ -3358,7 +3858,15 @@ fn get_pattern_bounds(pattern: &[Option<TowerType>]) -> (usize, usize, usize, us
     (min_row, max_row, min_col, max_col)
 }
 
-fn render_card_preview(card: &Card, display_x: f32, display_y: f32, display_width: f32, display_height: f32, is_selected: bool, can_afford: bool) {
+fn render_card_preview(
+    card: &Card,
+    display_x: f32,
+    display_y: f32,
+    display_width: f32,
+    display_height: f32,
+    is_selected: bool,
+    can_afford: bool,
+) {
     let card_color = if is_selected {
         Color::new(0.9, 0.9, 0.6, 1.0)
     } else if can_afford {
@@ -3367,10 +3875,22 @@ fn render_card_preview(card: &Card, display_x: f32, display_y: f32, display_widt
         Color::new(0.15, 0.15, 0.15, 1.0)
     };
 
-    draw_rectangle(display_x, display_y, display_width, display_height, card_color);
+    draw_rectangle(
+        display_x,
+        display_y,
+        display_width,
+        display_height,
+        card_color,
+    );
 
     if !can_afford {
-        draw_rectangle(display_x, display_y, display_width, display_height, Color::new(0.0, 0.0, 0.0, 0.6));
+        draw_rectangle(
+            display_x,
+            display_y,
+            display_width,
+            display_height,
+            Color::new(0.0, 0.0, 0.0, 0.6),
+        );
     }
 
     let border_thickness = if is_selected { 4.0 } else { 3.0 };
@@ -3379,7 +3899,14 @@ fn render_card_preview(card: &Card, display_x: f32, display_y: f32, display_widt
     } else {
         card.rarity.color()
     };
-    draw_rectangle_lines(display_x, display_y, display_width, display_height, border_thickness, border_color);
+    draw_rectangle_lines(
+        display_x,
+        display_y,
+        display_width,
+        display_height,
+        border_thickness,
+        border_color,
+    );
 
     let name_y = display_y + 15.0 * (display_height / 160.0);
     let name_size = 14.0 * (display_height / 160.0);
@@ -3411,13 +3938,25 @@ fn render_card_preview(card: &Card, display_x: f32, display_y: f32, display_widt
             let cell_x = grid_start_x + display_col as f32 * cell_size;
             let cell_y = grid_start_y + display_row as f32 * cell_size;
 
-            draw_rectangle_lines(cell_x, cell_y, cell_size, cell_size, 1.0 * (display_height / 160.0), Color::new(0.5, 0.5, 0.5, 0.5));
+            draw_rectangle_lines(
+                cell_x,
+                cell_y,
+                cell_size,
+                cell_size,
+                1.0 * (display_height / 160.0),
+                Color::new(0.5, 0.5, 0.5, 0.5),
+            );
 
             if let Some(Some(tower_type)) = card.tower_pattern.get(pattern_index) {
                 let tower_size = cell_size * 0.6;
                 let tower_color = if !can_afford {
                     let base_color = tower_type.color();
-                    Color::new(base_color.r * 0.4, base_color.g * 0.4, base_color.b * 0.4, 1.0)
+                    Color::new(
+                        base_color.r * 0.4,
+                        base_color.g * 0.4,
+                        base_color.b * 0.4,
+                        1.0,
+                    )
                 } else {
                     tower_type.color()
                 };
@@ -3425,7 +3964,7 @@ fn render_card_preview(card: &Card, display_x: f32, display_y: f32, display_widt
                     cell_x + cell_size / 2.0,
                     cell_y + cell_size / 2.0,
                     tower_size / 2.0,
-                    tower_color
+                    tower_color,
                 );
             }
         }
@@ -3442,7 +3981,13 @@ fn render_card_preview(card: &Card, display_x: f32, display_y: f32, display_widt
         let bg_height = cost_size + 2.0;
         let bg_x = display_x + 3.0;
         let bg_y = cost_y - cost_size;
-        draw_rectangle(bg_x, bg_y, bg_width, bg_height, Color::new(0.3, 0.0, 0.0, 0.8));
+        draw_rectangle(
+            bg_x,
+            bg_y,
+            bg_width,
+            bg_height,
+            Color::new(0.3, 0.0, 0.0, 0.8),
+        );
         draw_text(&cost_text, display_x + 5.0, cost_y, cost_size, RED);
     }
 
@@ -3459,7 +4004,13 @@ fn render_card_preview(card: &Card, display_x: f32, display_y: f32, display_widt
     } else {
         card.rarity.color()
     };
-    draw_text(rarity_text, display_x + 5.0, rarity_y, rarity_size, rarity_color);
+    draw_text(
+        rarity_text,
+        display_x + 5.0,
+        rarity_y,
+        rarity_size,
+        rarity_color,
+    );
 }
 
 fn render_cards(world: &GameWorld) {
@@ -3473,7 +4024,8 @@ fn render_cards(world: &GameWorld) {
     let deck_x = screen_width() - card_width - 20.0;
     let deck_y = screen_height() - card_height - 40.0;
 
-    let deck_count = world.query_entities(CARD)
+    let deck_count = world
+        .query_entities(CARD)
         .filter(|entity| {
             if let Some(card) = world.get_card(*entity) {
                 card.card_state == CardState::InDeck
@@ -3483,11 +4035,37 @@ fn render_cards(world: &GameWorld) {
         })
         .count();
 
-    draw_rectangle(deck_x, deck_y, card_width, card_height, Color::new(0.2, 0.2, 0.3, 1.0));
-    draw_rectangle_lines(deck_x, deck_y, card_width, card_height, 3.0, Color::new(0.6, 0.6, 0.7, 1.0));
+    draw_rectangle(
+        deck_x,
+        deck_y,
+        card_width,
+        card_height,
+        Color::new(0.2, 0.2, 0.3, 1.0),
+    );
+    draw_rectangle_lines(
+        deck_x,
+        deck_y,
+        card_width,
+        card_height,
+        3.0,
+        Color::new(0.6, 0.6, 0.7, 1.0),
+    );
 
-    draw_rectangle(deck_x + 3.0, deck_y - 3.0, card_width, card_height, Color::new(0.15, 0.15, 0.25, 1.0));
-    draw_rectangle_lines(deck_x + 3.0, deck_y - 3.0, card_width, card_height, 2.0, Color::new(0.5, 0.5, 0.6, 1.0));
+    draw_rectangle(
+        deck_x + 3.0,
+        deck_y - 3.0,
+        card_width,
+        card_height,
+        Color::new(0.15, 0.15, 0.25, 1.0),
+    );
+    draw_rectangle_lines(
+        deck_x + 3.0,
+        deck_y - 3.0,
+        card_width,
+        card_height,
+        2.0,
+        Color::new(0.5, 0.5, 0.6, 1.0),
+    );
 
     let deck_text = format!("{}", deck_count);
     let text_size = 60.0;
@@ -3497,10 +4075,11 @@ fn render_cards(world: &GameWorld) {
         deck_x + (card_width - text_dimensions.width) / 2.0,
         deck_y + card_height / 2.0 + text_dimensions.height / 2.0,
         text_size,
-        WHITE
+        WHITE,
     );
 
-    let all_cards: Vec<_> = world.query_entities(CARD)
+    let all_cards: Vec<_> = world
+        .query_entities(CARD)
         .filter_map(|entity| world.get_card(entity).map(|card| (entity, card.clone())))
         .collect();
 
@@ -3516,19 +4095,30 @@ fn render_cards(world: &GameWorld) {
             let current_y = start_y + (target_y - start_y) * progress;
 
             let can_afford = world.resources.economy.money >= card.cost;
-            render_card_preview(&card, current_x, current_y, card_width, card_height, false, can_afford);
+            render_card_preview(
+                &card,
+                current_x,
+                current_y,
+                card_width,
+                card_height,
+                false,
+                can_afford,
+            );
         }
     }
 
-    let cards_in_hand: Vec<_> = all_cards.iter()
+    let cards_in_hand: Vec<_> = all_cards
+        .iter()
         .filter(|(_entity, card)| card.card_state == CardState::InHand)
         .collect();
 
     for (card_index, (_entity, card)) in cards_in_hand.iter().enumerate() {
         let card_x = 10.0 + card_index as f32 * (card_width + card_spacing);
 
-        let is_hovered = mouse_pos.x >= card_x && mouse_pos.x <= card_x + card_width
-            && mouse_pos.y >= card_y && mouse_pos.y <= card_y + card_height;
+        let is_hovered = mouse_pos.x >= card_x
+            && mouse_pos.x <= card_x + card_width
+            && mouse_pos.y >= card_y
+            && mouse_pos.y <= card_y + card_height;
 
         if shift_held && is_hovered {
             continue;
@@ -3544,10 +4134,23 @@ fn render_cards(world: &GameWorld) {
 
         let can_afford = world.resources.economy.money >= card.cost;
 
-        render_card_preview(&card, display_x, display_y, display_width, display_height, is_selected, can_afford);
+        render_card_preview(
+            &card,
+            display_x,
+            display_y,
+            display_width,
+            display_height,
+            is_selected,
+            can_afford,
+        );
     }
 
-    let hand_info = format!("Hand: {}/{} | Deck: {}", world.resources.card_system.hand_size, world.resources.card_system.max_hand_size, deck_count);
+    let hand_info = format!(
+        "Hand: {}/{} | Deck: {}",
+        world.resources.card_system.hand_size,
+        world.resources.card_system.max_hand_size,
+        deck_count
+    );
     draw_text(&hand_info, 10.0, screen_height() - 15.0, 20.0, WHITE);
 }
 
@@ -3564,14 +4167,17 @@ fn render_card_preview_overlay(world: &GameWorld) {
     let card_y = screen_height() - card_height - 40.0;
     let mouse_pos = Vec2::new(mouse_position().0, mouse_position().1);
 
-    let cards: Vec<_> = world.query_entities(CARD)
-        .filter_map(|entity| world.get_card(entity).and_then(|card| {
-            if card.in_hand {
-                Some((entity, card.clone()))
-            } else {
-                None
-            }
-        }))
+    let cards: Vec<_> = world
+        .query_entities(CARD)
+        .filter_map(|entity| {
+            world.get_card(entity).and_then(|card| {
+                if card.in_hand {
+                    Some((entity, card.clone()))
+                } else {
+                    None
+                }
+            })
+        })
         .collect();
 
     let mut hovered_card_index = None;
@@ -3579,8 +4185,10 @@ fn render_card_preview_overlay(world: &GameWorld) {
     for (card_index, (_entity, _card)) in cards.iter().enumerate() {
         let card_x = 10.0 + card_index as f32 * (card_width + card_spacing);
 
-        let is_hovered = mouse_pos.x >= card_x && mouse_pos.x <= card_x + card_width
-            && mouse_pos.y >= card_y && mouse_pos.y <= card_y + card_height;
+        let is_hovered = mouse_pos.x >= card_x
+            && mouse_pos.x <= card_x + card_width
+            && mouse_pos.y >= card_y
+            && mouse_pos.y <= card_y + card_height;
 
         if is_hovered {
             hovered_card_index = Some(card_index);
@@ -3590,7 +4198,13 @@ fn render_card_preview_overlay(world: &GameWorld) {
 
     if let Some(hovered_index) = hovered_card_index {
         if let Some((_entity, card)) = cards.get(hovered_index) {
-            draw_rectangle(0.0, 0.0, screen_width(), screen_height(), Color::new(0.0, 0.0, 0.0, 0.8));
+            draw_rectangle(
+                0.0,
+                0.0,
+                screen_width(),
+                screen_height(),
+                Color::new(0.0, 0.0, 0.0, 0.8),
+            );
 
             let preview_width = 400.0;
             let preview_height = 533.0;
@@ -3600,7 +4214,15 @@ fn render_card_preview_overlay(world: &GameWorld) {
             let can_afford = world.resources.economy.money >= card.cost;
             let is_selected = world.resources.card_system.selected_card == Some(hovered_index);
 
-            render_card_preview(&card, preview_x, preview_y, preview_width, preview_height, is_selected, can_afford);
+            render_card_preview(
+                &card,
+                preview_x,
+                preview_y,
+                preview_width,
+                preview_height,
+                is_selected,
+                can_afford,
+            );
         }
     }
 }
@@ -3699,14 +4321,27 @@ fn render_map(world: &GameWorld) {
 }
 
 fn render_deck_view(world: &GameWorld) {
-    draw_rectangle(0.0, 0.0, screen_width(), screen_height(), Color::new(0.1, 0.1, 0.1, 0.95));
+    draw_rectangle(
+        0.0,
+        0.0,
+        screen_width(),
+        screen_height(),
+        Color::new(0.1, 0.1, 0.1, 0.95),
+    );
 
     let title = "DECK VIEW";
     let title_size = 50.0;
     let title_dims = measure_text(title, None, title_size as u16, 1.0);
-    draw_text(title, (screen_width() - title_dims.width) / 2.0, 60.0, title_size, WHITE);
+    draw_text(
+        title,
+        (screen_width() - title_dims.width) / 2.0,
+        60.0,
+        title_size,
+        WHITE,
+    );
 
-    let all_cards: Vec<_> = world.query_entities(CARD)
+    let all_cards: Vec<_> = world
+        .query_entities(CARD)
         .filter_map(|entity| world.get_card(entity).map(|card| card.clone()))
         .collect();
 
@@ -3714,7 +4349,8 @@ fn render_deck_view(world: &GameWorld) {
     for card in all_cards.iter() {
         let mut found = false;
         for (existing_card, count) in card_counts.iter_mut() {
-            if existing_card.name == card.name && existing_card.tower_pattern == card.tower_pattern {
+            if existing_card.name == card.name && existing_card.tower_pattern == card.tower_pattern
+            {
                 *count += 1;
                 found = true;
                 break;
@@ -3730,7 +4366,9 @@ fn render_deck_view(world: &GameWorld) {
     let card_spacing = 20.0;
     let cards_per_row = 5;
 
-    let start_x = (screen_width() - (cards_per_row as f32 * (card_width + card_spacing) - card_spacing)) / 2.0;
+    let start_x = (screen_width()
+        - (cards_per_row as f32 * (card_width + card_spacing) - card_spacing))
+        / 2.0;
     let start_y = 120.0;
 
     for (index, (card, count)) in card_counts.iter().enumerate() {
@@ -3752,7 +4390,7 @@ fn render_deck_view(world: &GameWorld) {
                 y + 5.0,
                 count_dims.width + 10.0,
                 count_dims.height + 10.0,
-                Color::new(0.0, 0.0, 0.0, 0.8)
+                Color::new(0.0, 0.0, 0.0, 0.8),
             );
 
             draw_text(
@@ -3760,15 +4398,25 @@ fn render_deck_view(world: &GameWorld) {
                 x + card_width - count_dims.width - 10.0,
                 y + count_dims.height + 10.0,
                 count_size,
-                WHITE
+                WHITE,
             );
         }
     }
 
-    let info_text = format!("Total Cards: {} | Unique: {} | Press ESC to close", all_cards.len(), card_counts.len());
+    let info_text = format!(
+        "Total Cards: {} | Unique: {} | Press ESC to close",
+        all_cards.len(),
+        card_counts.len()
+    );
     let info_size = 25.0;
     let info_dims = measure_text(&info_text, None, info_size as u16, 1.0);
-    draw_text(&info_text, (screen_width() - info_dims.width) / 2.0, screen_height() - 30.0, info_size, WHITE);
+    draw_text(
+        &info_text,
+        (screen_width() - info_dims.width) / 2.0,
+        screen_height() - 30.0,
+        info_size,
+        WHITE,
+    );
 }
 
 fn deck_view_input_system(world: &mut GameWorld) {
@@ -3781,9 +4429,20 @@ fn deck_view_input_system(world: &mut GameWorld) {
     }
 }
 
-fn render_shop_offering(world: &GameWorld, offering: &ShopOffering, _index: usize, x: f32, y: f32, card_width: f32, card_height: f32, mouse_pos: Vec2) {
-    let is_hovered = mouse_pos.x >= x && mouse_pos.x <= x + card_width
-        && mouse_pos.y >= y && mouse_pos.y <= y + card_height;
+fn render_shop_offering(
+    world: &GameWorld,
+    offering: &ShopOffering,
+    _index: usize,
+    x: f32,
+    y: f32,
+    card_width: f32,
+    card_height: f32,
+    mouse_pos: Vec2,
+) {
+    let is_hovered = mouse_pos.x >= x
+        && mouse_pos.x <= x + card_width
+        && mouse_pos.y >= y
+        && mouse_pos.y <= y + card_height;
 
     let bg_color = if is_hovered {
         Color::new(0.3, 0.2, 0.4, 1.0)
@@ -3792,10 +4451,22 @@ fn render_shop_offering(world: &GameWorld, offering: &ShopOffering, _index: usiz
     };
 
     draw_rectangle(x, y, card_width, card_height, bg_color);
-    draw_rectangle_lines(x, y, card_width, card_height, 3.0, Color::new(0.6, 0.5, 0.7, 1.0));
+    draw_rectangle_lines(
+        x,
+        y,
+        card_width,
+        card_height,
+        3.0,
+        Color::new(0.6, 0.5, 0.7, 1.0),
+    );
 
     match offering {
-        ShopOffering::Card { name, cost, rarity, pattern } => {
+        ShopOffering::Card {
+            name,
+            cost,
+            rarity,
+            pattern,
+        } => {
             draw_text(name, x + 10.0, y + 25.0, 20.0, WHITE);
 
             let rarity_text = format!("{:?}", rarity);
@@ -3813,22 +4484,57 @@ fn render_shop_offering(world: &GameWorld, offering: &ShopOffering, _index: usiz
                     let pattern_index = grid_y * grid_size + grid_x;
 
                     if let Some(Some(tower_type)) = pattern.get(pattern_index) {
-                        draw_rectangle(cell_x, cell_y, cell_size - 2.0, cell_size - 2.0, tower_type.color());
+                        draw_rectangle(
+                            cell_x,
+                            cell_y,
+                            cell_size - 2.0,
+                            cell_size - 2.0,
+                            tower_type.color(),
+                        );
                     } else {
-                        draw_rectangle(cell_x, cell_y, cell_size - 2.0, cell_size - 2.0, Color::new(0.1, 0.1, 0.1, 1.0));
+                        draw_rectangle(
+                            cell_x,
+                            cell_y,
+                            cell_size - 2.0,
+                            cell_size - 2.0,
+                            Color::new(0.1, 0.1, 0.1, 1.0),
+                        );
                     }
-                    draw_rectangle_lines(cell_x, cell_y, cell_size - 2.0, cell_size - 2.0, 1.0, GRAY);
+                    draw_rectangle_lines(
+                        cell_x,
+                        cell_y,
+                        cell_size - 2.0,
+                        cell_size - 2.0,
+                        1.0,
+                        GRAY,
+                    );
                 }
             }
 
             let cost_text = format!("${}", cost);
             let can_afford = world.resources.economy.money >= *cost;
             let cost_color = if can_afford { YELLOW } else { RED };
-            draw_text(&cost_text, x + 10.0, y + card_height - 15.0, 24.0, cost_color);
+            draw_text(
+                &cost_text,
+                x + 10.0,
+                y + card_height - 15.0,
+                24.0,
+                cost_color,
+            );
         }
-        ShopOffering::UpgradeCard { card_entity, current_rarity, cost } => {
+        ShopOffering::UpgradeCard {
+            card_entity,
+            current_rarity,
+            cost,
+        } => {
             if let Some(card) = world.get_card(*card_entity) {
-                draw_text("UPGRADE", x + 10.0, y + 25.0, 20.0, Color::new(1.0, 0.8, 0.3, 1.0));
+                draw_text(
+                    "UPGRADE",
+                    x + 10.0,
+                    y + 25.0,
+                    20.0,
+                    Color::new(1.0, 0.8, 0.3, 1.0),
+                );
                 draw_text(&card.name, x + 10.0, y + 50.0, 18.0, WHITE);
 
                 let current_text = format!("{:?}", current_rarity);
@@ -3840,7 +4546,13 @@ fn render_shop_offering(world: &GameWorld, offering: &ShopOffering, _index: usiz
                 };
                 let next_text = format!("{:?}", next_rarity);
 
-                draw_text(&current_text, x + 10.0, y + 75.0, 16.0, current_rarity.color());
+                draw_text(
+                    &current_text,
+                    x + 10.0,
+                    y + 75.0,
+                    16.0,
+                    current_rarity.color(),
+                );
                 draw_text("→", x + 70.0, y + 75.0, 16.0, WHITE);
                 draw_text(&next_text, x + 90.0, y + 75.0, 16.0, next_rarity.color());
 
@@ -3856,18 +4568,43 @@ fn render_shop_offering(world: &GameWorld, offering: &ShopOffering, _index: usiz
                         let pattern_index = grid_y * grid_size + grid_x;
 
                         if let Some(Some(tower_type)) = card.tower_pattern.get(pattern_index) {
-                            draw_rectangle(cell_x, cell_y, cell_size - 2.0, cell_size - 2.0, tower_type.color());
+                            draw_rectangle(
+                                cell_x,
+                                cell_y,
+                                cell_size - 2.0,
+                                cell_size - 2.0,
+                                tower_type.color(),
+                            );
                         } else {
-                            draw_rectangle(cell_x, cell_y, cell_size - 2.0, cell_size - 2.0, Color::new(0.1, 0.1, 0.1, 1.0));
+                            draw_rectangle(
+                                cell_x,
+                                cell_y,
+                                cell_size - 2.0,
+                                cell_size - 2.0,
+                                Color::new(0.1, 0.1, 0.1, 1.0),
+                            );
                         }
-                        draw_rectangle_lines(cell_x, cell_y, cell_size - 2.0, cell_size - 2.0, 1.0, GRAY);
+                        draw_rectangle_lines(
+                            cell_x,
+                            cell_y,
+                            cell_size - 2.0,
+                            cell_size - 2.0,
+                            1.0,
+                            GRAY,
+                        );
                     }
                 }
 
                 let cost_text = format!("${}", cost);
                 let can_afford = world.resources.economy.money >= *cost;
                 let cost_color = if can_afford { YELLOW } else { RED };
-                draw_text(&cost_text, x + 10.0, y + card_height - 15.0, 24.0, cost_color);
+                draw_text(
+                    &cost_text,
+                    x + 10.0,
+                    y + card_height - 15.0,
+                    24.0,
+                    cost_color,
+                );
             }
         }
         ShopOffering::RemoveCard { cost } => {
@@ -3878,31 +4615,67 @@ fn render_shop_offering(world: &GameWorld, offering: &ShopOffering, _index: usiz
             let cost_text = format!("${}", cost);
             let can_afford = world.resources.economy.money >= *cost;
             let cost_color = if can_afford { YELLOW } else { RED };
-            draw_text(&cost_text, x + 10.0, y + card_height - 15.0, 24.0, cost_color);
+            draw_text(
+                &cost_text,
+                x + 10.0,
+                y + card_height - 15.0,
+                24.0,
+                cost_color,
+            );
         }
         ShopOffering::Heal { amount, cost } => {
-            draw_text(&format!("Heal +{} HP", amount), x + 10.0, y + 30.0, 22.0, WHITE);
+            draw_text(
+                &format!("Heal +{} HP", amount),
+                x + 10.0,
+                y + 30.0,
+                22.0,
+                WHITE,
+            );
             draw_text("Restore health", x + 10.0, y + 100.0, 16.0, LIGHTGRAY);
 
             let cost_text = format!("${}", cost);
             let can_afford = world.resources.economy.money >= *cost;
             let cost_color = if can_afford { YELLOW } else { RED };
-            draw_text(&cost_text, x + 10.0, y + card_height - 15.0, 24.0, cost_color);
+            draw_text(
+                &cost_text,
+                x + 10.0,
+                y + card_height - 15.0,
+                24.0,
+                cost_color,
+            );
         }
         ShopOffering::MaxHealth { amount, cost } => {
-            draw_text(&format!("Max HP +{}", amount), x + 10.0, y + 30.0, 22.0, WHITE);
+            draw_text(
+                &format!("Max HP +{}", amount),
+                x + 10.0,
+                y + 30.0,
+                22.0,
+                WHITE,
+            );
             draw_text("Permanently", x + 10.0, y + 100.0, 16.0, LIGHTGRAY);
             draw_text("increase max HP", x + 10.0, y + 120.0, 16.0, LIGHTGRAY);
 
             let cost_text = format!("${}", cost);
             let can_afford = world.resources.economy.money >= *cost;
             let cost_color = if can_afford { YELLOW } else { RED };
-            draw_text(&cost_text, x + 10.0, y + card_height - 15.0, 24.0, cost_color);
+            draw_text(
+                &cost_text,
+                x + 10.0,
+                y + card_height - 15.0,
+                24.0,
+                cost_color,
+            );
         }
         ShopOffering::Relic { relic_type, cost } => {
             let name_size = 20.0;
             let name_dims = measure_text(relic_type.name(), None, name_size as u16, 1.0);
-            draw_text(relic_type.name(), x + (card_width - name_dims.width) / 2.0, y + 35.0, name_size, Color::new(1.0, 0.8, 0.3, 1.0));
+            draw_text(
+                relic_type.name(),
+                x + (card_width - name_dims.width) / 2.0,
+                y + 35.0,
+                name_size,
+                Color::new(1.0, 0.8, 0.3, 1.0),
+            );
 
             draw_rectangle(x + 15.0, y + 50.0, card_width - 30.0, 2.0, GOLD);
 
@@ -3935,21 +4708,45 @@ fn render_shop_offering(world: &GameWorld, offering: &ShopOffering, _index: usiz
             let cost_text = format!("${}", cost);
             let can_afford = world.resources.economy.money >= *cost;
             let cost_color = if can_afford { YELLOW } else { RED };
-            draw_text(&cost_text, x + 10.0, y + card_height - 15.0, 24.0, cost_color);
+            draw_text(
+                &cost_text,
+                x + 10.0,
+                y + card_height - 15.0,
+                24.0,
+                cost_color,
+            );
         }
     }
 }
 
 fn render_shop(world: &GameWorld) {
-    draw_rectangle(0.0, 0.0, screen_width(), screen_height(), Color::new(0.1, 0.05, 0.15, 1.0));
+    draw_rectangle(
+        0.0,
+        0.0,
+        screen_width(),
+        screen_height(),
+        Color::new(0.1, 0.05, 0.15, 1.0),
+    );
 
     let title = "MERCHANT'S SHOP";
     let title_size = 60.0;
     let title_dims = measure_text(title, None, title_size as u16, 1.0);
-    draw_text(title, (screen_width() - title_dims.width) / 2.0, 50.0, title_size, Color::new(1.0, 0.8, 0.2, 1.0));
+    draw_text(
+        title,
+        (screen_width() - title_dims.width) / 2.0,
+        50.0,
+        title_size,
+        Color::new(1.0, 0.8, 0.2, 1.0),
+    );
 
     let money_text = format!("Gold: ${}", world.resources.economy.money);
-    draw_text(&money_text, (screen_width() - 200.0) / 2.0, 110.0, 35.0, YELLOW);
+    draw_text(
+        &money_text,
+        (screen_width() - 200.0) / 2.0,
+        110.0,
+        35.0,
+        YELLOW,
+    );
 
     let offerings = &world.resources.meta_game.shop_offerings;
 
@@ -3965,13 +4762,28 @@ fn render_shop(world: &GameWorld) {
     for (index, offering) in offerings.iter().enumerate() {
         let x = start_x + index as f32 * (card_width + spacing);
         let y = start_y;
-        render_shop_offering(world, offering, index, x, y, card_width, card_height, mouse_pos);
+        render_shop_offering(
+            world,
+            offering,
+            index,
+            x,
+            y,
+            card_width,
+            card_height,
+            mouse_pos,
+        );
     }
 
     let info = "Click card to purchase | ESC to leave";
     let info_size = 20.0;
     let info_dims = measure_text(info, None, info_size as u16, 1.0);
-    draw_text(info, (screen_width() - info_dims.width) / 2.0, screen_height() - 30.0, info_size, LIGHTGRAY);
+    draw_text(
+        info,
+        (screen_width() - info_dims.width) / 2.0,
+        screen_height() - 30.0,
+        info_size,
+        LIGHTGRAY,
+    );
 }
 
 fn shop_input_system(world: &mut GameWorld) {
@@ -3992,17 +4804,26 @@ fn shop_input_system(world: &mut GameWorld) {
         let card_height = 240.0;
         let spacing = 20.0;
         let start_y = 160.0;
-        let total_width = offerings.len() as f32 * card_width + (offerings.len() - 1) as f32 * spacing;
+        let total_width =
+            offerings.len() as f32 * card_width + (offerings.len() - 1) as f32 * spacing;
         let start_x = (screen_width() - total_width) / 2.0;
 
         for (index, offering) in offerings.iter().enumerate() {
             let x = start_x + index as f32 * (card_width + spacing);
             let y = start_y;
 
-            if mouse_pos.x >= x && mouse_pos.x <= x + card_width
-                && mouse_pos.y >= y && mouse_pos.y <= y + card_height {
+            if mouse_pos.x >= x
+                && mouse_pos.x <= x + card_width
+                && mouse_pos.y >= y
+                && mouse_pos.y <= y + card_height
+            {
                 match offering {
-                    ShopOffering::Card { name, pattern, rarity, cost } => {
+                    ShopOffering::Card {
+                        name,
+                        pattern,
+                        rarity,
+                        cost,
+                    } => {
                         if world.resources.economy.money >= *cost {
                             world.resources.economy.money -= cost;
                             create_card(world, name, pattern.clone(), *rarity);
@@ -4025,17 +4846,35 @@ fn shop_input_system(world: &mut GameWorld) {
 }
 
 fn render_rest(world: &GameWorld) {
-    draw_rectangle(0.0, 0.0, screen_width(), screen_height(), Color::new(0.05, 0.15, 0.1, 1.0));
+    draw_rectangle(
+        0.0,
+        0.0,
+        screen_width(),
+        screen_height(),
+        Color::new(0.05, 0.15, 0.1, 1.0),
+    );
 
     let title = "CAMPFIRE REST";
     let title_size = 60.0;
     let title_dims = measure_text(title, None, title_size as u16, 1.0);
-    draw_text(title, (screen_width() - title_dims.width) / 2.0, 60.0, title_size, Color::new(0.8, 1.0, 0.6, 1.0));
+    draw_text(
+        title,
+        (screen_width() - title_dims.width) / 2.0,
+        60.0,
+        title_size,
+        Color::new(0.8, 1.0, 0.6, 1.0),
+    );
 
     let subtitle = "Choose one option";
     let subtitle_size = 25.0;
     let subtitle_dims = measure_text(subtitle, None, subtitle_size as u16, 1.0);
-    draw_text(subtitle, (screen_width() - subtitle_dims.width) / 2.0, 110.0, subtitle_size, LIGHTGRAY);
+    draw_text(
+        subtitle,
+        (screen_width() - subtitle_dims.width) / 2.0,
+        110.0,
+        subtitle_size,
+        LIGHTGRAY,
+    );
 
     let options = &world.resources.meta_game.rest_options;
     let card_width = 250.0;
@@ -4049,8 +4888,10 @@ fn render_rest(world: &GameWorld) {
         let x = (screen_width() - card_width) / 2.0;
         let y = start_y + (index as f32 * (card_height + spacing));
 
-        let is_hovered = mouse_pos.x >= x && mouse_pos.x <= x + card_width
-            && mouse_pos.y >= y && mouse_pos.y <= y + card_height;
+        let is_hovered = mouse_pos.x >= x
+            && mouse_pos.x <= x + card_width
+            && mouse_pos.y >= y
+            && mouse_pos.y <= y + card_height;
 
         let bg_color = if is_hovered {
             Color::new(0.2, 0.4, 0.25, 1.0)
@@ -4059,12 +4900,31 @@ fn render_rest(world: &GameWorld) {
         };
 
         draw_rectangle(x, y, card_width, card_height, bg_color);
-        draw_rectangle_lines(x, y, card_width, card_height, 3.0, Color::new(0.5, 0.7, 0.6, 1.0));
+        draw_rectangle_lines(
+            x,
+            y,
+            card_width,
+            card_height,
+            3.0,
+            Color::new(0.5, 0.7, 0.6, 1.0),
+        );
 
         match option {
             RestOption::Heal { amount } => {
-                draw_text(&format!("Heal +{} HP", amount), x + 10.0, y + 35.0, 28.0, WHITE);
-                draw_text("Restore your health by resting", x + 10.0, y + 65.0, 18.0, LIGHTGRAY);
+                draw_text(
+                    &format!("Heal +{} HP", amount),
+                    x + 10.0,
+                    y + 35.0,
+                    28.0,
+                    WHITE,
+                );
+                draw_text(
+                    "Restore your health by resting",
+                    x + 10.0,
+                    y + 65.0,
+                    18.0,
+                    LIGHTGRAY,
+                );
                 draw_text("at the campfire", x + 10.0, y + 90.0, 18.0, LIGHTGRAY);
             }
             RestOption::UpgradeCard => {
@@ -4083,7 +4943,13 @@ fn render_rest(world: &GameWorld) {
     let info = "Click option to choose | ESC to skip rest";
     let info_size = 20.0;
     let info_dims = measure_text(info, None, info_size as u16, 1.0);
-    draw_text(info, (screen_width() - info_dims.width) / 2.0, screen_height() - 30.0, info_size, LIGHTGRAY);
+    draw_text(
+        info,
+        (screen_width() - info_dims.width) / 2.0,
+        screen_height() - 30.0,
+        info_size,
+        LIGHTGRAY,
+    );
 }
 
 fn rest_input_system(world: &mut GameWorld) {
@@ -4109,15 +4975,19 @@ fn rest_input_system(world: &mut GameWorld) {
             let x = (screen_width() - card_width) / 2.0;
             let y = start_y + (index as f32 * (card_height + spacing));
 
-            if mouse_pos.x >= x && mouse_pos.x <= x + card_width
-                && mouse_pos.y >= y && mouse_pos.y <= y + card_height {
-
+            if mouse_pos.x >= x
+                && mouse_pos.x <= x + card_width
+                && mouse_pos.y >= y
+                && mouse_pos.y <= y + card_height
+            {
                 match option {
                     RestOption::Heal { amount } => {
                         if let Some(player_entity) = world.query_entities(PLAYER).next() {
                             if let Some(player) = world.get_player_mut(player_entity) {
                                 player.health = (player.health + amount).min(player.max_health);
-                                world.resources.combat.current_hp = (world.resources.combat.current_hp + amount).min(world.resources.combat.max_hp);
+                                world.resources.combat.current_hp =
+                                    (world.resources.combat.current_hp + amount)
+                                        .min(world.resources.combat.max_hp);
                             }
                         }
                     }
@@ -4134,7 +5004,11 @@ fn rest_input_system(world: &mut GameWorld) {
                                 };
                             }
                             if let Some(card) = world.get_card(random_card_entity) {
-                                let new_cost = calculate_card_cost(&card.tower_pattern, card.rarity, &world.resources.config.tower_configs);
+                                let new_cost = calculate_card_cost(
+                                    &card.tower_pattern,
+                                    card.rarity,
+                                    &world.resources.config.tower_configs,
+                                );
                                 if let Some(card_mut) = world.get_card_mut(random_card_entity) {
                                     card_mut.cost = new_cost;
                                 }
@@ -4164,19 +5038,35 @@ fn render_forge(world: &GameWorld) {
     let title = "FORGE";
     let title_size = 50.0;
     let title_dims = measure_text(title, None, title_size as u16, 1.0);
-    draw_text(title, (screen_width() - title_dims.width) / 2.0, 60.0, title_size, GOLD);
+    draw_text(
+        title,
+        (screen_width() - title_dims.width) / 2.0,
+        60.0,
+        title_size,
+        GOLD,
+    );
 
     let subtitle = if world.resources.meta_game.forge_offered_cards.is_empty() {
-        format!("Select 2 cards to sacrifice ({} uses remaining)", world.resources.meta_game.forge_uses_remaining)
+        format!(
+            "Select 2 cards to sacrifice ({} uses remaining)",
+            world.resources.meta_game.forge_uses_remaining
+        )
     } else {
         "Choose 1 upgraded card".to_string()
     };
     let subtitle_size = 25.0;
     let subtitle_dims = measure_text(&subtitle, None, subtitle_size as u16, 1.0);
-    draw_text(&subtitle, (screen_width() - subtitle_dims.width) / 2.0, 110.0, subtitle_size, LIGHTGRAY);
+    draw_text(
+        &subtitle,
+        (screen_width() - subtitle_dims.width) / 2.0,
+        110.0,
+        subtitle_size,
+        LIGHTGRAY,
+    );
 
     if world.resources.meta_game.forge_offered_cards.is_empty() {
-        let cards: Vec<_> = world.query_entities(CARD)
+        let cards: Vec<_> = world
+            .query_entities(CARD)
             .filter_map(|entity| world.get_card(entity).map(|card| (entity, card.clone())))
             .collect();
 
@@ -4192,10 +5082,30 @@ fn render_forge(world: &GameWorld) {
             let x = 50.0 + col as f32 * (card_width + spacing);
             let y = start_y + row as f32 * (card_height + spacing);
 
-            let is_selected = world.resources.meta_game.forge_selected_cards.contains(&index);
-            let border_color = if is_selected { GOLD } else { card.rarity.color() };
-            draw_rectangle(x - 2.0, y - 2.0, card_width + 4.0, card_height + 4.0, border_color);
-            draw_rectangle(x, y, card_width, card_height, Color::new(0.1, 0.1, 0.15, 1.0));
+            let is_selected = world
+                .resources
+                .meta_game
+                .forge_selected_cards
+                .contains(&index);
+            let border_color = if is_selected {
+                GOLD
+            } else {
+                card.rarity.color()
+            };
+            draw_rectangle(
+                x - 2.0,
+                y - 2.0,
+                card_width + 4.0,
+                card_height + 4.0,
+                border_color,
+            );
+            draw_rectangle(
+                x,
+                y,
+                card_width,
+                card_height,
+                Color::new(0.1, 0.1, 0.15, 1.0),
+            );
 
             let name_size = 14.0;
             draw_text(&card.name, x + 5.0, y + 20.0, name_size, WHITE);
@@ -4212,9 +5122,21 @@ fn render_forge(world: &GameWorld) {
                     let pattern_index = grid_y * grid_size + grid_x;
 
                     if let Some(Some(tower_type)) = card.tower_pattern.get(pattern_index) {
-                        draw_rectangle(cell_x, cell_y, cell_size - 2.0, cell_size - 2.0, tower_type.color());
+                        draw_rectangle(
+                            cell_x,
+                            cell_y,
+                            cell_size - 2.0,
+                            cell_size - 2.0,
+                            tower_type.color(),
+                        );
                     } else {
-                        draw_rectangle(cell_x, cell_y, cell_size - 2.0, cell_size - 2.0, Color::new(0.1, 0.1, 0.1, 1.0));
+                        draw_rectangle(
+                            cell_x,
+                            cell_y,
+                            cell_size - 2.0,
+                            cell_size - 2.0,
+                            Color::new(0.1, 0.1, 0.1, 1.0),
+                        );
                     }
                 }
             }
@@ -4230,17 +5152,37 @@ fn render_forge(world: &GameWorld) {
         let start_x = (screen_width() - total_width) / 2.0;
         let start_y = 180.0;
 
-        for (index, (name, pattern, rarity)) in world.resources.meta_game.forge_offered_cards.iter().enumerate() {
+        for (index, (name, pattern, rarity)) in world
+            .resources
+            .meta_game
+            .forge_offered_cards
+            .iter()
+            .enumerate()
+        {
             let x = start_x + index as f32 * (card_width + spacing);
             let y = start_y;
 
             let mouse_pos = Vec2::new(mouse_position().0, mouse_position().1);
-            let is_hovered = mouse_pos.x >= x && mouse_pos.x <= x + card_width
-                && mouse_pos.y >= y && mouse_pos.y <= y + card_height;
+            let is_hovered = mouse_pos.x >= x
+                && mouse_pos.x <= x + card_width
+                && mouse_pos.y >= y
+                && mouse_pos.y <= y + card_height;
 
             let border_color = if is_hovered { GOLD } else { rarity.color() };
-            draw_rectangle(x - 2.0, y - 2.0, card_width + 4.0, card_height + 4.0, border_color);
-            draw_rectangle(x, y, card_width, card_height, Color::new(0.1, 0.1, 0.15, 1.0));
+            draw_rectangle(
+                x - 2.0,
+                y - 2.0,
+                card_width + 4.0,
+                card_height + 4.0,
+                border_color,
+            );
+            draw_rectangle(
+                x,
+                y,
+                card_width,
+                card_height,
+                Color::new(0.1, 0.1, 0.15, 1.0),
+            );
 
             let name_size = 14.0;
             draw_text(name, x + 5.0, y + 20.0, name_size, WHITE);
@@ -4257,22 +5199,46 @@ fn render_forge(world: &GameWorld) {
                     let pattern_index = grid_y * grid_size + grid_x;
 
                     if let Some(Some(tower_type)) = pattern.get(pattern_index) {
-                        draw_rectangle(cell_x, cell_y, cell_size - 2.0, cell_size - 2.0, tower_type.color());
+                        draw_rectangle(
+                            cell_x,
+                            cell_y,
+                            cell_size - 2.0,
+                            cell_size - 2.0,
+                            tower_type.color(),
+                        );
                     } else {
-                        draw_rectangle(cell_x, cell_y, cell_size - 2.0, cell_size - 2.0, Color::new(0.1, 0.1, 0.1, 1.0));
+                        draw_rectangle(
+                            cell_x,
+                            cell_y,
+                            cell_size - 2.0,
+                            cell_size - 2.0,
+                            Color::new(0.1, 0.1, 0.1, 1.0),
+                        );
                     }
                 }
             }
 
             let rarity_text = format!("{:?}", rarity);
-            draw_text(&rarity_text, x + 5.0, y + card_height - 10.0, 14.0, rarity.color());
+            draw_text(
+                &rarity_text,
+                x + 5.0,
+                y + card_height - 10.0,
+                14.0,
+                rarity.color(),
+            );
         }
     }
 
     let info = "ESC: Return to Map";
     let info_size = 16.0;
     let info_dims = measure_text(info, None, info_size as u16, 1.0);
-    draw_text(info, (screen_width() - info_dims.width) / 2.0, screen_height() - 30.0, info_size, LIGHTGRAY);
+    draw_text(
+        info,
+        (screen_width() - info_dims.width) / 2.0,
+        screen_height() - 30.0,
+        info_size,
+        LIGHTGRAY,
+    );
 }
 
 fn forge_input_system(world: &mut GameWorld) {
@@ -4289,7 +5255,8 @@ fn forge_input_system(world: &mut GameWorld) {
         let mouse_pos = Vec2::new(mouse_position().0, mouse_position().1);
 
         if world.resources.meta_game.forge_offered_cards.is_empty() {
-            let cards: Vec<_> = world.query_entities(CARD)
+            let cards: Vec<_> = world
+                .query_entities(CARD)
                 .filter_map(|entity| world.get_card(entity).map(|card| (entity, card.clone())))
                 .collect();
 
@@ -4305,11 +5272,22 @@ fn forge_input_system(world: &mut GameWorld) {
                 let x = 50.0 + col as f32 * (card_width + spacing);
                 let y = start_y + row as f32 * (card_height + spacing);
 
-                if mouse_pos.x >= x && mouse_pos.x <= x + card_width
-                    && mouse_pos.y >= y && mouse_pos.y <= y + card_height {
-
-                    if world.resources.meta_game.forge_selected_cards.contains(&index) {
-                        world.resources.meta_game.forge_selected_cards.retain(|&i| i != index);
+                if mouse_pos.x >= x
+                    && mouse_pos.x <= x + card_width
+                    && mouse_pos.y >= y
+                    && mouse_pos.y <= y + card_height
+                {
+                    if world
+                        .resources
+                        .meta_game
+                        .forge_selected_cards
+                        .contains(&index)
+                    {
+                        world
+                            .resources
+                            .meta_game
+                            .forge_selected_cards
+                            .retain(|&i| i != index);
                     } else if world.resources.meta_game.forge_selected_cards.len() < 2 {
                         world.resources.meta_game.forge_selected_cards.push(index);
                     }
@@ -4321,7 +5299,11 @@ fn forge_input_system(world: &mut GameWorld) {
                             let random_index = rand::gen_range(0, card_definitions.len());
                             let (name, pattern, _) = &card_definitions[random_index];
                             let upgraded_rarity = CardRarity::Epic;
-                            offered_cards.push((name.to_string(), pattern.clone(), upgraded_rarity));
+                            offered_cards.push((
+                                name.to_string(),
+                                pattern.clone(),
+                                upgraded_rarity,
+                            ));
                         }
                         world.resources.meta_game.forge_offered_cards = offered_cards;
                     }
@@ -4341,11 +5323,19 @@ fn forge_input_system(world: &mut GameWorld) {
                 let x = start_x + index as f32 * (card_width + spacing);
                 let y = start_y;
 
-                if mouse_pos.x >= x && mouse_pos.x <= x + card_width
-                    && mouse_pos.y >= y && mouse_pos.y <= y + card_height {
-
+                if mouse_pos.x >= x
+                    && mouse_pos.x <= x + card_width
+                    && mouse_pos.y >= y
+                    && mouse_pos.y <= y + card_height
+                {
                     let cards: Vec<_> = world.query_entities(CARD).collect();
-                    let mut selected_indices: Vec<_> = world.resources.meta_game.forge_selected_cards.iter().cloned().collect();
+                    let mut selected_indices: Vec<_> = world
+                        .resources
+                        .meta_game
+                        .forge_selected_cards
+                        .iter()
+                        .cloned()
+                        .collect();
                     selected_indices.sort_by(|a, b| b.cmp(a));
 
                     for card_index in selected_indices {
@@ -4356,17 +5346,24 @@ fn forge_input_system(world: &mut GameWorld) {
                     world.apply_commands();
 
                     let card_entity = world.spawn_entities(CARD, 1)[0];
-                    world.set_card(card_entity, Card {
-                        card_index: 0,
-                        tower_pattern: pattern.clone(),
-                        cost: calculate_card_cost(pattern, *rarity, &world.resources.config.tower_configs),
-                        rarity: *rarity,
-                        name: name.clone(),
-                        in_hand: false,
-                        card_state: CardState::InDeck,
-                        draw_animation_progress: 0.0,
-                        hand_position_index: 0,
-                    });
+                    world.set_card(
+                        card_entity,
+                        Card {
+                            card_index: 0,
+                            tower_pattern: pattern.clone(),
+                            cost: calculate_card_cost(
+                                pattern,
+                                *rarity,
+                                &world.resources.config.tower_configs,
+                            ),
+                            rarity: *rarity,
+                            name: name.clone(),
+                            in_hand: false,
+                            card_state: CardState::InDeck,
+                            draw_animation_progress: 0.0,
+                            hand_position_index: 0,
+                        },
+                    );
 
                     world.resources.meta_game.forge_uses_remaining -= 1;
                     world.resources.meta_game.forge_selected_cards.clear();
@@ -4400,7 +5397,10 @@ fn map_input_system(world: &mut GameWorld) {
         let mut clicked_node_type = None;
 
         for (node_index, node) in world.resources.meta_game.map_data.nodes.iter().enumerate() {
-            if !node.available || node.visited || node_index == world.resources.meta_game.current_node {
+            if !node.available
+                || node.visited
+                || node_index == world.resources.meta_game.current_node
+            {
                 continue;
             }
 
@@ -4418,7 +5418,9 @@ fn map_input_system(world: &mut GameWorld) {
             world.resources.meta_game.current_node = node_index;
             world.resources.meta_game.map_data.nodes[node_index].visited = true;
 
-            let connections = world.resources.meta_game.map_data.nodes[node_index].connections.clone();
+            let connections = world.resources.meta_game.map_data.nodes[node_index]
+                .connections
+                .clone();
             for connection_idx in connections {
                 world.resources.meta_game.map_data.nodes[connection_idx].available = true;
             }
@@ -4429,26 +5431,26 @@ fn map_input_system(world: &mut GameWorld) {
                     world.resources.combat.wave = 0;
                     let is_elite = clicked_node_type.unwrap() == NodeType::Elite;
                     setup_combat(world, is_elite, false);
-                },
+                }
                 NodeType::Boss => {
                     world.resources.combat.game_state = GameState::WaitingForWave;
                     world.resources.combat.wave = 0;
                     setup_combat(world, false, true);
-                },
+                }
                 NodeType::Shop => {
                     world.resources.meta_game.shop_offerings = generate_shop_offerings(world);
                     world.resources.combat.game_state = GameState::Shop;
-                },
+                }
                 NodeType::Rest => {
                     world.resources.meta_game.rest_options = generate_rest_options();
                     world.resources.combat.game_state = GameState::Rest;
-                },
+                }
                 NodeType::Forge => {
                     world.resources.meta_game.forge_selected_cards.clear();
                     world.resources.meta_game.forge_offered_cards.clear();
                     world.resources.meta_game.forge_uses_remaining = 2;
                     world.resources.combat.game_state = GameState::Forge;
-                },
+                }
             }
         }
     }
@@ -4487,7 +5489,8 @@ fn setup_combat(world: &mut GameWorld, is_elite: bool, is_boss: bool) {
     initialize_grid(world);
     create_path(world);
 
-    let layer = world.resources.meta_game.map_data.nodes[world.resources.meta_game.current_node].layer;
+    let layer =
+        world.resources.meta_game.map_data.nodes[world.resources.meta_game.current_node].layer;
     let enemy_deck = get_enemy_deck_for_encounter(layer, is_elite, is_boss);
 
     world.resources.combat.current_encounter_name = enemy_deck.encounter_name.clone();
@@ -4526,7 +5529,8 @@ fn generate_shop_offerings(world: &GameWorld) -> Vec<ShopOffering> {
         RelicType::RangeExtender,
     ];
 
-    let available_relics: Vec<_> = all_relics.iter()
+    let available_relics: Vec<_> = all_relics
+        .iter()
         .filter(|r| !world.resources.economy.owned_relics.contains(r))
         .cloned()
         .collect();
@@ -4561,16 +5565,25 @@ fn render_ui(world: &GameWorld) {
         if let Some(player) = world.get_player(player_entity) {
             (player.health, player.max_health)
         } else {
-            (world.resources.combat.current_hp, world.resources.combat.max_hp)
+            (
+                world.resources.combat.current_hp,
+                world.resources.combat.max_hp,
+            )
         }
     } else {
-        (world.resources.combat.current_hp, world.resources.combat.max_hp)
+        (
+            world.resources.combat.current_hp,
+            world.resources.combat.max_hp,
+        )
     };
 
     let hp_text = format!("HP: {}/{}", current_hp, max_hp);
     draw_text(&hp_text, 10.0, 90.0, 25.0, YELLOW);
 
-    if matches!(world.resources.combat.game_state, GameState::WaitingForWave | GameState::WaveInProgress) {
+    if matches!(
+        world.resources.combat.game_state,
+        GameState::WaitingForWave | GameState::WaveInProgress
+    ) {
         let wave_text = format!("Wave: {}/5", world.resources.combat.wave);
         draw_text(&wave_text, screen_width() - 180.0, 30.0, 30.0, SKYBLUE);
 
@@ -4578,11 +5591,23 @@ fn render_ui(world: &GameWorld) {
         let remaining_cards = world.resources.combat.enemy_deck.len();
 
         let enemies_text = format!("Enemies: {}", enemy_count);
-        draw_text(&enemies_text, screen_width() - 180.0, 60.0, 22.0, Color::new(1.0, 0.6, 0.6, 1.0));
+        draw_text(
+            &enemies_text,
+            screen_width() - 180.0,
+            60.0,
+            22.0,
+            Color::new(1.0, 0.6, 0.6, 1.0),
+        );
 
         if remaining_cards > 0 {
             let spawning_text = format!("({} cards left)", remaining_cards);
-            draw_text(&spawning_text, screen_width() - 180.0, 85.0, 18.0, LIGHTGRAY);
+            draw_text(
+                &spawning_text,
+                screen_width() - 180.0,
+                85.0,
+                18.0,
+                LIGHTGRAY,
+            );
         }
     }
 
@@ -4636,7 +5661,12 @@ fn render_ui(world: &GameWorld) {
 
         if !world.resources.combat.current_encounter_name.is_empty() {
             let encounter_text_size = 30.0;
-            let encounter_dims = measure_text(&world.resources.combat.current_encounter_name, None, encounter_text_size as u16, 1.0);
+            let encounter_dims = measure_text(
+                &world.resources.combat.current_encounter_name,
+                None,
+                encounter_text_size as u16,
+                1.0,
+            );
             draw_text(
                 &world.resources.combat.current_encounter_name,
                 screen_width() / 2.0 - encounter_dims.width / 2.0,
@@ -4655,8 +5685,21 @@ fn render_ui(world: &GameWorld) {
                 let button_x = (screen_width() - button_width) / 2.0;
                 let button_y = screen_height() / 2.0 - button_height / 2.0;
 
-                draw_rectangle(button_x, button_y, button_width, button_height, Color::new(0.2, 0.6, 0.3, 1.0));
-                draw_rectangle_lines(button_x, button_y, button_width, button_height, 3.0, Color::new(0.3, 0.9, 0.4, 1.0));
+                draw_rectangle(
+                    button_x,
+                    button_y,
+                    button_width,
+                    button_height,
+                    Color::new(0.2, 0.6, 0.3, 1.0),
+                );
+                draw_rectangle_lines(
+                    button_x,
+                    button_y,
+                    button_width,
+                    button_height,
+                    3.0,
+                    Color::new(0.3, 0.9, 0.4, 1.0),
+                );
 
                 let text = "START WAVE";
                 let text_size = 32.0;
@@ -4695,7 +5738,13 @@ fn render_ui(world: &GameWorld) {
             );
         }
         GameState::Victory => {
-            draw_rectangle(0.0, 0.0, screen_width(), screen_height(), Color::new(0.0, 0.0, 0.0, 0.7));
+            draw_rectangle(
+                0.0,
+                0.0,
+                screen_width(),
+                screen_height(),
+                Color::new(0.0, 0.0, 0.0, 0.7),
+            );
 
             let title = "VICTORY!";
             let title_size = 80.0;
@@ -4798,10 +5847,13 @@ async fn main() {
     world.resources.economy.owned_relics = Vec::new();
 
     let player_entity = world.spawn_entities(PLAYER, 1)[0];
-    world.set_player(player_entity, Player {
-        health: 20,
-        max_health: 20,
-    });
+    world.set_player(
+        player_entity,
+        Player {
+            health: 20,
+            max_health: 20,
+        },
+    );
 
     initialize_grid(&mut world);
     create_path(&mut world);
@@ -4874,4 +5926,3 @@ async fn main() {
         next_frame().await;
     }
 }
-
