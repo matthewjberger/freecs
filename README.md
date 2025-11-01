@@ -9,7 +9,7 @@ A high-performance, archetype-based Entity Component System (ECS) for Rust
 **Key Features**:
 
 - Zero-cost abstractions with static dispatch
-- Multi-threaded parallel processing using Rayon
+- Multi-threaded parallel processing using Rayon (optional `parallel` feature)
 - Sparse set tags that don't fragment archetypes
 - Command buffers for deferred structural changes
 - Change detection for incremental updates
@@ -24,7 +24,7 @@ Add this to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-freecs = "1.1.0"
+freecs = "1.2.0"
 ```
 
 And in `main.rs`:
@@ -472,7 +472,12 @@ world.for_each_position_mut(|position| {
 
 ### Parallel Iteration
 
-Process large entity counts across multiple CPU cores using Rayon:
+Enable the `parallel` feature to process large entity counts across multiple CPU cores using Rayon:
+
+```toml
+[dependencies]
+freecs = { version = "1.2.0", features = ["parallel"] }
+```
 
 ```rust
 use freecs::rayon::prelude::*;

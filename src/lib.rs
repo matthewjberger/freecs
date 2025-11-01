@@ -7,7 +7,7 @@
 //! # Key Features
 //!
 //! - **Zero-cost Abstractions**: Fully statically dispatched, no custom traits
-//! - **Parallel Processing**: Multi-threaded iteration using Rayon
+//! - **Parallel Processing**: Multi-threaded iteration using Rayon (optional `parallel` feature)
 //! - **Sparse Set Tags**: Lightweight markers that don't fragment archetypes
 //! - **Command Buffers**: Queue structural changes during iteration
 //! - **Change Detection**: Track component modifications for incremental updates
@@ -191,7 +191,12 @@
 //!
 //! ## Parallel Processing
 //!
-//! Process large entity counts across multiple CPU cores using Rayon:
+//! Enable the `parallel` feature to process large entity counts across multiple CPU cores using Rayon:
+//!
+//! ```toml
+//! [dependencies]
+//! freecs = { version = "1.2.0", features = ["parallel"] }
+//! ```
 //!
 //! ```rust
 //! use freecs::rayon::prelude::*;
@@ -397,6 +402,8 @@
 //! ```
 
 pub use paste;
+
+#[cfg(feature = "parallel")]
 pub use rayon;
 
 #[derive(
@@ -1010,6 +1017,7 @@ macro_rules! ecs_impl {
                         }
                     }
 
+                    #[cfg(feature = "parallel")]
                     pub fn [<par_for_each_ $name _mut>]<F>(&mut self, f: F)
                     where
                         F: Fn(&mut $type) + Send + Sync,
@@ -1559,6 +1567,7 @@ macro_rules! ecs_impl {
                 }
             }
 
+            #[cfg(feature = "parallel")]
             #[inline]
             pub fn par_for_each_mut<F>(&mut self, include: u64, exclude: u64, f: F)
             where
@@ -3245,6 +3254,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "parallel")]
     fn test_sparse_set_par_for_each_mut() {
         let mut world = World::default();
         let entities = world.spawn_entities(POSITION, 100);
