@@ -7,7 +7,7 @@
 //! # Key Features
 //!
 //! - **Zero-cost Abstractions**: Fully statically dispatched, no custom traits
-//! - **Parallel Processing**: Multi-threaded iteration using Rayon (optional `parallel` feature)
+//! - **Parallel Processing**: Multi-threaded iteration using Rayon (automatically enabled on non-WASM platforms)
 //! - **Sparse Set Tags**: Lightweight markers that don't fragment archetypes
 //! - **Command Buffers**: Queue structural changes during iteration
 //! - **Change Detection**: Track component modifications for incremental updates
@@ -191,12 +191,8 @@
 //!
 //! ## Parallel Processing
 //!
-//! Enable the `parallel` feature to process large entity counts across multiple CPU cores using Rayon:
-//!
-//! ```toml
-//! [dependencies]
-//! freecs = { version = "1.2.0", features = ["parallel"] }
-//! ```
+//! Process large entity counts across multiple CPU cores using Rayon. Parallel iteration is
+//! automatically available on non-WASM platforms:
 //!
 //! ```rust
 //! use freecs::rayon::prelude::*;
@@ -403,7 +399,7 @@
 
 pub use paste;
 
-#[cfg(feature = "parallel")]
+#[cfg(not(target_family = "wasm"))]
 pub use rayon;
 
 #[derive(
@@ -424,7 +420,7 @@ impl std::fmt::Display for Entity {
 /// Double-buffered event queue for inter-system communication.
 ///
 /// Events persist for 2 frames to prevent systems from missing events
-/// in parallel execution. Call [`update()`](EventQueue::update) between frames to swap buffers.
+/// during execution. Call [`update()`](EventQueue::update) between frames to swap buffers.
 ///
 /// # Examples
 ///
@@ -541,8 +537,7 @@ impl<T> EventQueue<T> {
 
 /// System scheduling for automatic execution ordering.
 ///
-/// Allows organizing systems into stages that run sequentially,
-/// with systems within a stage optionally running in parallel.
+/// Allows organizing systems into stages that run sequentially.
 ///
 /// # Examples
 ///
@@ -1017,7 +1012,7 @@ macro_rules! ecs_impl {
                         }
                     }
 
-                    #[cfg(feature = "parallel")]
+                    #[cfg(not(target_family = "wasm"))]
                     pub fn [<par_for_each_ $name _mut>]<F>(&mut self, f: F)
                     where
                         F: Fn(&mut $type) + Send + Sync,
@@ -1567,7 +1562,7 @@ macro_rules! ecs_impl {
                 }
             }
 
-            #[cfg(feature = "parallel")]
+            #[cfg(not(target_family = "wasm"))]
             #[inline]
             pub fn par_for_each_mut<F>(&mut self, include: u64, exclude: u64, f: F)
             where
@@ -3254,7 +3249,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "parallel")]
+    #[cfg(not(target_family = "wasm"))]
     fn test_sparse_set_par_for_each_mut() {
         let mut world = World::default();
         let entities = world.spawn_entities(POSITION, 100);

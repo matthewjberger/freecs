@@ -9,7 +9,7 @@ A high-performance, archetype-based Entity Component System (ECS) for Rust
 **Key Features**:
 
 - Zero-cost abstractions with static dispatch
-- Multi-threaded parallel processing using Rayon (optional `parallel` feature)
+- Multi-threaded parallel processing using Rayon (automatically enabled on non-WASM platforms)
 - Sparse set tags that don't fragment archetypes
 - Command buffers for deferred structural changes
 - Change detection for incremental updates
@@ -24,7 +24,7 @@ Add this to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-freecs = "1.2.0"
+freecs = "1.3.0"
 ```
 
 And in `main.rs`:
@@ -472,12 +472,7 @@ world.for_each_position_mut(|position| {
 
 ### Parallel Iteration
 
-Enable the `parallel` feature to process large entity counts across multiple CPU cores using Rayon:
-
-```toml
-[dependencies]
-freecs = { version = "1.2.0", features = ["parallel"] }
-```
+Process large entity counts across multiple CPU cores using Rayon. Parallel iteration is automatically available on non-WASM platforms:
 
 ```rust
 use freecs::rayon::prelude::*;
@@ -493,6 +488,8 @@ fn parallel_physics_system(world: &mut World) {
 ```
 
 Best for 100K+ entities with non-trivial per-entity computation. For smaller entity counts, serial iteration may be more efficient due to parallelization overhead.
+
+**Note**: Parallel methods are only available when targeting non-WASM platforms. On WASM targets, use the regular serial iteration methods instead.
 
 ### Sparse Set Tags
 

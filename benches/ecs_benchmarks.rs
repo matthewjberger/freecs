@@ -629,7 +629,6 @@ fn bench_parallel_iteration(c: &mut Criterion) {
             },
         );
 
-        #[cfg(feature = "parallel")]
         group.bench_with_input(
             BenchmarkId::new("parallel_iteration", count),
             &count,
@@ -1527,7 +1526,6 @@ fn bench_single_component_apis(c: &mut Criterion) {
         });
     });
 
-    #[cfg(feature = "parallel")]
     group.bench_function("par_for_each_component_mut", |b| {
         b.iter(|| {
             world.par_for_each_position_mut(|pos| {
@@ -1536,7 +1534,6 @@ fn bench_single_component_apis(c: &mut Criterion) {
         });
     });
 
-    #[cfg(feature = "parallel")]
     group.bench_function("par_for_each_mut_general", |b| {
         b.iter(|| {
             world.par_for_each_mut(POSITION, 0, |_entity, table, idx| {
