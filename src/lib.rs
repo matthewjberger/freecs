@@ -836,6 +836,44 @@ macro_rules! ecs_impl {
             locations: Vec<EntityLocation>,
         }
 
+        impl EntityLocations {
+            fn get(&self, id: u32) -> Option<&EntityLocation> {
+                self.locations.get(id as usize)
+            }
+
+            fn get_mut(&mut self, id: u32) -> Option<&mut EntityLocation> {
+                self.locations.get_mut(id as usize)
+            }
+
+            fn ensure_slot(&mut self, id: u32, generation: u32) {
+                let id_usize = id as usize;
+                if id_usize >= self.locations.len() {
+                    self.locations.resize(
+                        (self.locations.len() * 2).max(64).max(id_usize + 1),
+                        EntityLocation::default(),
+                    );
+                }
+                self.locations[id_usize].generation = generation;
+            }
+
+            fn insert(&mut self, id: u32, location: EntityLocation) {
+                let id_usize = id as usize;
+                if id_usize >= self.locations.len() {
+                    self.locations.resize(
+                        (self.locations.len() * 2).max(64).max(id_usize + 1),
+                        EntityLocation::default(),
+                    );
+                }
+                self.locations[id_usize] = location;
+            }
+
+            fn mark_deallocated(&mut self, id: u32) {
+                if let Some(loc) = self.locations.get_mut(id as usize) {
+                    loc.allocated = false;
+                }
+            }
+        }
+
         $crate::paste::paste! {
             pub enum Command {
                 SpawnEntities { mask: u64, count: usize },
@@ -922,11 +960,6 @@ macro_rules! ecs_impl {
                     #[inline]
                     pub fn [<get_ $name>](&self, entity: $crate::Entity) -> Option<&$type> {
                         let (table_index, array_index) = get_location(&self.entity_locations, entity)?;
-
-                        if !self.entity_locations.locations[entity.id as usize].allocated {
-                            return None;
-                        }
-
                         let table = &self.tables[table_index];
 
                         if table.mask & $mask == 0 {
@@ -960,12 +993,10 @@ macro_rules! ecs_impl {
                     #[inline]
                     pub fn [<set_ $name>](&mut self, entity: $crate::Entity, value: $type) {
                         if let Some((table_index, array_index)) = get_location(&self.entity_locations, entity) {
-                            if self.entity_locations.locations[entity.id as usize].allocated {
-                                let table = &mut self.tables[table_index];
-                                if table.mask & $mask != 0 {
-                                    table.$name[array_index] = value;
-                                    return;
-                                }
+                            let table = &mut self.tables[table_index];
+                            if table.mask & $mask != 0 {
+                                table.$name[array_index] = value;
+                                return;
                             }
                         }
 
@@ -1130,7 +1161,6 @@ macro_rules! ecs_impl {
             pub fn query_entities(&self, mask: u64) -> EntityQueryIter<'_> {
                 EntityQueryIter {
                     tables: &self.tables,
-                    entity_locations: &self.entity_locations,
                     mask,
                     table_index: 0,
                     array_index: 0,
@@ -1142,10 +1172,8 @@ macro_rules! ecs_impl {
                     if table.mask & mask != mask {
                         continue;
                     }
-                    for &entity in &table.entity_indices {
-                        if self.entity_locations.locations[entity.id as usize].allocated {
-                            return Some(entity);
-                        }
+                    if let Some(&entity) = table.entity_indices.first() {
+                        return Some(entity);
                     }
                 }
                 None
@@ -1156,16 +1184,17 @@ macro_rules! ecs_impl {
                 let mut tables_to_update = Vec::new();
 
                 for &entity in entities {
-                    let id = entity.id as usize;
-                    if id < self.entity_locations.locations.len() {
-                        let loc = &mut self.entity_locations.locations[id];
+                    if let Some(loc) = self.entity_locations.get_mut(entity.id) {
                         if loc.allocated && loc.generation == entity.generation {
                             let table_idx = loc.table_index as usize;
                             let array_idx = loc.array_index as usize;
 
-                            loc.allocated = false;
-                            loc.generation = loc.generation.wrapping_add(1);
-                            self.allocator.free_ids.push((entity.id, loc.generation));
+                            let next_gen = loc.generation.wrapping_add(1);
+                            self.entity_locations.mark_deallocated(entity.id);
+                            if let Some(loc) = self.entity_locations.get_mut(entity.id) {
+                                loc.generation = next_gen;
+                            }
+                            self.allocator.free_ids.push((entity.id, next_gen));
 
                             tables_to_update.push((table_idx, array_idx));
                             despawned.push(entity);
@@ -1188,7 +1217,7 @@ macro_rules! ecs_impl {
 
                     if array_idx < last_idx {
                         let moved_entity = table.entity_indices[last_idx];
-                        if let Some(loc) = self.entity_locations.locations.get_mut(moved_entity.id as usize) {
+                        if let Some(loc) = self.entity_locations.get_mut(moved_entity.id) {
                             if loc.allocated {
                                 loc.array_index = array_idx as u32;
                             }
@@ -1273,13 +1302,7 @@ macro_rules! ecs_impl {
             pub fn get_all_entities(&self) -> Vec<$crate::Entity> {
                 let mut result = Vec::new();
                 for table in &self.tables {
-                    result.extend(
-                        table
-                            .entity_indices
-                            .iter()
-                            .copied()
-                            .filter(|&e| self.entity_locations.locations[e.id as usize].allocated),
-                    );
+                    result.extend(table.entity_indices.iter().copied());
                 }
                 result
             }
@@ -1491,9 +1514,7 @@ macro_rules! ecs_impl {
 
                             for idx in 0..table.entity_indices.len() {
                                 let entity = table.entity_indices[idx];
-                                if self.entity_locations.locations[entity.id as usize].allocated {
-                                    f(entity, &mut table.$name[idx]);
-                                }
+                                f(entity, &mut table.$name[idx]);
                             }
                         }
                     }
@@ -1516,9 +1537,7 @@ macro_rules! ecs_impl {
                 for table in &self.tables {
                     if table.mask & component_include == component_include && table.mask & component_exclude == 0 {
                         for (idx, &entity) in table.entity_indices.iter().enumerate() {
-                            if self.entity_locations.locations[entity.id as usize].allocated
-                                && self.entity_matches_tags(entity, tag_include, tag_exclude)
-                            {
+                            if self.entity_matches_tags(entity, tag_include, tag_exclude) {
                                 f(entity, table, idx);
                             }
                         }
@@ -1538,25 +1557,38 @@ macro_rules! ecs_impl {
 
                 let table_indices: Vec<usize> = self.get_cached_tables(component_include).to_vec();
 
-                let matching_entities: std::collections::HashSet<$crate::Entity> = table_indices
-                    .iter()
-                    .filter_map(|&idx| self.tables.get(idx))
-                    .filter(|table| table.mask & component_exclude == 0)
-                    .flat_map(|table| table.entity_indices.iter().copied())
-                    .filter(|&entity| self.entity_locations.locations[entity.id as usize].allocated
-                        && self.entity_matches_tags(entity, tag_include, tag_exclude))
-                    .collect();
+                if tag_include == 0 && tag_exclude == 0 {
+                    for &table_index in &table_indices {
+                        let table = &mut self.tables[table_index];
+                        if table.mask & component_exclude != 0 {
+                            continue;
+                        }
 
-                for &table_index in &table_indices {
-                    let table = &mut self.tables[table_index];
-                    if table.mask & component_exclude != 0 {
-                        continue;
-                    }
-
-                    for idx in 0..table.entity_indices.len() {
-                        let entity = table.entity_indices[idx];
-                        if matching_entities.contains(&entity) {
+                        for idx in 0..table.entity_indices.len() {
+                            let entity = table.entity_indices[idx];
                             f(entity, table, idx);
+                        }
+                    }
+                } else {
+                    let matching_entities: std::collections::HashSet<$crate::Entity> = table_indices
+                        .iter()
+                        .filter_map(|&idx| self.tables.get(idx))
+                        .filter(|table| table.mask & component_exclude == 0)
+                        .flat_map(|table| table.entity_indices.iter().copied())
+                        .filter(|&entity| self.entity_matches_tags(entity, tag_include, tag_exclude))
+                        .collect();
+
+                    for &table_index in &table_indices {
+                        let table = &mut self.tables[table_index];
+                        if table.mask & component_exclude != 0 {
+                            continue;
+                        }
+
+                        for idx in 0..table.entity_indices.len() {
+                            let entity = table.entity_indices[idx];
+                            if matching_entities.contains(&entity) {
+                                f(entity, table, idx);
+                            }
                         }
                     }
                 }
@@ -1594,8 +1626,7 @@ macro_rules! ecs_impl {
                         .filter_map(|&idx| self.tables.get(idx))
                         .filter(|table| table.mask & component_exclude == 0)
                         .flat_map(|table| table.entity_indices.iter().copied())
-                        .filter(|&entity| self.entity_locations.locations[entity.id as usize].allocated
-                            && self.entity_matches_tags(entity, tag_include, tag_exclude))
+                        .filter(|&entity| self.entity_matches_tags(entity, tag_include, tag_exclude))
                         .collect();
 
                     self.tables
@@ -1626,42 +1657,68 @@ macro_rules! ecs_impl {
                 let table_indices: Vec<usize> = self.get_cached_tables(component_include).to_vec();
                 let since_tick = self.last_tick;
 
-                let matching_entities: std::collections::HashSet<$crate::Entity> = table_indices
-                    .iter()
-                    .filter_map(|&idx| self.tables.get(idx))
-                    .filter(|table| table.mask & component_exclude == 0)
-                    .flat_map(|table| table.entity_indices.iter().copied())
-                    .filter(|&entity| self.entity_locations.locations[entity.id as usize].allocated
-                        && self.entity_matches_tags(entity, tag_include, tag_exclude))
-                    .collect();
-
-                for &table_index in &table_indices {
-                    let table = &mut self.tables[table_index];
-                    if table.mask & component_exclude != 0 {
-                        continue;
-                    }
-
-                    for idx in 0..table.entity_indices.len() {
-                        let entity = table.entity_indices[idx];
-                        if !matching_entities.contains(&entity) {
+                if tag_include == 0 && tag_exclude == 0 {
+                    for &table_index in &table_indices {
+                        let table = &mut self.tables[table_index];
+                        if table.mask & component_exclude != 0 {
                             continue;
                         }
 
-                        let mut changed = false;
-                        $(
-                            $crate::paste::paste! {
-                                if table.mask & $mask != 0 && table.[<$name _changed>][idx] > since_tick {
-                                    changed = true;
-                                }
-                            }
-                        )*
+                        for idx in 0..table.entity_indices.len() {
+                            let entity = table.entity_indices[idx];
 
-                        if changed {
-                            f(entity, table, idx);
+                            let mut changed = false;
+                            $(
+                                $crate::paste::paste! {
+                                    if table.mask & $mask != 0 && table.[<$name _changed>][idx] > since_tick {
+                                        changed = true;
+                                    }
+                                }
+                            )*
+
+                            if changed {
+                                f(entity, table, idx);
+                            }
+                        }
+                    }
+                } else {
+                    let matching_entities: std::collections::HashSet<$crate::Entity> = table_indices
+                        .iter()
+                        .filter_map(|&idx| self.tables.get(idx))
+                        .filter(|table| table.mask & component_exclude == 0)
+                        .flat_map(|table| table.entity_indices.iter().copied())
+                        .filter(|&entity| self.entity_matches_tags(entity, tag_include, tag_exclude))
+                        .collect();
+
+                    for &table_index in &table_indices {
+                        let table = &mut self.tables[table_index];
+                        if table.mask & component_exclude != 0 {
+                            continue;
+                        }
+
+                        for idx in 0..table.entity_indices.len() {
+                            let entity = table.entity_indices[idx];
+                            if !matching_entities.contains(&entity) {
+                                continue;
+                            }
+
+                            let mut changed = false;
+                            $(
+                                $crate::paste::paste! {
+                                    if table.mask & $mask != 0 && table.[<$name _changed>][idx] > since_tick {
+                                        changed = true;
+                                    }
+                                }
+                            )*
+
+                            if changed {
+                                f(entity, table, idx);
+                            }
                         }
                     }
                 }
             }
+
         }
 
 
@@ -1781,7 +1838,6 @@ macro_rules! ecs_impl {
 
         pub struct EntityQueryIter<'a> {
             tables: &'a [ComponentArrays],
-            entity_locations: &'a EntityLocations,
             mask: u64,
             table_index: usize,
             array_index: usize,
@@ -1812,13 +1868,7 @@ macro_rules! ecs_impl {
 
                     let entity = table.entity_indices[self.array_index];
                     self.array_index += 1;
-
-                    let id = entity.id as usize;
-                    if id < self.entity_locations.locations.len()
-                        && self.entity_locations.locations[id].allocated
-                    {
-                        return Some(entity);
-                    }
+                    return Some(entity);
                 }
             }
         }
@@ -1946,12 +1996,7 @@ macro_rules! ecs_impl {
         }
 
         fn get_location(locations: &EntityLocations, entity: $crate::Entity) -> Option<(usize, usize)> {
-            let id = entity.id as usize;
-            if id >= locations.locations.len() {
-                return None;
-            }
-
-            let location = &locations.locations[id];
+            let location = locations.get(entity.id)?;
             if !location.allocated || location.generation != entity.generation {
                 return None;
             }
@@ -1964,31 +2009,17 @@ macro_rules! ecs_impl {
             entity: $crate::Entity,
             location: (usize, usize),
         ) {
-            let id = entity.id as usize;
-            if id >= locations.locations.len() {
-                locations
-                    .locations
-                    .resize(id + 1, EntityLocation::default());
-            }
-
-            locations.locations[id] = EntityLocation {
+            locations.insert(entity.id, EntityLocation {
                 generation: entity.generation,
                 table_index: location.0 as u32,
                 array_index: location.1 as u32,
                 allocated: true,
-            };
+            });
         }
 
         fn create_entity(world: &mut $world) -> $crate::Entity {
             if let Some((id, next_gen)) = world.allocator.free_ids.pop() {
-                let id_usize = id as usize;
-                if id_usize >= world.entity_locations.locations.len() {
-                    world.entity_locations.locations.resize(
-                        (world.entity_locations.locations.len() * 2).max(64),
-                        EntityLocation::default(),
-                    );
-                }
-                world.entity_locations.locations[id_usize].generation = next_gen;
+                world.entity_locations.ensure_slot(id, next_gen);
                 $crate::Entity {
                     id,
                     generation: next_gen,
@@ -1996,13 +2027,7 @@ macro_rules! ecs_impl {
             } else {
                 let id = world.allocator.next_id;
                 world.allocator.next_id += 1;
-                let id_usize = id as usize;
-                if id_usize >= world.entity_locations.locations.len() {
-                    world.entity_locations.locations.resize(
-                        (world.entity_locations.locations.len() * 2).max(64),
-                        EntityLocation::default(),
-                    );
-                }
+                world.entity_locations.ensure_slot(id, 0);
                 $crate::Entity { id, generation: 0 }
             }
         }
@@ -3903,7 +3928,7 @@ mod tests {
         let mut world = World::default();
         let entity = world.spawn_entities(POSITION, 1)[0];
         let source_table_index =
-            world.entity_locations.locations[entity.id as usize].table_index as usize;
+            world.entity_locations.get(entity.id).unwrap().table_index as usize;
 
         world.add_components(entity, VELOCITY | HEALTH);
 
@@ -3919,7 +3944,7 @@ mod tests {
 
         let entity2 = world.spawn_entities(POSITION, 1)[0];
         let source_table_index2 =
-            world.entity_locations.locations[entity2.id as usize].table_index as usize;
+            world.entity_locations.get(entity2.id).unwrap().table_index as usize;
 
         assert_eq!(source_table_index, source_table_index2);
 
@@ -3937,7 +3962,7 @@ mod tests {
         let mut world = World::default();
         let entity = world.spawn_entities(POSITION | VELOCITY | HEALTH, 1)[0];
         let source_table_index =
-            world.entity_locations.locations[entity.id as usize].table_index as usize;
+            world.entity_locations.get(entity.id).unwrap().table_index as usize;
 
         world.remove_components(entity, VELOCITY | HEALTH);
 
@@ -3953,7 +3978,7 @@ mod tests {
 
         let entity2 = world.spawn_entities(POSITION | VELOCITY | HEALTH, 1)[0];
         let source_table_index2 =
-            world.entity_locations.locations[entity2.id as usize].table_index as usize;
+            world.entity_locations.get(entity2.id).unwrap().table_index as usize;
 
         assert_eq!(source_table_index, source_table_index2);
 
