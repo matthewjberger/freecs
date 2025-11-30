@@ -24,7 +24,7 @@ Add this to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-freecs = "1.3.0"
+freecs = "1.3.2"
 ```
 
 And in `main.rs`:
