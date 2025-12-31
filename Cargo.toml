@@ -15,6 +15,9 @@ rust-version = "1.90"
 [lib]
 doctest = false
 
+[features]
+audio = []
+
 [dependencies]
 paste = "1.0.15"
 serde = { version = "1.0", features = ["derive"] }

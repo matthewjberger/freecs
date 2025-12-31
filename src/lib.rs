@@ -396,6 +396,30 @@
 //!     // Process event
 //! }
 //! ```
+//!
+//! ## Conditional Compilation
+//!
+//! Resources support `#[cfg(...)]` attributes for conditional compilation.
+//! This is useful for optional features like audio, physics, or platform-specific functionality:
+//!
+//! ```rust,ignore
+//! ecs! {
+//!     World {
+//!         position: Position => POSITION,
+//!         velocity: Velocity => VELOCITY,
+//!     }
+//!     Resources {
+//!         delta_time: f32,
+//!         #[cfg(feature = "audio")]
+//!         audio_engine: AudioEngine,
+//!         #[cfg(feature = "physics")]
+//!         physics_world: PhysicsWorld,
+//!     }
+//! }
+//! ```
+//!
+//! When a resource has a `#[cfg(...)]` attribute, the resource field in the `Resources` struct
+//! is conditionally compiled.
 
 pub use paste;
 

@@ -16,6 +16,8 @@ ecs! {
     Resources {
         delta_time: f32,
         frame_count: u32,
+        #[cfg(feature = "audio")]
+        audio_volume: f32,
     }
 }
 
@@ -137,6 +139,13 @@ pub fn main() {
         "Entities with health: {}",
         world.query_entities(HEALTH).count()
     );
+
+    #[cfg(feature = "audio")]
+    {
+        println!("\n=== Audio Feature (enabled via --features audio) ===");
+        world.resources.audio_volume = 0.8;
+        println!("Audio volume set to: {}", world.resources.audio_volume);
+    }
 }
 
 use components::*;
