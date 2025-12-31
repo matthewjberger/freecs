@@ -24,7 +24,7 @@ Add this to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-freecs = "1.3.3"
+freecs = "1.3.4"
 ```
 
 And in `main.rs`:
@@ -356,6 +356,7 @@ fn health_system(world: &mut World) {
 ```
 
 Each event type gets these generated methods:
+
 - `send_<event>(event)` - Queue an event
 - `read_<event>()` - Get an iterator over all queued events
 - `collect_<event>()` - Collect events into a Vec (eliminates boilerplate)
@@ -530,6 +531,7 @@ world.remove_selected(entity);
 ```
 
 Tags are perfect for:
+
 - Runtime categorization (player, enemy, npc)
 - Selection/highlighting states
 - Temporary status flags
@@ -582,6 +584,7 @@ fn spawn_system(world: &mut World) {
 ```
 
 Available command buffer operations:
+
 - `queue_spawn(mask)` - Queue entity spawn
 - `queue_despawn_entity(entity)` - Queue entity despawn
 - `queue_add_components(entity, mask)` - Queue component addition
@@ -669,6 +672,7 @@ fn render_entities(world: &World) {
 ```
 
 **Schedule API**:
+
 - `add_system_mut(fn(&mut World))` - Add a system that can mutate world state
 - `add_system(fn(&World))` - Add a read-only system (enforces immutability)
 
