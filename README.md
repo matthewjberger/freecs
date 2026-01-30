@@ -24,7 +24,7 @@ Add this to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-freecs = "1.4.0"
+freecs = "1.5.0"
 ```
 
 And in `main.rs`:
@@ -887,25 +887,27 @@ for event in world.drain_collision() {
 
 ## Conditional Compilation
 
-Resources support `#[cfg(...)]` attributes for conditional compilation. This is useful for optional features like audio, physics, or platform-specific functionality:
+Both components and resources support `#[cfg(...)]` attributes for conditional compilation. This is useful for debug-only components, optional features, or platform-specific functionality:
 
 ```rust
 ecs! {
     World {
         position: Position => POSITION,
         velocity: Velocity => VELOCITY,
+        #[cfg(debug_assertions)]
+        debug_info: DebugInfo => DEBUG_INFO,
+        #[cfg(feature = "physics")]
+        rigid_body: RigidBody => RIGID_BODY,
     }
     Resources {
         delta_time: f32,
         #[cfg(feature = "audio")]
         audio_engine: AudioEngine,
-        #[cfg(feature = "physics")]
-        physics_world: PhysicsWorld,
     }
 }
 ```
 
-When a resource has a `#[cfg(...)]` attribute, the resource field in the `Resources` struct is conditionally compiled based on the feature flag or target configuration.
+When a component or resource has a `#[cfg(...)]` attribute, all related generated code (struct fields, accessor methods, mask constants, enum variants, etc.) is conditionally compiled based on the feature flag or target configuration.
 
 ## License
 

@@ -399,27 +399,29 @@
 //!
 //! ## Conditional Compilation
 //!
-//! Resources support `#[cfg(...)]` attributes for conditional compilation.
-//! This is useful for optional features like audio, physics, or platform-specific functionality:
+//! Both components and resources support `#[cfg(...)]` attributes for conditional compilation.
+//! This is useful for debug-only components, optional features, or platform-specific functionality:
 //!
 //! ```rust,ignore
 //! ecs! {
 //!     World {
 //!         position: Position => POSITION,
 //!         velocity: Velocity => VELOCITY,
+//!         #[cfg(debug_assertions)]
+//!         debug_info: DebugInfo => DEBUG_INFO,
+//!         #[cfg(feature = "physics")]
+//!         rigid_body: RigidBody => RIGID_BODY,
 //!     }
 //!     Resources {
 //!         delta_time: f32,
 //!         #[cfg(feature = "audio")]
 //!         audio_engine: AudioEngine,
-//!         #[cfg(feature = "physics")]
-//!         physics_world: PhysicsWorld,
 //!     }
 //! }
 //! ```
 //!
-//! When a resource has a `#[cfg(...)]` attribute, the resource field in the `Resources` struct
-//! is conditionally compiled.
+//! When a component or resource has a `#[cfg(...)]` attribute, all related generated code
+//! (struct fields, accessor methods, mask constants, etc.) is conditionally compiled.
 
 pub use paste;
 
@@ -664,7 +666,7 @@ impl<W> Default for Schedule<W> {
 macro_rules! ecs {
     (
         $world:ident {
-            $($name:ident: $type:ty => $mask:ident),* $(,)?
+            $($(#[$comp_attr:meta])* $name:ident: $type:ty => $mask:ident),* $(,)?
         }
         Tags {
             $($tag_name:ident => $tag_mask:ident),* $(,)?
@@ -678,7 +680,7 @@ macro_rules! ecs {
     ) => {
         $crate::ecs_impl! {
             $world {
-                $($name: $type => $mask),*
+                $($(#[$comp_attr])* $name: $type => $mask),*
             }
             Tags {
                 $($tag_name => $tag_mask),*
@@ -694,7 +696,7 @@ macro_rules! ecs {
 
     (
         $world:ident {
-            $($name:ident: $type:ty => $mask:ident),* $(,)?
+            $($(#[$comp_attr:meta])* $name:ident: $type:ty => $mask:ident),* $(,)?
         }
         Tags {
             $($tag_name:ident => $tag_mask:ident),* $(,)?
@@ -705,7 +707,7 @@ macro_rules! ecs {
     ) => {
         $crate::ecs_impl! {
             $world {
-                $($name: $type => $mask),*
+                $($(#[$comp_attr])* $name: $type => $mask),*
             }
             Tags {
                 $($tag_name => $tag_mask),*
@@ -719,7 +721,7 @@ macro_rules! ecs {
 
     (
         $world:ident {
-            $($name:ident: $type:ty => $mask:ident),* $(,)?
+            $($(#[$comp_attr:meta])* $name:ident: $type:ty => $mask:ident),* $(,)?
         }
         Events {
             $($event_name:ident: $event_type:ty),* $(,)?
@@ -730,7 +732,7 @@ macro_rules! ecs {
     ) => {
         $crate::ecs_impl! {
             $world {
-                $($name: $type => $mask),*
+                $($(#[$comp_attr])* $name: $type => $mask),*
             }
             Tags {}
             Events {
@@ -744,7 +746,7 @@ macro_rules! ecs {
 
     (
         $world:ident {
-            $($name:ident: $type:ty => $mask:ident),* $(,)?
+            $($(#[$comp_attr:meta])* $name:ident: $type:ty => $mask:ident),* $(,)?
         }
         $resources:ident {
             $($(#[$attr:meta])*  $resource_name:ident: $resource_type:ty),* $(,)?
@@ -752,7 +754,7 @@ macro_rules! ecs {
     ) => {
         $crate::ecs_impl! {
             $world {
-                $($name: $type => $mask),*
+                $($(#[$comp_attr])* $name: $type => $mask),*
             }
             Tags {}
             Events {}
@@ -767,7 +769,7 @@ macro_rules! ecs {
 macro_rules! ecs_impl {
     (
         $world:ident {
-            $($name:ident: $type:ty => $mask:ident),* $(,)?
+            $($(#[$comp_attr:meta])* $name:ident: $type:ty => $mask:ident),* $(,)?
         }
         Tags {
             $($tag_name:ident => $tag_mask:ident),* $(,)?
@@ -782,7 +784,7 @@ macro_rules! ecs_impl {
         #[allow(unused)]
         #[derive(Default, Debug, Clone)]
         pub struct EntityBuilder {
-            $($name: Option<$type>,)*
+            $($(#[$comp_attr])* $name: Option<$type>,)*
         }
 
         #[allow(unused)]
@@ -792,6 +794,7 @@ macro_rules! ecs_impl {
             }
 
             $(
+                $(#[$comp_attr])*
                 $crate::paste::paste! {
                     pub fn [<with_$name>](&mut self, value: $type) -> &mut Self {
                         self.$name = Some(value);
@@ -803,6 +806,7 @@ macro_rules! ecs_impl {
             pub fn spawn(&self, world: &mut $world, instances: usize) -> Vec<$crate::Entity> {
                 let mut mask = 0;
                 $(
+                    $(#[$comp_attr])*
                     if self.$name.is_some() {
                         mask |= $mask;
                     }
@@ -810,6 +814,7 @@ macro_rules! ecs_impl {
                 let entities = world.spawn_entities(mask, instances);
                 for entity in entities.iter() {
                     $(
+                        $(#[$comp_attr])*
                         $crate::paste::paste! {
                             if let Some(component) = self.$name.clone() {
                                 world.[<set_$name>](*entity, component);
@@ -825,18 +830,18 @@ macro_rules! ecs_impl {
         #[allow(clippy::upper_case_acronyms)]
         #[allow(non_camel_case_types)]
         pub enum Component {
-            $($mask,)*
+            $($(#[$comp_attr])* $mask,)*
             $($tag_mask,)*
         }
 
-        $(pub const $mask: u64 = 1 << (Component::$mask as u64);)*
+        $($(#[$comp_attr])* pub const $mask: u64 = 1 << (Component::$mask as u64);)*
         $(pub const $tag_mask: u64 = 1 << (Component::$tag_mask as u64);)*
 
         const ALL_TAGS_MASK: u64 = 0 $(| $tag_mask)*;
 
         pub const COMPONENT_COUNT: usize = {
             let mut count = 0;
-            $(count += 1; let _ = Component::$mask;)*
+            $($(#[$comp_attr])* { count += 1; let _ = Component::$mask; })*
             $(count += 1; let _ = Component::$tag_mask;)*
             count
         };
@@ -905,6 +910,7 @@ macro_rules! ecs_impl {
                 AddComponents { entity: $crate::Entity, mask: u64 },
                 RemoveComponents { entity: $crate::Entity, mask: u64 },
                 $(
+                    $(#[$comp_attr])*
                     [<Set $mask:camel>] { entity: $crate::Entity, value: $type },
                 )*
                 $(
@@ -980,6 +986,7 @@ macro_rules! ecs_impl {
             }
 
             $(
+                $(#[$comp_attr])*
                 $crate::paste::paste! {
                     #[inline]
                     pub fn [<get_ $name>](&self, entity: $crate::Entity) -> Option<&$type> {
@@ -1121,6 +1128,7 @@ macro_rules! ecs_impl {
 
                 self.tables[table_index].entity_indices.reserve(count);
                 $(
+                    $(#[$comp_attr])*
                     $crate::paste::paste! {
                         if mask & $mask != 0 {
                             self.tables[table_index].$name.reserve(count);
@@ -1135,6 +1143,7 @@ macro_rules! ecs_impl {
 
                     self.tables[table_index].entity_indices.push(entity);
                     $(
+                        $(#[$comp_attr])*
                         $crate::paste::paste! {
                             if mask & $mask != 0 {
                                 self.tables[table_index].$name.push(<$type>::default());
@@ -1162,6 +1171,7 @@ macro_rules! ecs_impl {
 
                 self.tables[table_index].entity_indices.reserve(count);
                 $(
+                    $(#[$comp_attr])*
                     $crate::paste::paste! {
                         if mask & $mask != 0 {
                             self.tables[table_index].$name.reserve(count);
@@ -1178,6 +1188,7 @@ macro_rules! ecs_impl {
 
                     self.tables[table_index].entity_indices.push(entity);
                     $(
+                        $(#[$comp_attr])*
                         $crate::paste::paste! {
                             if mask & $mask != 0 {
                                 self.tables[table_index].$name.push(<$type>::default());
@@ -1770,8 +1781,8 @@ macro_rules! ecs_impl {
         $crate::paste::paste! {
             #[derive(Default)]
             pub struct ComponentArrays {
-                $(pub $name: Vec<$type>,)*
-                $(pub [<$name _changed>]: Vec<u32>,)*
+                $($(#[$comp_attr])* pub $name: Vec<$type>,)*
+                $($(#[$comp_attr])* pub [<$name _changed>]: Vec<u32>,)*
                 pub entity_indices: Vec<$crate::Entity>,
                 pub mask: u64,
             }
@@ -1854,6 +1865,7 @@ macro_rules! ecs_impl {
             }
 
             $(
+                $(#[$comp_attr])*
                 $crate::paste::paste! {
                     pub fn [<iter_ $name>]<F>(&self, mut f: F)
                     where
@@ -1914,6 +1926,7 @@ macro_rules! ecs_impl {
         }
 
         $(
+            $(#[$comp_attr])*
             $crate::paste::paste! {
                 pub struct [<$mask:camel QueryIter>]<'a> {
                     tables: &'a [ComponentArrays],
@@ -1975,7 +1988,7 @@ macro_rules! ecs_impl {
 
         fn get_component_index(mask: u64) -> Option<usize> {
             match mask {
-                $($mask => Some(Component::$mask as _),)*
+                $($(#[$comp_attr])* $mask => Some(Component::$mask as _),)*
                 _ => None,
             }
         }
@@ -1989,6 +2002,7 @@ macro_rules! ecs_impl {
             }
 
             $(
+                $(#[$comp_attr])*
                 $crate::paste::paste! {
                     if arrays.mask & $mask != 0 {
                         arrays.$name.swap_remove(index);
@@ -2013,10 +2027,13 @@ macro_rules! ecs_impl {
                 let from_table_ref = &mut world.tables[from_table];
                 (
                     $(
-                        if from_table_ref.mask & $mask != 0 {
-                            Some(std::mem::take(&mut from_table_ref.$name[from_index]))
-                        } else {
-                            None
+                        $(#[$comp_attr])*
+                        {
+                            if from_table_ref.mask & $mask != 0 {
+                                Some(std::mem::take(&mut from_table_ref.$name[from_index]))
+                            } else {
+                                None
+                            }
                         },
                     )*
                 )
@@ -2080,6 +2097,7 @@ macro_rules! ecs_impl {
         ) {
             let ($($name,)*) = components;
             $(
+                $(#[$comp_attr])*
                 $crate::paste::paste! {
                     if arrays.mask & $mask != 0 {
                         if let Some(component) = $name {
@@ -2109,7 +2127,7 @@ macro_rules! ecs_impl {
 
             world.invalidate_query_cache_for_table(mask, table_index);
 
-            for comp_mask in [$($mask,)*] {
+            for comp_mask in [$($(#[$comp_attr])* $mask,)*] {
                 if let Some(comp_idx) = get_component_index(comp_mask) {
                     for (idx, table) in world.tables.iter().enumerate() {
                         if table.mask | comp_mask == mask {
@@ -4123,5 +4141,48 @@ mod tests {
 
         let final_cache_size = world.query_cache.len();
         assert_eq!(final_cache_size, 3);
+    }
+
+    mod cfg_test {
+        #[derive(Default, Debug, Clone)]
+        pub struct BaseComponent {
+            pub value: i32,
+        }
+
+        #[derive(Default, Debug, Clone)]
+        pub struct DebugComponent {
+            pub debug_value: i32,
+        }
+
+        crate::ecs! {
+            CfgWorld {
+                base: BaseComponent => BASE,
+                #[cfg(debug_assertions)]
+                debug_only: DebugComponent => DEBUG_ONLY,
+            }
+            CfgResources {
+                counter: i32,
+            }
+        }
+
+        #[test]
+        fn test_cfg_attribute_on_components() {
+            let mut world = CfgWorld::default();
+
+            let entities = world.spawn_entities(BASE, 3);
+            assert_eq!(entities.len(), 3);
+
+            world.set_base(entities[0], BaseComponent { value: 10 });
+            assert_eq!(world.get_base(entities[0]).unwrap().value, 10);
+
+            #[cfg(debug_assertions)]
+            {
+                world.set_debug_only(entities[0], DebugComponent { debug_value: 42 });
+                assert_eq!(world.get_debug_only(entities[0]).unwrap().debug_value, 42);
+
+                let debug_entities = world.spawn_entities(DEBUG_ONLY, 2);
+                assert_eq!(debug_entities.len(), 2);
+            }
+        }
     }
 }
