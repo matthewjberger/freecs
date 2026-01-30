@@ -24,7 +24,7 @@ Add this to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-freecs = "1.3.4"
+freecs = "1.4.0"
 ```
 
 And in `main.rs`:
@@ -223,10 +223,34 @@ The `ecs!` macro generates type-safe methods for each component:
 // For each component, you get:
 world.get_position(entity)        // -> Option<&Position>
 world.get_position_mut(entity)    // -> Option<&mut Position>
+world.modify_position(entity, f)  // -> Option<R> - mutate via closure, returns closure result
 world.set_position(entity, pos)   // Sets or adds the component
 world.add_position(entity)        // Adds with default value
 world.remove_position(entity)     // Removes the component
 world.entity_has_position(entity) // Checks if entity has component
+```
+
+### Closure-Based Mutation
+
+The `modify_<component>` methods allow you to mutate a component via a closure, which automatically releases the borrow when done. This is useful when you need to mutate a component and then immediately access the world again:
+
+```rust
+// Instead of this pattern (requires explicit drop):
+let player = world.get_player_mut(entity).unwrap();
+player.stamina -= 10.0;
+let _ = player;  // Must drop to release borrow
+let pos = world.get_position(entity);
+
+// Use modify for cleaner code:
+world.modify_player(entity, |p| p.stamina -= 10.0);
+let pos = world.get_position(entity);  // No drop needed
+
+// The closure can return values:
+let old_health = world.modify_health(entity, |h| {
+    let old = h.value;
+    h.value = 100.0;
+    old
+});
 ```
 
 ## Systems

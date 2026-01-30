@@ -1009,6 +1009,22 @@ macro_rules! ecs_impl {
                         }
                     }
 
+                    $crate::paste::paste! {
+                        #[inline]
+                        pub fn [<modify_ $name>]<R>(&mut self, entity: $crate::Entity, f: impl FnOnce(&mut $type) -> R) -> Option<R> {
+                            let (table_index, array_index) = get_location(&self.entity_locations, entity)?;
+                            let current_tick = self.current_tick;
+                            let table = &mut self.tables[table_index];
+
+                            if table.mask & $mask == 0 {
+                                return None;
+                            }
+
+                            table.[<$name _changed>][array_index] = current_tick;
+                            Some(f(&mut table.$name[array_index]))
+                        }
+                    }
+
                     #[inline]
                     pub fn [<entity_has_ $name>](&self, entity: $crate::Entity) -> bool {
                         self.entity_has_components(entity, $mask)
@@ -2255,6 +2271,38 @@ mod tests {
 
         let pos = world.get_position(entity).unwrap();
         assert_eq!(pos.x, 5.0);
+    }
+
+    #[test]
+    fn test_modify_component() {
+        let (mut world, entity) = setup_test_world();
+
+        let pos = world.get_position(entity).unwrap();
+        assert_eq!(pos.x, 1.0);
+        assert_eq!(pos.y, 2.0);
+
+        let old_x = world.modify_position(entity, |pos| {
+            let old = pos.x;
+            pos.x = 10.0;
+            pos.y = 20.0;
+            old
+        });
+        assert_eq!(old_x, Some(1.0));
+
+        let pos = world.get_position(entity).unwrap();
+        assert_eq!(pos.x, 10.0);
+        assert_eq!(pos.y, 20.0);
+
+        let invalid_entity = Entity {
+            id: 9999,
+            generation: 0,
+        };
+        let result = world.modify_position(invalid_entity, |pos| pos.x = 100.0);
+        assert!(result.is_none());
+
+        let entity_no_health = world.spawn_entities(POSITION, 1)[0];
+        let result = world.modify_health(entity_no_health, |h| h.value = 50.0);
+        assert!(result.is_none());
     }
 
     #[test]
