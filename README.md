@@ -657,14 +657,14 @@ fn main() {
     // Create separate schedules for game logic and rendering
     let mut game_schedule = Schedule::new();
     game_schedule
-        .add_system_mut(input_system)      // Mutable systems
-        .add_system_mut(physics_system)
-        .add_system_mut(collision_system);
+        .push("input", input_system)
+        .push("physics", physics_system)
+        .push("collision", collision_system);
 
     let mut render_schedule = Schedule::new();
     render_schedule
-        .add_system(render_grid)           // Read-only systems
-        .add_system(render_entities);
+        .push_readonly("render_grid", render_grid)
+        .push_readonly("render_entities", render_entities);
 
     // Game loop
     loop {
@@ -697,10 +697,13 @@ fn render_entities(world: &World) {
 
 **Schedule API**:
 
-- `add_system_mut(fn(&mut World))` - Add a system that can mutate world state
-- `add_system(fn(&World))` - Add a read-only system (enforces immutability)
+- `push(name, fn(&mut W))` - Append a named mutable system
+- `push_readonly(name, fn(&W))` - Append a named read-only system
+- `insert_before(target, name, system)` / `insert_after(target, name, system)` - Positional insertion
+- `remove(name)` - Remove a system by name
+- `contains(name)` - Check if a system exists
 
-Systems in a schedule execute sequentially in the order they were added. Use `add_system_mut` for game logic systems that modify state, and `add_system` for rendering and query-only systems that don't need mutation.
+All systems require a `&'static str` name. Systems execute sequentially in insertion order.
 
 ## Entity Builder
 
