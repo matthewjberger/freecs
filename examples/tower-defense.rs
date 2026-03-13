@@ -2214,33 +2214,33 @@ async fn main() {
 
     let mut game_schedule = Schedule::new();
     game_schedule
-        .add_system_mut(wave_spawning_system_wrapper)
-        .add_system_mut(enemy_movement_system_wrapper)
-        .add_system_mut(tower_targeting_system)
-        .add_system_mut(tower_shooting_system_wrapper)
-        .add_system_mut(projectile_movement_system_wrapper)
-        .add_system_mut(visual_effects_system_wrapper)
-        .add_system_mut(update_money_popups_wrapper)
-        .add_system_mut(enemy_died_event_handler)
-        .add_system_mut(enemy_spawned_event_handler)
-        .add_system_mut(enemy_reached_end_event_handler)
-        .add_system_mut(projectile_hit_event_handler)
-        .add_system_mut(tower_placed_event_handler)
-        .add_system_mut(tower_sold_event_handler)
-        .add_system_mut(tower_upgraded_event_handler)
-        .add_system_mut(wave_started_event_handler)
-        .add_system_mut(wave_completed_event_handler)
-        .add_system(tag_query_example_system);
+        .push("wave_spawning", wave_spawning_system_wrapper)
+        .push("enemy_movement", enemy_movement_system_wrapper)
+        .push("tower_targeting", tower_targeting_system)
+        .push("tower_shooting", tower_shooting_system_wrapper)
+        .push("projectile_movement", projectile_movement_system_wrapper)
+        .push("visual_effects", visual_effects_system_wrapper)
+        .push("update_money_popups", update_money_popups_wrapper)
+        .push("enemy_died", enemy_died_event_handler)
+        .push("enemy_spawned", enemy_spawned_event_handler)
+        .push("enemy_reached_end", enemy_reached_end_event_handler)
+        .push("projectile_hit", projectile_hit_event_handler)
+        .push("tower_placed", tower_placed_event_handler)
+        .push("tower_sold", tower_sold_event_handler)
+        .push("tower_upgraded", tower_upgraded_event_handler)
+        .push("wave_started", wave_started_event_handler)
+        .push("wave_completed", wave_completed_event_handler)
+        .push_readonly("tag_query_example", tag_query_example_system);
 
     let mut render_schedule = Schedule::new();
     render_schedule
-        .add_system(render_grid)
-        .add_system(render_towers)
-        .add_system(render_enemies)
-        .add_system(render_projectiles)
-        .add_system(render_visual_effects)
-        .add_system(render_money_popups)
-        .add_system(render_ui);
+        .push_readonly("render_grid", render_grid)
+        .push_readonly("render_towers", render_towers)
+        .push_readonly("render_enemies", render_enemies)
+        .push_readonly("render_projectiles", render_projectiles)
+        .push_readonly("render_visual_effects", render_visual_effects)
+        .push_readonly("render_money_popups", render_money_popups)
+        .push_readonly("render_ui", render_ui);
 
     loop {
         clear_background(Color::new(0.05, 0.05, 0.05, 1.0));

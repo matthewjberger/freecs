@@ -270,9 +270,9 @@
 //! let mut schedule = Schedule::new();
 //!
 //! schedule
-//!     .add_system_mut(input_system)
-//!     .add_system_mut(physics_system)
-//!     .add_system(render_system);
+//!     .push("input", input_system)
+//!     .push("physics", physics_system)
+//!     .push_readonly("render", render_system);
 //!
 //! // Game loop
 //! loop {
@@ -638,98 +638,145 @@ impl<T> EventQueue<T> {
     }
 }
 
-/// System scheduling for automatic execution ordering.
-///
-/// Allows organizing systems into stages that run sequentially.
-///
-/// # Examples
-///
-/// ```
-/// use freecs::Schedule;
-///
-/// fn physics_system(world: &mut World) {
-///     // Physics logic - mutates world state
-/// }
-///
-/// fn render_system(world: &World) {
-///     // Rendering logic - read-only
-/// }
-///
-/// let mut schedule = Schedule::new();
-/// schedule.add_system_mut(physics_system);
-/// schedule.add_system(render_system);
-///
-/// loop {
-///     schedule.run(&mut world);
-///     world.step();
-/// }
-/// ```
-type SystemFn<W> = Box<dyn FnMut(&mut W) + Send>;
+struct ScheduleEntry<W> {
+    name: &'static str,
+    system: Box<dyn FnMut(&mut W) + Send>,
+}
 
 pub struct Schedule<W> {
-    systems: Vec<SystemFn<W>>,
+    entries: Vec<ScheduleEntry<W>>,
 }
 
 impl<W> Schedule<W> {
-    /// Creates a new empty schedule.
     pub fn new() -> Self {
         Self {
-            systems: Vec::new(),
+            entries: Vec::new(),
         }
     }
 
-    /// Adds a system to the schedule.
-    ///
-    /// Systems are executed in the order they are added.
-    /// Returns a mutable reference to the schedule for method chaining.
-    ///
-    /// # Example
-    ///
-    /// ```rust
-    /// let mut schedule = Schedule::new();
-    /// schedule
-    ///     .add_system_mut(physics_system)
-    ///     .add_system_mut(collision_system)
-    ///     .add_system(render_system);
-    /// ```
-    pub fn add_system_mut<F>(&mut self, system: F) -> &mut Self
+    pub fn push<F>(&mut self, name: &'static str, system: F) -> &mut Self
     where
         F: FnMut(&mut W) + Send + 'static,
     {
-        self.systems.push(Box::new(system));
+        self.entries.push(ScheduleEntry {
+            name,
+            system: Box::new(system),
+        });
         self
     }
 
-    /// Adds a read-only system to the schedule.
-    ///
-    /// Read-only systems take an immutable reference to the world,
-    /// making it clear that they don't modify state (e.g., rendering systems).
-    ///
-    /// # Example
-    /// ```
-    /// # use freecs::Schedule;
-    /// # struct World;
-    /// # fn render_system(world: &World) {}
-    /// let mut schedule = Schedule::new();
-    /// schedule.add_system(render_system);
-    /// ```
-    pub fn add_system<F>(&mut self, mut system: F) -> &mut Self
+    pub fn push_readonly<F>(&mut self, name: &'static str, mut system: F) -> &mut Self
     where
         F: FnMut(&W) + Send + 'static,
     {
-        self.systems.push(Box::new(move |world: &mut W| {
-            system(&*world);
-        }));
+        self.entries.push(ScheduleEntry {
+            name,
+            system: Box::new(move |world: &mut W| {
+                system(&*world);
+            }),
+        });
         self
     }
 
-    /// Runs all systems in order, passing the world to each.
-    ///
-    /// Systems execute sequentially in the order they were added.
+    pub fn insert_before<F>(&mut self, target: &str, name: &'static str, system: F) -> &mut Self
+    where
+        F: FnMut(&mut W) + Send + 'static,
+    {
+        let index = self
+            .index_of(target)
+            .unwrap_or_else(|| panic!("Schedule::insert_before: system \"{target}\" not found"));
+        self.entries.insert(
+            index,
+            ScheduleEntry {
+                name,
+                system: Box::new(system),
+            },
+        );
+        self
+    }
+
+    pub fn insert_before_readonly<F>(
+        &mut self,
+        target: &str,
+        name: &'static str,
+        mut system: F,
+    ) -> &mut Self
+    where
+        F: FnMut(&W) + Send + 'static,
+    {
+        let index = self.index_of(target).unwrap_or_else(|| {
+            panic!("Schedule::insert_before_readonly: system \"{target}\" not found")
+        });
+        self.entries.insert(
+            index,
+            ScheduleEntry {
+                name,
+                system: Box::new(move |world: &mut W| {
+                    system(&*world);
+                }),
+            },
+        );
+        self
+    }
+
+    pub fn insert_after<F>(&mut self, target: &str, name: &'static str, system: F) -> &mut Self
+    where
+        F: FnMut(&mut W) + Send + 'static,
+    {
+        let index = self
+            .index_of(target)
+            .unwrap_or_else(|| panic!("Schedule::insert_after: system \"{target}\" not found"));
+        self.entries.insert(
+            index + 1,
+            ScheduleEntry {
+                name,
+                system: Box::new(system),
+            },
+        );
+        self
+    }
+
+    pub fn insert_after_readonly<F>(
+        &mut self,
+        target: &str,
+        name: &'static str,
+        mut system: F,
+    ) -> &mut Self
+    where
+        F: FnMut(&W) + Send + 'static,
+    {
+        let index = self.index_of(target).unwrap_or_else(|| {
+            panic!("Schedule::insert_after_readonly: system \"{target}\" not found")
+        });
+        self.entries.insert(
+            index + 1,
+            ScheduleEntry {
+                name,
+                system: Box::new(move |world: &mut W| {
+                    system(&*world);
+                }),
+            },
+        );
+        self
+    }
+
+    pub fn remove(&mut self, name: &str) -> &mut Self {
+        self.entries.retain(|entry| entry.name != name);
+        self
+    }
+
+    pub fn contains(&self, name: &str) -> bool {
+        self.entries.iter().any(|entry| entry.name == name)
+    }
+
     pub fn run(&mut self, world: &mut W) {
-        for system in &mut self.systems {
-            system(world);
+        for entry in &mut self.entries {
+            (entry.system)(world);
         }
+    }
+
+    fn index_of(&self, name: &str) -> Option<usize> {
+        self.entries.iter().position(|entry| entry.name == name)
     }
 }
 
@@ -5584,7 +5631,7 @@ mod tests {
         world.resources._delta_time = 0.016;
 
         let mut schedule = Schedule::new();
-        schedule.add_system_mut(|world: &mut World| {
+        schedule.push("tick", |world: &mut World| {
             world.resources._delta_time += 0.016;
         });
 
@@ -5605,7 +5652,7 @@ mod tests {
 
         let mut schedule = Schedule::new();
 
-        schedule.add_system_mut(|world: &mut World| {
+        schedule.push("physics", |world: &mut World| {
             let dt = world.resources._delta_time;
             let updates: Vec<(Entity, Velocity)> = world
                 .query_entities(POSITION | VELOCITY)
@@ -5620,7 +5667,7 @@ mod tests {
             }
         });
 
-        schedule.add_system_mut(|world: &mut World| {
+        schedule.push("double_dt", |world: &mut World| {
             world.resources._delta_time *= 2.0;
         });
 
@@ -5639,10 +5686,10 @@ mod tests {
 
         let mut schedule = Schedule::new();
         schedule
-            .add_system_mut(|world: &mut World| {
+            .push("add", |world: &mut World| {
                 world.resources._delta_time += 1.0;
             })
-            .add_system_mut(|world: &mut World| {
+            .push("multiply", |world: &mut World| {
                 world.resources._delta_time *= 2.0;
             });
 
@@ -5658,14 +5705,14 @@ mod tests {
 
         let mut schedule = Schedule::new();
 
-        schedule.add_system_mut(|world: &mut World| {
+        schedule.push("set_x", |world: &mut World| {
             let entities: Vec<Entity> = world.query_entities(POSITION).collect();
             if let Some(pos) = world.get_position_mut(entities[0]) {
                 pos.x = 10.0;
             }
         });
 
-        schedule.add_system_mut(|world: &mut World| {
+        schedule.push("double_x", |world: &mut World| {
             let entities: Vec<Entity> = world.query_entities(POSITION).collect();
             if let Some(pos) = world.get_position_mut(entities[0]) {
                 pos.x *= 2.0;
@@ -5686,7 +5733,7 @@ mod tests {
 
         let mut schedule = Schedule::new();
 
-        schedule.add_system_mut(|world: &mut World| {
+        schedule.push("damage", |world: &mut World| {
             let entities: Vec<Entity> = world.query_entities(HEALTH).collect();
             for entity in entities {
                 if let Some(health) = world.get_health_mut(entity) {
@@ -5695,7 +5742,7 @@ mod tests {
             }
         });
 
-        schedule.add_system_mut(|world: &mut World| {
+        schedule.push("decay", |world: &mut World| {
             let entities: Vec<Entity> = world.query_entities(HEALTH).collect();
             for entity in entities {
                 if let Some(health) = world.get_health_mut(entity) {
@@ -5708,6 +5755,142 @@ mod tests {
 
         let health = world.get_health(entity).unwrap();
         assert_eq!(health.value, 81.0);
+    }
+
+    #[test]
+    fn test_schedule_insert_before() {
+        let mut world = World::default();
+        world.resources._delta_time = 1.0;
+
+        let mut schedule = Schedule::new();
+        schedule.push("first", |world: &mut World| {
+            world.resources._delta_time += 10.0;
+        });
+        schedule.push("third", |world: &mut World| {
+            world.resources._delta_time *= 3.0;
+        });
+        schedule.insert_before("third", "second", |world: &mut World| {
+            world.resources._delta_time *= 2.0;
+        });
+
+        schedule.run(&mut world);
+        assert_eq!(world.resources._delta_time, 66.0);
+    }
+
+    #[test]
+    fn test_schedule_insert_after() {
+        let mut world = World::default();
+        world.resources._delta_time = 1.0;
+
+        let mut schedule = Schedule::new();
+        schedule.push("first", |world: &mut World| {
+            world.resources._delta_time += 10.0;
+        });
+        schedule.push("third", |world: &mut World| {
+            world.resources._delta_time *= 3.0;
+        });
+        schedule.insert_after("first", "second", |world: &mut World| {
+            world.resources._delta_time *= 2.0;
+        });
+
+        schedule.run(&mut world);
+        assert_eq!(world.resources._delta_time, 66.0);
+    }
+
+    #[test]
+    fn test_schedule_remove() {
+        let mut world = World::default();
+        world.resources._delta_time = 1.0;
+
+        let mut schedule = Schedule::new();
+        schedule.push("add", |world: &mut World| {
+            world.resources._delta_time += 10.0;
+        });
+        schedule.push("multiply", |world: &mut World| {
+            world.resources._delta_time *= 5.0;
+        });
+
+        schedule.remove("multiply");
+        schedule.run(&mut world);
+        assert_eq!(world.resources._delta_time, 11.0);
+    }
+
+    #[test]
+    fn test_schedule_remove_nonexistent() {
+        let mut schedule: Schedule<World> = Schedule::new();
+        schedule.push("a", |_world: &mut World| {});
+        schedule.remove("nonexistent");
+        assert!(schedule.contains("a"));
+    }
+
+    #[test]
+    fn test_schedule_contains() {
+        let mut schedule: Schedule<World> = Schedule::new();
+        assert!(!schedule.contains("physics"));
+
+        schedule.push("physics", |_world: &mut World| {});
+        assert!(schedule.contains("physics"));
+        assert!(!schedule.contains("render"));
+
+        schedule.remove("physics");
+        assert!(!schedule.contains("physics"));
+    }
+
+    #[test]
+    #[should_panic(expected = "system \"nonexistent\" not found")]
+    fn test_schedule_insert_before_panics() {
+        let mut schedule: Schedule<World> = Schedule::new();
+        schedule.insert_before("nonexistent", "new", |_world: &mut World| {});
+    }
+
+    #[test]
+    #[should_panic(expected = "system \"nonexistent\" not found")]
+    fn test_schedule_insert_after_panics() {
+        let mut schedule: Schedule<World> = Schedule::new();
+        schedule.insert_after("nonexistent", "new", |_world: &mut World| {});
+    }
+
+    #[test]
+    fn test_schedule_ordering_verification() {
+        let order = std::sync::Arc::new(std::sync::Mutex::new(Vec::<&'static str>::new()));
+
+        let mut schedule: Schedule<World> = Schedule::new();
+        let order_clone = order.clone();
+        schedule.push("a", move |_world: &mut World| {
+            order_clone.lock().unwrap().push("a");
+        });
+        let order_clone = order.clone();
+        schedule.push("c", move |_world: &mut World| {
+            order_clone.lock().unwrap().push("c");
+        });
+        let order_clone = order.clone();
+        schedule.insert_before("c", "b", move |_world: &mut World| {
+            order_clone.lock().unwrap().push("b");
+        });
+        let order_clone = order.clone();
+        schedule.insert_after("c", "d", move |_world: &mut World| {
+            order_clone.lock().unwrap().push("d");
+        });
+
+        let mut world = World::default();
+        schedule.run(&mut world);
+        assert_eq!(*order.lock().unwrap(), vec!["a", "b", "c", "d"]);
+    }
+
+    #[test]
+    fn test_schedule_push_readonly() {
+        let mut world = World::default();
+        world.resources._delta_time = 42.0;
+
+        let mut schedule = Schedule::new();
+        let observed = std::sync::Arc::new(std::sync::Mutex::new(0.0_f32));
+        let observed_clone = observed.clone();
+        schedule.push_readonly("reader", move |world: &World| {
+            *observed_clone.lock().unwrap() = world.resources._delta_time;
+        });
+
+        schedule.run(&mut world);
+        assert_eq!(*observed.lock().unwrap(), 42.0);
     }
 
     #[test]
@@ -6502,7 +6685,7 @@ mod tests {
             ecs.resources.delta_time = 0.1;
 
             let mut schedule: Schedule<GameEcs> = Schedule::new();
-            schedule.add_system_mut(|ecs: &mut GameEcs| {
+            schedule.push("physics", |ecs: &mut GameEcs| {
                 let dt = ecs.resources.delta_time;
                 ecs.core_world
                     .for_each_mut(MW_POSITION | MW_VELOCITY, 0, |_entity, table, idx| {

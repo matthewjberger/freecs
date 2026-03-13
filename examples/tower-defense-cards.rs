@@ -5862,30 +5862,30 @@ async fn main() {
 
     let mut game_schedule = Schedule::new();
     game_schedule
-        .add_system_mut(victory_timer_system_wrapper)
-        .add_system_mut(enemy_deck_system_wrapper)
-        .add_system_mut(enemy_movement_system_wrapper)
-        .add_system_mut(tower_targeting_system)
-        .add_system_mut(tower_shooting_system_wrapper)
-        .add_system_mut(projectile_movement_system_wrapper)
-        .add_system_mut(damage_handler_system)
-        .add_system_mut(visual_effects_system_wrapper)
-        .add_system_mut(update_money_popups_wrapper)
-        .add_system_mut(enemy_died_event_handler)
-        .add_system_mut(health_bar_update_system)
-        .add_system_mut(update_card_animations_wrapper);
+        .push("victory_timer", victory_timer_system_wrapper)
+        .push("enemy_deck", enemy_deck_system_wrapper)
+        .push("enemy_movement", enemy_movement_system_wrapper)
+        .push("tower_targeting", tower_targeting_system)
+        .push("tower_shooting", tower_shooting_system_wrapper)
+        .push("projectile_movement", projectile_movement_system_wrapper)
+        .push("damage_handler", damage_handler_system)
+        .push("visual_effects", visual_effects_system_wrapper)
+        .push("update_money_popups", update_money_popups_wrapper)
+        .push("enemy_died", enemy_died_event_handler)
+        .push("health_bar_update", health_bar_update_system)
+        .push("update_card_animations", update_card_animations_wrapper);
 
     let mut render_schedule = Schedule::new();
     render_schedule
-        .add_system(render_grid)
-        .add_system(render_towers)
-        .add_system(render_enemies)
-        .add_system(render_projectiles)
-        .add_system(render_visual_effects)
-        .add_system(render_money_popups)
-        .add_system(render_cards)
-        .add_system(render_ui)
-        .add_system(render_card_preview_overlay);
+        .push_readonly("render_grid", render_grid)
+        .push_readonly("render_towers", render_towers)
+        .push_readonly("render_enemies", render_enemies)
+        .push_readonly("render_projectiles", render_projectiles)
+        .push_readonly("render_visual_effects", render_visual_effects)
+        .push_readonly("render_money_popups", render_money_popups)
+        .push_readonly("render_cards", render_cards)
+        .push_readonly("render_ui", render_ui)
+        .push_readonly("render_card_preview_overlay", render_card_preview_overlay);
 
     loop {
         clear_background(Color::new(0.05, 0.05, 0.05, 1.0));

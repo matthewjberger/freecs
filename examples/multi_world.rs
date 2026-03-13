@@ -104,8 +104,8 @@ fn main() {
         .set_position(bg_entity, Position { x: 100.0, y: 50.0 });
 
     let mut schedule: Schedule<GameEcs> = Schedule::new();
-    schedule.add_system_mut(physics_system);
-    schedule.add_system(render_system);
+    schedule.push("physics", physics_system);
+    schedule.push_readonly("render", render_system);
 
     println!("Multi-world ECS: {} worlds, {} entities", 2, 2);
     println!(

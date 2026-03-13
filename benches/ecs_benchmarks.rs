@@ -1291,7 +1291,7 @@ fn bench_scheduling(c: &mut Criterion) {
                 b.iter(|| {
                     let mut schedule = freecs::Schedule::<World>::new();
                     for _ in 0..count {
-                        schedule.add_system_mut(|world: &mut World| {
+                        schedule.push("system", |world: &mut World| {
                             world.resources.frame_count += 1;
                         });
                     }
@@ -1307,7 +1307,7 @@ fn bench_scheduling(c: &mut Criterion) {
 
         let mut schedule = freecs::Schedule::new();
         for _ in 0..10 {
-            schedule.add_system_mut(|world: &mut World| {
+            schedule.push("system", |world: &mut World| {
                 world.resources.frame_count += 1;
             });
         }
@@ -1338,11 +1338,11 @@ fn bench_scheduling(c: &mut Criterion) {
             });
 
             let mut schedule = freecs::Schedule::new();
-            schedule.add_system_mut(|world: &mut World| {
+            schedule.push("set_dt", |world: &mut World| {
                 world.resources.delta_time = 0.016;
             });
 
-            schedule.add_system_mut(|world: &mut World| {
+            schedule.push("physics", |world: &mut World| {
                 let dt = world.resources.delta_time;
                 world
                     .query_mut()
@@ -1353,7 +1353,7 @@ fn bench_scheduling(c: &mut Criterion) {
                     });
             });
 
-            schedule.add_system_mut(|world: &mut World| {
+            schedule.push("frame_counter", |world: &mut World| {
                 world.resources.frame_count += 1;
             });
 
