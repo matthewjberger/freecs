@@ -272,7 +272,7 @@
 //! schedule
 //!     .push("input", input_system)
 //!     .push("physics", physics_system)
-//!     .push("render", |w| render_system(w));
+//!     .push_readonly("render", render_system);
 //!
 //! // Game loop
 //! loop {
@@ -658,13 +658,24 @@ impl<W> Schedule<W> {
     where
         F: FnMut(&mut W) + Send + 'static,
     {
-        assert!(
-            !self.contains(name),
-            "Schedule::push: system \"{name}\" already exists"
-        );
+        self.assert_unique(name);
         self.entries.push(ScheduleEntry {
             name,
             system: Box::new(system),
+        });
+        self
+    }
+
+    pub fn push_readonly<F>(&mut self, name: &'static str, mut system: F) -> &mut Self
+    where
+        F: FnMut(&W) + Send + 'static,
+    {
+        self.assert_unique(name);
+        self.entries.push(ScheduleEntry {
+            name,
+            system: Box::new(move |world: &mut W| {
+                system(&*world);
+            }),
         });
         self
     }
@@ -673,13 +684,8 @@ impl<W> Schedule<W> {
     where
         F: FnMut(&mut W) + Send + 'static,
     {
-        assert!(
-            !self.contains(name),
-            "Schedule::insert_before: system \"{name}\" already exists"
-        );
-        let index = self
-            .index_of(target)
-            .unwrap_or_else(|| panic!("Schedule::insert_before: system \"{target}\" not found"));
+        self.assert_unique(name);
+        let index = self.index_of_or_panic(target, "insert_before");
         self.entries.insert(
             index,
             ScheduleEntry {
@@ -694,13 +700,8 @@ impl<W> Schedule<W> {
     where
         F: FnMut(&mut W) + Send + 'static,
     {
-        assert!(
-            !self.contains(name),
-            "Schedule::insert_after: system \"{name}\" already exists"
-        );
-        let index = self
-            .index_of(target)
-            .unwrap_or_else(|| panic!("Schedule::insert_after: system \"{target}\" not found"));
+        self.assert_unique(name);
+        let index = self.index_of_or_panic(target, "insert_after");
         self.entries.insert(
             index + 1,
             ScheduleEntry {
@@ -711,13 +712,37 @@ impl<W> Schedule<W> {
         self
     }
 
-    pub fn remove(&mut self, name: &str) -> &mut Self {
-        self.entries.retain(|entry| entry.name != name);
+    pub fn replace<F>(&mut self, name: &str, system: F) -> &mut Self
+    where
+        F: FnMut(&mut W) + Send + 'static,
+    {
+        let index = self
+            .index_of(name)
+            .unwrap_or_else(|| panic!("Schedule::replace: system \"{name}\" not found"));
+        self.entries[index].system = Box::new(system);
         self
+    }
+
+    pub fn remove(&mut self, name: &str) -> bool {
+        let len_before = self.entries.len();
+        self.entries.retain(|entry| entry.name != name);
+        self.entries.len() != len_before
     }
 
     pub fn contains(&self, name: &str) -> bool {
         self.entries.iter().any(|entry| entry.name == name)
+    }
+
+    pub fn names(&self) -> impl Iterator<Item = &'static str> + '_ {
+        self.entries.iter().map(|entry| entry.name)
+    }
+
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
     }
 
     pub fn run(&mut self, world: &mut W) {
@@ -728,6 +753,18 @@ impl<W> Schedule<W> {
 
     fn index_of(&self, name: &str) -> Option<usize> {
         self.entries.iter().position(|entry| entry.name == name)
+    }
+
+    fn assert_unique(&self, name: &str) {
+        assert!(
+            !self.contains(name),
+            "Schedule: system \"{name}\" already exists"
+        );
+    }
+
+    fn index_of_or_panic(&self, target: &str, method: &str) -> usize {
+        self.index_of(target)
+            .unwrap_or_else(|| panic!("Schedule::{method}: system \"{target}\" not found"))
     }
 }
 
@@ -5872,6 +5909,155 @@ mod tests {
         let mut schedule: Schedule<World> = Schedule::new();
         schedule.push("a", |_w: &mut World| {});
         schedule.insert_after("a", "a", |_w: &mut World| {});
+    }
+
+    #[test]
+    fn test_schedule_replace() {
+        let mut world = World::default();
+        world.resources._delta_time = 1.0;
+
+        let mut schedule = Schedule::new();
+        schedule.push("add", |world: &mut World| {
+            world.resources._delta_time += 10.0;
+        });
+
+        schedule.run(&mut world);
+        assert_eq!(world.resources._delta_time, 11.0);
+
+        schedule.replace("add", |world: &mut World| {
+            world.resources._delta_time += 100.0;
+        });
+
+        schedule.run(&mut world);
+        assert_eq!(world.resources._delta_time, 111.0);
+    }
+
+    #[test]
+    #[should_panic(expected = "system \"nonexistent\" not found")]
+    fn test_schedule_replace_panics_on_missing() {
+        let mut schedule: Schedule<World> = Schedule::new();
+        schedule.replace("nonexistent", |_w: &mut World| {});
+    }
+
+    #[test]
+    fn test_schedule_replace_preserves_order() {
+        let mut world = World::default();
+        world.resources._delta_time = 0.0;
+
+        let mut schedule = Schedule::new();
+        schedule.push("first", |world: &mut World| {
+            world.resources._delta_time += 1.0;
+        });
+        schedule.push("second", |world: &mut World| {
+            world.resources._delta_time *= 10.0;
+        });
+        schedule.push("third", |world: &mut World| {
+            world.resources._delta_time += 5.0;
+        });
+
+        schedule.replace("second", |world: &mut World| {
+            world.resources._delta_time *= 100.0;
+        });
+
+        schedule.run(&mut world);
+        assert_eq!(world.resources._delta_time, 105.0);
+    }
+
+    #[test]
+    fn test_schedule_names() {
+        let mut schedule: Schedule<World> = Schedule::new();
+        schedule.push("a", |_w: &mut World| {});
+        schedule.push("b", |_w: &mut World| {});
+        schedule.push("c", |_w: &mut World| {});
+
+        let names: Vec<&str> = schedule.names().collect();
+        assert_eq!(names, vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn test_schedule_len_and_is_empty() {
+        let mut schedule: Schedule<World> = Schedule::new();
+        assert!(schedule.is_empty());
+        assert_eq!(schedule.len(), 0);
+
+        schedule.push("a", |_w: &mut World| {});
+        assert!(!schedule.is_empty());
+        assert_eq!(schedule.len(), 1);
+
+        schedule.push("b", |_w: &mut World| {});
+        assert_eq!(schedule.len(), 2);
+
+        schedule.remove("a");
+        assert_eq!(schedule.len(), 1);
+
+        schedule.remove("b");
+        assert!(schedule.is_empty());
+    }
+
+    #[test]
+    fn test_schedule_remove_returns_bool() {
+        let mut schedule: Schedule<World> = Schedule::new();
+        schedule.push("a", |_w: &mut World| {});
+
+        assert!(schedule.remove("a"));
+        assert!(!schedule.remove("a"));
+        assert!(!schedule.remove("nonexistent"));
+    }
+
+    #[test]
+    fn test_schedule_remove_then_push_reuses_name() {
+        let mut world = World::default();
+        world.resources._delta_time = 0.0;
+
+        let mut schedule = Schedule::new();
+        schedule.push("sys", |world: &mut World| {
+            world.resources._delta_time += 1.0;
+        });
+
+        schedule.remove("sys");
+        schedule.push("sys", |world: &mut World| {
+            world.resources._delta_time += 100.0;
+        });
+
+        schedule.run(&mut world);
+        assert_eq!(world.resources._delta_time, 100.0);
+    }
+
+    #[test]
+    fn test_schedule_insert_before_first() {
+        let mut schedule: Schedule<World> = Schedule::new();
+        schedule.push("b", |_w: &mut World| {});
+        schedule.insert_before("b", "a", |_w: &mut World| {});
+
+        let names: Vec<&str> = schedule.names().collect();
+        assert_eq!(names, vec!["a", "b"]);
+    }
+
+    #[test]
+    fn test_schedule_insert_after_last() {
+        let mut schedule: Schedule<World> = Schedule::new();
+        schedule.push("a", |_w: &mut World| {});
+        schedule.insert_after("a", "b", |_w: &mut World| {});
+
+        let names: Vec<&str> = schedule.names().collect();
+        assert_eq!(names, vec!["a", "b"]);
+    }
+
+    #[test]
+    fn test_schedule_push_readonly() {
+        let mut world = World::default();
+        world.resources._delta_time = 42.0;
+
+        let observed = std::sync::Arc::new(std::sync::Mutex::new(0.0_f32));
+        let obs = observed.clone();
+
+        let mut schedule = Schedule::new();
+        schedule.push_readonly("reader", move |world: &World| {
+            *obs.lock().unwrap() = world.resources._delta_time;
+        });
+
+        schedule.run(&mut world);
+        assert_eq!(*observed.lock().unwrap(), 42.0);
     }
 
     #[test]

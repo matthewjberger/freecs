@@ -105,7 +105,7 @@ fn main() {
 
     let mut schedule: Schedule<GameEcs> = Schedule::new();
     schedule.push("physics", physics_system);
-    schedule.push("render", |ecs| render_system(ecs));
+    schedule.push_readonly("render", render_system);
 
     println!("Multi-world ECS: {} worlds, {} entities", 2, 2);
     println!(
