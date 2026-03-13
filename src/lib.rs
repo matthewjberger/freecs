@@ -1224,16 +1224,14 @@ macro_rules! ecs_impl {
                     #[inline]
                     pub fn [<set_ $name>](&mut self, entity: $crate::Entity, value: $type) {
                         if let Some((table_index, array_index)) = get_location(&self.entity_locations, entity) {
-                            let table = &mut self.tables[table_index];
-                            if table.mask & $mask != 0 {
-                                table.$name[array_index] = value;
+                            if self.tables[table_index].mask & $mask != 0 {
+                                self.tables[table_index].$name[array_index] = value;
                                 return;
                             }
-                        }
-
-                        self.add_components(entity, $mask);
-                        if let Some((table_index, array_index)) = get_location(&self.entity_locations, entity) {
-                            self.tables[table_index].$name[array_index] = value;
+                            self.add_components_at(entity, $mask, table_index, array_index);
+                            if let Some((new_table_index, new_array_index)) = get_location(&self.entity_locations, entity) {
+                                self.tables[new_table_index].$name[new_array_index] = value;
+                            }
                         }
                     }
 
@@ -1260,12 +1258,7 @@ macro_rules! ecs_impl {
                     where
                         F: FnMut(&mut $type),
                     {
-                        let table_indices: Vec<usize> = self.tables
-                            .iter()
-                            .enumerate()
-                            .filter(|(_, table)| table.mask & $mask != 0)
-                            .map(|(idx, _)| idx)
-                            .collect();
+                        let table_indices: Vec<usize> = self.get_cached_tables($mask).to_vec();
 
                         for table_index in table_indices {
                             for component in &mut self.tables[table_index].$name {
@@ -1490,26 +1483,30 @@ macro_rules! ecs_impl {
                 despawned
             }
 
+            fn add_components_at(&mut self, entity: $crate::Entity, mask: u64, table_index: usize, array_index: usize) {
+                let current_mask = self.tables[table_index].mask;
+                if current_mask & mask == mask {
+                    return;
+                }
+
+                let target_table = if mask.count_ones() == 1 {
+                    get_component_index(mask).and_then(|idx| self.table_edges[table_index].add_edges[idx])
+                } else {
+                    self.table_edges[table_index].multi_add_cache.get(&mask).copied()
+                };
+
+                let new_table_index = target_table.unwrap_or_else(|| {
+                    let new_idx = get_or_create_table(self, current_mask | mask);
+                    self.table_edges[table_index].multi_add_cache.insert(mask, new_idx);
+                    new_idx
+                });
+
+                move_entity(self, entity, table_index, array_index, new_table_index);
+            }
+
             pub fn add_components(&mut self, entity: $crate::Entity, mask: u64) -> bool {
                 if let Some((table_index, array_index)) = get_location(&self.entity_locations, entity) {
-                    let current_mask = self.tables[table_index].mask;
-                    if current_mask & mask == mask {
-                        return true;
-                    }
-
-                    let target_table = if mask.count_ones() == 1 {
-                        get_component_index(mask).and_then(|idx| self.table_edges[table_index].add_edges[idx])
-                    } else {
-                        self.table_edges[table_index].multi_add_cache.get(&mask).copied()
-                    };
-
-                    let new_table_index = target_table.unwrap_or_else(|| {
-                        let new_idx = get_or_create_table(self, current_mask | mask);
-                        self.table_edges[table_index].multi_add_cache.insert(mask, new_idx);
-                        new_idx
-                    });
-
-                    move_entity(self, entity, table_index, array_index, new_table_index);
+                    self.add_components_at(entity, mask, table_index, array_index);
                     true
                 } else {
                     false
@@ -1787,6 +1784,27 @@ macro_rules! ecs_impl {
                 let tag_include = include & ALL_TAGS_MASK;
                 let tag_exclude = exclude & ALL_TAGS_MASK;
 
+                if let Some(cached) = self.query_cache.get(&component_include) {
+                    for &table_index in cached {
+                        let table = &self.tables[table_index];
+                        if table.mask & component_exclude != 0 {
+                            continue;
+                        }
+                        if tag_include == 0 && tag_exclude == 0 {
+                            for (idx, &entity) in table.entity_indices.iter().enumerate() {
+                                f(entity, table, idx);
+                            }
+                        } else {
+                            for (idx, &entity) in table.entity_indices.iter().enumerate() {
+                                if self.entity_matches_tags(entity, tag_include, tag_exclude) {
+                                    f(entity, table, idx);
+                                }
+                            }
+                        }
+                    }
+                    return;
+                }
+
                 for table in &self.tables {
                     if table.mask & component_include != component_include || table.mask & component_exclude != 0 {
                         continue;
@@ -1831,14 +1849,6 @@ macro_rules! ecs_impl {
                         }
                     }
                 } else {
-                    let matching_entities: std::collections::HashSet<$crate::Entity> = table_indices
-                        .iter()
-                        .filter_map(|&idx| self.tables.get(idx))
-                        .filter(|table| table.mask & component_exclude == 0)
-                        .flat_map(|table| table.entity_indices.iter().copied())
-                        .filter(|&entity| self.entity_matches_tags(entity, tag_include, tag_exclude))
-                        .collect();
-
                     for &table_index in &table_indices {
                         let table = &mut self.tables[table_index];
                         if table.mask & component_exclude != 0 {
@@ -1847,7 +1857,16 @@ macro_rules! ecs_impl {
 
                         for idx in 0..table.entity_indices.len() {
                             let entity = table.entity_indices[idx];
-                            if matching_entities.contains(&entity) {
+                            let mut tag_match = true;
+                            $(
+                                if tag_include & $tag_mask != 0 && !self.$tag_name.contains(&entity) {
+                                    tag_match = false;
+                                }
+                                if tag_match && tag_exclude & $tag_mask != 0 && self.$tag_name.contains(&entity) {
+                                    tag_match = false;
+                                }
+                            )*
+                            if tag_match {
                                 f(entity, table, idx);
                             }
                         }
@@ -1868,37 +1887,34 @@ macro_rules! ecs_impl {
                 let tag_include = include & ALL_TAGS_MASK;
                 let tag_exclude = exclude & ALL_TAGS_MASK;
 
-                let table_indices: Vec<usize> = self.get_cached_tables(component_include).to_vec();
-                let table_index_set: std::collections::HashSet<usize> = table_indices.iter().copied().collect();
-
                 if tag_include == 0 && tag_exclude == 0 {
                     self.tables
                         .par_iter_mut()
-                        .enumerate()
-                        .filter(|(idx, table)| table_index_set.contains(idx) && table.mask & component_exclude == 0)
-                        .for_each(|(_, table)| {
+                        .filter(|table| table.mask & component_include == component_include && table.mask & component_exclude == 0)
+                        .for_each(|table| {
                             for idx in 0..table.entity_indices.len() {
                                 let entity = table.entity_indices[idx];
                                 f(entity, table, idx);
                             }
                         });
                 } else {
-                    let matching_entities: std::collections::HashSet<$crate::Entity> = table_indices
-                        .iter()
-                        .filter_map(|&idx| self.tables.get(idx))
-                        .filter(|table| table.mask & component_exclude == 0)
-                        .flat_map(|table| table.entity_indices.iter().copied())
-                        .filter(|&entity| self.entity_matches_tags(entity, tag_include, tag_exclude))
-                        .collect();
-
+                    $(let $tag_name = &self.$tag_name;)*
                     self.tables
                         .par_iter_mut()
-                        .enumerate()
-                        .filter(|(idx, table)| table_index_set.contains(idx) && table.mask & component_exclude == 0)
-                        .for_each(|(_, table)| {
+                        .filter(|table| table.mask & component_include == component_include && table.mask & component_exclude == 0)
+                        .for_each(|table| {
                             for idx in 0..table.entity_indices.len() {
                                 let entity = table.entity_indices[idx];
-                                if matching_entities.contains(&entity) {
+                                let mut tag_match = true;
+                                $(
+                                    if tag_include & $tag_mask != 0 && !$tag_name.contains(&entity) {
+                                        tag_match = false;
+                                    }
+                                    if tag_match && tag_exclude & $tag_mask != 0 && $tag_name.contains(&entity) {
+                                        tag_match = false;
+                                    }
+                                )*
+                                if tag_match {
                                     f(entity, table, idx);
                                 }
                             }
@@ -1944,14 +1960,6 @@ macro_rules! ecs_impl {
                         }
                     }
                 } else {
-                    let matching_entities: std::collections::HashSet<$crate::Entity> = table_indices
-                        .iter()
-                        .filter_map(|&idx| self.tables.get(idx))
-                        .filter(|table| table.mask & component_exclude == 0)
-                        .flat_map(|table| table.entity_indices.iter().copied())
-                        .filter(|&entity| self.entity_matches_tags(entity, tag_include, tag_exclude))
-                        .collect();
-
                     for &table_index in &table_indices {
                         let table = &mut self.tables[table_index];
                         if table.mask & component_exclude != 0 {
@@ -1960,7 +1968,16 @@ macro_rules! ecs_impl {
 
                         for idx in 0..table.entity_indices.len() {
                             let entity = table.entity_indices[idx];
-                            if !matching_entities.contains(&entity) {
+                            let mut tag_match = true;
+                            $(
+                                if tag_include & $tag_mask != 0 && !self.$tag_name.contains(&entity) {
+                                    tag_match = false;
+                                }
+                                if tag_match && tag_exclude & $tag_mask != 0 && self.$tag_name.contains(&entity) {
+                                    tag_match = false;
+                                }
+                            )*
+                            if !tag_match {
                                 continue;
                             }
 
@@ -2610,12 +2627,7 @@ macro_rules! ecs_world_impl {
                         where
                             F: FnMut(&mut $type),
                         {
-                            let table_indices: Vec<usize> = self.tables
-                                .iter()
-                                .enumerate()
-                                .filter(|(_, table)| table.mask & $mask != 0)
-                                .map(|(idx, _)| idx)
-                                .collect();
+                            let table_indices: Vec<usize> = self.get_cached_tables($mask).to_vec();
                             for table_index in table_indices {
                                 for component in &mut self.tables[table_index].$name {
                                     f(component);
@@ -2993,14 +3005,10 @@ macro_rules! ecs_world_impl {
                 {
                     use $crate::rayon::prelude::*;
 
-                    let table_indices: Vec<usize> = self.get_cached_tables(include).to_vec();
-                    let table_index_set: std::collections::HashSet<usize> = table_indices.iter().copied().collect();
-
                     self.tables
                         .par_iter_mut()
-                        .enumerate()
-                        .filter(|(idx, table)| table_index_set.contains(idx) && table.mask & exclude == 0)
-                        .for_each(|(_, table)| {
+                        .filter(|table| table.mask & include == include && table.mask & exclude == 0)
+                        .for_each(|table| {
                             for idx in 0..table.entity_indices.len() {
                                 let entity = table.entity_indices[idx];
                                 f(entity, table, idx);
