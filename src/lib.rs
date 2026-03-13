@@ -443,6 +443,83 @@ impl std::fmt::Display for Entity {
     }
 }
 
+#[derive(Default)]
+pub struct EntityAllocator {
+    pub next_id: u32,
+    pub free_ids: Vec<(u32, u32)>,
+}
+
+impl EntityAllocator {
+    pub fn allocate(&mut self) -> Entity {
+        if let Some((id, next_gen)) = self.free_ids.pop() {
+            Entity {
+                id,
+                generation: next_gen,
+            }
+        } else {
+            let id = self.next_id;
+            self.next_id += 1;
+            Entity { id, generation: 0 }
+        }
+    }
+
+    pub fn deallocate(&mut self, entity: Entity) {
+        self.free_ids
+            .push((entity.id, entity.generation.wrapping_add(1)));
+    }
+}
+
+#[derive(Copy, Clone, Default)]
+pub struct EntityLocation {
+    pub generation: u32,
+    pub table_index: u32,
+    pub array_index: u32,
+    pub allocated: bool,
+}
+
+#[derive(Default)]
+pub struct EntityLocations {
+    pub locations: Vec<EntityLocation>,
+}
+
+impl EntityLocations {
+    pub fn get(&self, id: u32) -> Option<&EntityLocation> {
+        self.locations.get(id as usize)
+    }
+
+    pub fn get_mut(&mut self, id: u32) -> Option<&mut EntityLocation> {
+        self.locations.get_mut(id as usize)
+    }
+
+    pub fn ensure_slot(&mut self, id: u32, generation: u32) {
+        let id_usize = id as usize;
+        if id_usize >= self.locations.len() {
+            self.locations.resize(
+                (self.locations.len() * 2).max(64).max(id_usize + 1),
+                EntityLocation::default(),
+            );
+        }
+        self.locations[id_usize].generation = generation;
+    }
+
+    pub fn insert(&mut self, id: u32, location: EntityLocation) {
+        let id_usize = id as usize;
+        if id_usize >= self.locations.len() {
+            self.locations.resize(
+                (self.locations.len() * 2).max(64).max(id_usize + 1),
+                EntityLocation::default(),
+            );
+        }
+        self.locations[id_usize] = location;
+    }
+
+    pub fn mark_deallocated(&mut self, id: u32) {
+        if let Some(loc) = self.locations.get_mut(id as usize) {
+            loc.allocated = false;
+        }
+    }
+}
+
 /// Double-buffered event queue for inter-system communication.
 ///
 /// Events persist for 2 frames to prevent systems from missing events
@@ -763,6 +840,122 @@ macro_rules! ecs {
             }
         }
     };
+
+    (
+        $ecs:ident {
+            $($world_name:ident {
+                $($(#[$comp_attr:meta])* $name:ident: $type:ty => $mask:ident),* $(,)?
+            })+
+        }
+        Tags {
+            $($tag_name:ident => $tag_mask:ident),* $(,)?
+        }
+        Events {
+            $($event_name:ident: $event_type:ty),* $(,)?
+        }
+        $resources:ident {
+            $($(#[$attr:meta])* $resource_name:ident: $resource_type:ty),* $(,)?
+        }
+    ) => {
+        $crate::ecs_multi_impl! {
+            $ecs {
+                $($world_name {
+                    $($(#[$comp_attr])* $name: $type => $mask),*
+                })+
+            }
+            Tags {
+                $($tag_name => $tag_mask),*
+            }
+            Events {
+                $($event_name: $event_type),*
+            }
+            $resources {
+                $($(#[$attr])* $resource_name: $resource_type),*
+            }
+        }
+    };
+
+    (
+        $ecs:ident {
+            $($world_name:ident {
+                $($(#[$comp_attr:meta])* $name:ident: $type:ty => $mask:ident),* $(,)?
+            })+
+        }
+        Tags {
+            $($tag_name:ident => $tag_mask:ident),* $(,)?
+        }
+        $resources:ident {
+            $($(#[$attr:meta])* $resource_name:ident: $resource_type:ty),* $(,)?
+        }
+    ) => {
+        $crate::ecs_multi_impl! {
+            $ecs {
+                $($world_name {
+                    $($(#[$comp_attr])* $name: $type => $mask),*
+                })+
+            }
+            Tags {
+                $($tag_name => $tag_mask),*
+            }
+            Events {}
+            $resources {
+                $($(#[$attr])* $resource_name: $resource_type),*
+            }
+        }
+    };
+
+    (
+        $ecs:ident {
+            $($world_name:ident {
+                $($(#[$comp_attr:meta])* $name:ident: $type:ty => $mask:ident),* $(,)?
+            })+
+        }
+        Events {
+            $($event_name:ident: $event_type:ty),* $(,)?
+        }
+        $resources:ident {
+            $($(#[$attr:meta])* $resource_name:ident: $resource_type:ty),* $(,)?
+        }
+    ) => {
+        $crate::ecs_multi_impl! {
+            $ecs {
+                $($world_name {
+                    $($(#[$comp_attr])* $name: $type => $mask),*
+                })+
+            }
+            Tags {}
+            Events {
+                $($event_name: $event_type),*
+            }
+            $resources {
+                $($(#[$attr])* $resource_name: $resource_type),*
+            }
+        }
+    };
+
+    (
+        $ecs:ident {
+            $($world_name:ident {
+                $($(#[$comp_attr:meta])* $name:ident: $type:ty => $mask:ident),* $(,)?
+            })+
+        }
+        $resources:ident {
+            $($(#[$attr:meta])* $resource_name:ident: $resource_type:ty),* $(,)?
+        }
+    ) => {
+        $crate::ecs_multi_impl! {
+            $ecs {
+                $($world_name {
+                    $($(#[$comp_attr])* $name: $type => $mask),*
+                })+
+            }
+            Tags {}
+            Events {}
+            $resources {
+                $($(#[$attr])* $resource_name: $resource_type),*
+            }
+        }
+    };
 }
 
 #[macro_export]
@@ -859,63 +1052,6 @@ macro_rules! ecs_impl {
             count
         };
 
-        #[derive(Default)]
-        pub struct EntityAllocator {
-            next_id: u32,
-            free_ids: Vec<(u32, u32)>,
-        }
-
-        #[derive(Copy, Clone, Default)]
-        struct EntityLocation {
-            generation: u32,
-            table_index: u32,
-            array_index: u32,
-            allocated: bool,
-        }
-
-        #[derive(Default)]
-        pub struct EntityLocations {
-            locations: Vec<EntityLocation>,
-        }
-
-        impl EntityLocations {
-            fn get(&self, id: u32) -> Option<&EntityLocation> {
-                self.locations.get(id as usize)
-            }
-
-            fn get_mut(&mut self, id: u32) -> Option<&mut EntityLocation> {
-                self.locations.get_mut(id as usize)
-            }
-
-            fn ensure_slot(&mut self, id: u32, generation: u32) {
-                let id_usize = id as usize;
-                if id_usize >= self.locations.len() {
-                    self.locations.resize(
-                        (self.locations.len() * 2).max(64).max(id_usize + 1),
-                        EntityLocation::default(),
-                    );
-                }
-                self.locations[id_usize].generation = generation;
-            }
-
-            fn insert(&mut self, id: u32, location: EntityLocation) {
-                let id_usize = id as usize;
-                if id_usize >= self.locations.len() {
-                    self.locations.resize(
-                        (self.locations.len() * 2).max(64).max(id_usize + 1),
-                        EntityLocation::default(),
-                    );
-                }
-                self.locations[id_usize] = location;
-            }
-
-            fn mark_deallocated(&mut self, id: u32) {
-                if let Some(loc) = self.locations.get_mut(id as usize) {
-                    loc.allocated = false;
-                }
-            }
-        }
-
         $crate::paste::paste! {
             pub enum Command {
                 SpawnEntities { mask: u64, count: usize },
@@ -935,9 +1071,9 @@ macro_rules! ecs_impl {
 
         #[allow(unused)]
         pub struct $world {
-            entity_locations: EntityLocations,
+            entity_locations: $crate::EntityLocations,
             tables: Vec<ComponentArrays>,
-            allocator: EntityAllocator,
+            allocator: $crate::EntityAllocator,
             pub resources: $resources,
             table_edges: Vec<TableEdges>,
             table_lookup: std::collections::HashMap<u64, usize>,
@@ -952,9 +1088,9 @@ macro_rules! ecs_impl {
         impl Default for $world {
             fn default() -> Self {
                 Self {
-                    entity_locations: EntityLocations::default(),
+                    entity_locations: $crate::EntityLocations::default(),
                     tables: Vec::default(),
-                    allocator: EntityAllocator::default(),
+                    allocator: $crate::EntityAllocator::default(),
                     resources: $resources::default(),
                     table_edges: Vec::default(),
                     table_lookup: std::collections::HashMap::default(),
@@ -1226,6 +1362,16 @@ macro_rules! ecs_impl {
                 EntityQueryIter {
                     tables: &self.tables,
                     mask,
+                    table_index: 0,
+                    array_index: 0,
+                }
+            }
+
+            pub fn query_entities_changed(&self, mask: u64) -> ChangedEntityQueryIter<'_> {
+                ChangedEntityQueryIter {
+                    tables: &self.tables,
+                    mask,
+                    since_tick: self.last_tick,
                     table_index: 0,
                     array_index: 0,
                 }
@@ -1971,6 +2117,56 @@ macro_rules! ecs_impl {
             }
         }
 
+        pub struct ChangedEntityQueryIter<'a> {
+            tables: &'a [ComponentArrays],
+            mask: u64,
+            since_tick: u32,
+            table_index: usize,
+            array_index: usize,
+        }
+
+        impl<'a> Iterator for ChangedEntityQueryIter<'a> {
+            type Item = $crate::Entity;
+
+            fn next(&mut self) -> Option<Self::Item> {
+                loop {
+                    if self.table_index >= self.tables.len() {
+                        return None;
+                    }
+
+                    let table = &self.tables[self.table_index];
+
+                    if table.mask & self.mask != self.mask {
+                        self.table_index += 1;
+                        self.array_index = 0;
+                        continue;
+                    }
+
+                    if self.array_index >= table.entity_indices.len() {
+                        self.table_index += 1;
+                        self.array_index = 0;
+                        continue;
+                    }
+
+                    let idx = self.array_index;
+                    self.array_index += 1;
+
+                    let mut changed = false;
+                    $(
+                        $crate::paste::paste! {
+                            if self.mask & $mask != 0 && table.mask & $mask != 0 && table.[<$name _changed>][idx] > self.since_tick {
+                                changed = true;
+                            }
+                        }
+                    )*
+
+                    if changed {
+                        return Some(table.entity_indices[idx]);
+                    }
+                }
+            }
+        }
+
         $(
             $(#[$comp_attr])*
             $crate::paste::paste! {
@@ -2114,7 +2310,7 @@ macro_rules! ecs_impl {
             }
         }
 
-        fn get_location(locations: &EntityLocations, entity: $crate::Entity) -> Option<(usize, usize)> {
+        fn get_location(locations: &$crate::EntityLocations, entity: $crate::Entity) -> Option<(usize, usize)> {
             let location = locations.get(entity.id)?;
             if !location.allocated || location.generation != entity.generation {
                 return None;
@@ -2124,11 +2320,11 @@ macro_rules! ecs_impl {
         }
 
         fn insert_location(
-            locations: &mut EntityLocations,
+            locations: &mut $crate::EntityLocations,
             entity: $crate::Entity,
             location: (usize, usize),
         ) {
-            locations.insert(entity.id, EntityLocation {
+            locations.insert(entity.id, $crate::EntityLocation {
                 generation: entity.generation,
                 table_index: location.0 as u32,
                 array_index: location.1 as u32,
@@ -2137,18 +2333,9 @@ macro_rules! ecs_impl {
         }
 
         fn create_entity(world: &mut $world) -> $crate::Entity {
-            if let Some((id, next_gen)) = world.allocator.free_ids.pop() {
-                world.entity_locations.ensure_slot(id, next_gen);
-                $crate::Entity {
-                    id,
-                    generation: next_gen,
-                }
-            } else {
-                let id = world.allocator.next_id;
-                world.allocator.next_id += 1;
-                world.entity_locations.ensure_slot(id, 0);
-                $crate::Entity { id, generation: 0 }
-            }
+            let entity = world.allocator.allocate();
+            world.entity_locations.ensure_slot(entity.id, entity.generation);
+            entity
         }
 
         fn add_to_table(
@@ -2203,6 +2390,1490 @@ macro_rules! ecs_impl {
             }
 
             table_index
+        }
+    };
+}
+
+#[macro_export]
+macro_rules! ecs_world_impl {
+    (
+        $world:ident {
+            $($(#[$comp_attr:meta])* $name:ident: $type:ty => $mask:ident),* $(,)?
+        }
+    ) => {
+        $crate::paste::paste! {
+            #[repr(u64)]
+            #[allow(clippy::upper_case_acronyms)]
+            #[allow(non_camel_case_types)]
+            pub enum [<$world Component>] {
+                $($(#[$comp_attr])* $mask,)*
+            }
+
+            $($(#[$comp_attr])* pub const $mask: u64 = 1 << ([<$world Component>]::$mask as u64);)*
+
+            pub const [<$world:snake:upper _COMPONENT_COUNT>]: usize = {
+                let mut count = 0;
+                $($(#[$comp_attr])* { count += 1; let _ = [<$world Component>]::$mask; })*
+                count
+            };
+
+            #[derive(Default)]
+            pub struct [<$world ComponentArrays>] {
+                $($(#[$comp_attr])* pub $name: Vec<$type>,)*
+                $($(#[$comp_attr])* pub [<$name _changed>]: Vec<u32>,)*
+                pub entity_indices: Vec<$crate::Entity>,
+                pub mask: u64,
+            }
+
+            #[derive(Clone)]
+            struct [<$world TableEdges>] {
+                add_edges: [Option<usize>; [<$world:snake:upper _COMPONENT_COUNT>]],
+                remove_edges: [Option<usize>; [<$world:snake:upper _COMPONENT_COUNT>]],
+                multi_add_cache: std::collections::HashMap<u64, usize>,
+                multi_remove_cache: std::collections::HashMap<u64, usize>,
+            }
+
+            impl Default for [<$world TableEdges>] {
+                fn default() -> Self {
+                    Self {
+                        add_edges: [None; [<$world:snake:upper _COMPONENT_COUNT>]],
+                        remove_edges: [None; [<$world:snake:upper _COMPONENT_COUNT>]],
+                        multi_add_cache: std::collections::HashMap::default(),
+                        multi_remove_cache: std::collections::HashMap::default(),
+                    }
+                }
+            }
+
+            #[allow(unused)]
+            pub struct $world {
+                pub entity_locations: $crate::EntityLocations,
+                tables: Vec<[<$world ComponentArrays>]>,
+                table_edges: Vec<[<$world TableEdges>]>,
+                table_lookup: std::collections::HashMap<u64, usize>,
+                query_cache: std::collections::HashMap<u64, Vec<usize>>,
+                current_tick: u32,
+                last_tick: u32,
+            }
+
+            impl Default for $world {
+                fn default() -> Self {
+                    Self {
+                        entity_locations: $crate::EntityLocations::default(),
+                        tables: Vec::default(),
+                        table_edges: Vec::default(),
+                        table_lookup: std::collections::HashMap::default(),
+                        query_cache: std::collections::HashMap::default(),
+                        current_tick: 0,
+                        last_tick: 0,
+                    }
+                }
+            }
+
+            #[allow(unused)]
+            impl $world {
+                fn get_cached_tables(&mut self, mask: u64) -> &[usize] {
+                    if !self.query_cache.contains_key(&mask) {
+                        let matching_tables: Vec<usize> = self.tables
+                            .iter()
+                            .enumerate()
+                            .filter(|(_, table)| table.mask & mask == mask)
+                            .map(|(idx, _)| idx)
+                            .collect();
+                        self.query_cache.insert(mask, matching_tables);
+                    }
+                    &self.query_cache[&mask]
+                }
+
+                fn invalidate_query_cache_for_table(&mut self, new_table_mask: u64, new_table_index: usize) {
+                    self.query_cache.retain(|query_mask, cached_tables| {
+                        if new_table_mask & query_mask == *query_mask {
+                            cached_tables.push(new_table_index);
+                            true
+                        } else {
+                            true
+                        }
+                    });
+                }
+
+                $(
+                    $(#[$comp_attr])*
+                    $crate::paste::paste! {
+                        #[inline]
+                        pub fn [<get_ $name>](&self, entity: $crate::Entity) -> Option<&$type> {
+                            let (table_index, array_index) = [<get_location_ $world:snake>](&self.entity_locations, entity)?;
+                            let table = &self.tables[table_index];
+                            if table.mask & $mask == 0 {
+                                return None;
+                            }
+                            Some(&table.$name[array_index])
+                        }
+
+                        #[inline]
+                        pub fn [<get_ $name _mut>](&mut self, entity: $crate::Entity) -> Option<&mut $type> {
+                            let (table_index, array_index) = [<get_location_ $world:snake>](&self.entity_locations, entity)?;
+                            let current_tick = self.current_tick;
+                            let table = &mut self.tables[table_index];
+                            if table.mask & $mask == 0 {
+                                return None;
+                            }
+                            table.[<$name _changed>][array_index] = current_tick;
+                            Some(&mut table.$name[array_index])
+                        }
+
+                        #[inline]
+                        pub fn [<modify_ $name>]<R>(&mut self, entity: $crate::Entity, f: impl FnOnce(&mut $type) -> R) -> Option<R> {
+                            let (table_index, array_index) = [<get_location_ $world:snake>](&self.entity_locations, entity)?;
+                            let current_tick = self.current_tick;
+                            let table = &mut self.tables[table_index];
+                            if table.mask & $mask == 0 {
+                                return None;
+                            }
+                            table.[<$name _changed>][array_index] = current_tick;
+                            Some(f(&mut table.$name[array_index]))
+                        }
+
+                        #[inline]
+                        pub fn [<entity_has_ $name>](&self, entity: $crate::Entity) -> bool {
+                            self.entity_has_components(entity, $mask)
+                        }
+
+                        #[inline]
+                        pub fn [<set_ $name>](&mut self, entity: $crate::Entity, value: $type) {
+                            if let Some((table_index, array_index)) = [<get_location_ $world:snake>](&self.entity_locations, entity) {
+                                let table = &mut self.tables[table_index];
+                                if table.mask & $mask != 0 {
+                                    table.$name[array_index] = value;
+                                    return;
+                                }
+                            }
+                            self.add_components(entity, $mask);
+                            if let Some((table_index, array_index)) = [<get_location_ $world:snake>](&self.entity_locations, entity) {
+                                self.tables[table_index].$name[array_index] = value;
+                            }
+                        }
+
+                        #[inline]
+                        pub fn [<add_ $name>](&mut self, entity: $crate::Entity) {
+                            self.add_components(entity, $mask);
+                        }
+
+                        #[inline]
+                        pub fn [<remove_ $name>](&mut self, entity: $crate::Entity) -> bool {
+                            self.remove_components(entity, $mask)
+                        }
+
+                        #[inline]
+                        pub fn [<query_ $name>](&self) -> [<$mask:camel QueryIter>]<'_> {
+                            [<$mask:camel QueryIter>] {
+                                tables: &self.tables,
+                                table_index: 0,
+                                array_index: 0,
+                            }
+                        }
+
+                        pub fn [<for_each_ $name _mut>]<F>(&mut self, mut f: F)
+                        where
+                            F: FnMut(&mut $type),
+                        {
+                            let table_indices: Vec<usize> = self.tables
+                                .iter()
+                                .enumerate()
+                                .filter(|(_, table)| table.mask & $mask != 0)
+                                .map(|(idx, _)| idx)
+                                .collect();
+                            for table_index in table_indices {
+                                for component in &mut self.tables[table_index].$name {
+                                    f(component);
+                                }
+                            }
+                        }
+
+                        #[cfg(not(target_family = "wasm"))]
+                        pub fn [<par_for_each_ $name _mut>]<F>(&mut self, f: F)
+                        where
+                            F: Fn(&mut $type) + Send + Sync,
+                        {
+                            use $crate::rayon::prelude::*;
+                            self.tables
+                                .par_iter_mut()
+                                .filter(|table| table.mask & $mask != 0)
+                                .for_each(|table| {
+                                    table.$name.par_iter_mut().for_each(|component| f(component));
+                                });
+                        }
+
+                        pub fn [<iter_ $name _slices>](&self) -> impl Iterator<Item = &[$type]> {
+                            self.tables
+                                .iter()
+                                .filter(|table| table.mask & $mask != 0)
+                                .map(|table| table.$name.as_slice())
+                        }
+
+                        pub fn [<iter_ $name _slices_mut>](&mut self) -> impl Iterator<Item = &mut [$type]> {
+                            self.tables
+                                .iter_mut()
+                                .filter(|table| table.mask & $mask != 0)
+                                .map(|table| table.$name.as_mut_slice())
+                        }
+                    }
+                )*
+
+                pub fn spawn_entities(&mut self, allocator: &mut $crate::EntityAllocator, mask: u64, count: usize) -> Vec<$crate::Entity> {
+                    let mut entities = Vec::with_capacity(count);
+                    let table_index = [<get_or_create_table_ $world:snake>](self, mask);
+                    let start_index = self.tables[table_index].entity_indices.len();
+
+                    self.tables[table_index].entity_indices.reserve(count);
+                    $(
+                        $(#[$comp_attr])*
+                        {
+                            if mask & $mask != 0 {
+                                self.tables[table_index].$name.reserve(count);
+                                self.tables[table_index].[<$name _changed>].reserve(count);
+                            }
+                        }
+                    )*
+
+                    for local_index in 0..count {
+                        let entity = allocator.allocate();
+                        self.entity_locations.ensure_slot(entity.id, entity.generation);
+                        entities.push(entity);
+
+                        self.tables[table_index].entity_indices.push(entity);
+                        $(
+                            $(#[$comp_attr])*
+                            {
+                                if mask & $mask != 0 {
+                                    self.tables[table_index].$name.push(<$type>::default());
+                                    self.tables[table_index].[<$name _changed>].push(self.current_tick);
+                                }
+                            }
+                        )*
+
+                        [<insert_location_ $world:snake>](
+                            &mut self.entity_locations,
+                            entity,
+                            (table_index, start_index + local_index),
+                        );
+                    }
+
+                    entities
+                }
+
+                pub fn spawn_batch<F>(&mut self, allocator: &mut $crate::EntityAllocator, mask: u64, count: usize, mut init: F) -> Vec<$crate::Entity>
+                where
+                    F: FnMut(&mut [<$world ComponentArrays>], usize),
+                {
+                    let table_index = [<get_or_create_table_ $world:snake>](self, mask);
+                    let start_index = self.tables[table_index].entity_indices.len();
+
+                    self.tables[table_index].entity_indices.reserve(count);
+                    $(
+                        $(#[$comp_attr])*
+                        {
+                            if mask & $mask != 0 {
+                                self.tables[table_index].$name.reserve(count);
+                                self.tables[table_index].[<$name _changed>].reserve(count);
+                            }
+                        }
+                    )*
+
+                    let mut entities = Vec::with_capacity(count);
+                    for local_index in 0..count {
+                        let entity = allocator.allocate();
+                        self.entity_locations.ensure_slot(entity.id, entity.generation);
+                        entities.push(entity);
+
+                        self.tables[table_index].entity_indices.push(entity);
+                        $(
+                            $(#[$comp_attr])*
+                            {
+                                if mask & $mask != 0 {
+                                    self.tables[table_index].$name.push(<$type>::default());
+                                    self.tables[table_index].[<$name _changed>].push(self.current_tick);
+                                }
+                            }
+                        )*
+
+                        [<insert_location_ $world:snake>](
+                            &mut self.entity_locations,
+                            entity,
+                            (table_index, start_index + local_index),
+                        );
+
+                        init(&mut self.tables[table_index], start_index + local_index);
+                    }
+
+                    entities
+                }
+
+                pub fn query_entities(&self, mask: u64) -> [<$world EntityQueryIter>]<'_> {
+                    [<$world EntityQueryIter>] {
+                        tables: &self.tables,
+                        mask,
+                        table_index: 0,
+                        array_index: 0,
+                    }
+                }
+
+                pub fn query_entities_changed(&self, mask: u64) -> [<$world ChangedEntityQueryIter>]<'_> {
+                    [<$world ChangedEntityQueryIter>] {
+                        tables: &self.tables,
+                        mask,
+                        since_tick: self.last_tick,
+                        table_index: 0,
+                        array_index: 0,
+                    }
+                }
+
+                pub fn query_first_entity(&self, mask: u64) -> Option<$crate::Entity> {
+                    for table in &self.tables {
+                        if table.mask & mask != mask {
+                            continue;
+                        }
+                        if let Some(&entity) = table.entity_indices.first() {
+                            return Some(entity);
+                        }
+                    }
+                    None
+                }
+
+                pub fn remove_entity(&mut self, entity: $crate::Entity) -> bool {
+                    if let Some(loc) = self.entity_locations.get_mut(entity.id) {
+                        if loc.allocated && loc.generation == entity.generation {
+                            let table_idx = loc.table_index as usize;
+                            let array_idx = loc.array_index as usize;
+
+                            self.entity_locations.mark_deallocated(entity.id);
+
+                            if table_idx < self.tables.len() {
+                                let table = &mut self.tables[table_idx];
+                                if !table.entity_indices.is_empty() {
+                                    let last_idx = table.entity_indices.len() - 1;
+
+                                    if array_idx < last_idx {
+                                        let moved_entity = table.entity_indices[last_idx];
+                                        if let Some(moved_loc) = self.entity_locations.get_mut(moved_entity.id) {
+                                            if moved_loc.allocated {
+                                                moved_loc.array_index = array_idx as u32;
+                                            }
+                                        }
+                                    }
+
+                                    $(
+                                        $(#[$comp_attr])*
+                                        {
+                                            if table.mask & $mask != 0 {
+                                                table.$name.swap_remove(array_idx);
+                                                table.[<$name _changed>].swap_remove(array_idx);
+                                            }
+                                        }
+                                    )*
+                                    table.entity_indices.swap_remove(array_idx);
+                                }
+                            }
+                            return true;
+                        }
+                    }
+                    false
+                }
+
+                pub fn add_components(&mut self, entity: $crate::Entity, mask: u64) -> bool {
+                    if let Some((table_index, array_index)) = [<get_location_ $world:snake>](&self.entity_locations, entity) {
+                        let current_mask = self.tables[table_index].mask;
+                        if current_mask & mask == mask {
+                            return true;
+                        }
+
+                        let target_table = if mask.count_ones() == 1 {
+                            [<get_component_index_ $world:snake>](mask).and_then(|idx| self.table_edges[table_index].add_edges[idx])
+                        } else {
+                            self.table_edges[table_index].multi_add_cache.get(&mask).copied()
+                        };
+
+                        let new_table_index = target_table.unwrap_or_else(|| {
+                            let new_idx = [<get_or_create_table_ $world:snake>](self, current_mask | mask);
+                            self.table_edges[table_index].multi_add_cache.insert(mask, new_idx);
+                            new_idx
+                        });
+
+                        [<move_entity_ $world:snake>](self, entity, table_index, array_index, new_table_index);
+                        true
+                    } else {
+                        if let Some(loc) = self.entity_locations.get(entity.id) {
+                            if loc.allocated {
+                                return false;
+                            }
+                        }
+
+                        let table_index = [<get_or_create_table_ $world:snake>](self, mask);
+                        let start_index = self.tables[table_index].entity_indices.len();
+
+                        self.tables[table_index].entity_indices.push(entity);
+                        $(
+                            $(#[$comp_attr])*
+                            {
+                                if mask & $mask != 0 {
+                                    self.tables[table_index].$name.push(<$type>::default());
+                                    self.tables[table_index].[<$name _changed>].push(self.current_tick);
+                                }
+                            }
+                        )*
+
+                        self.entity_locations.insert(entity.id, $crate::EntityLocation {
+                            generation: entity.generation,
+                            table_index: table_index as u32,
+                            array_index: start_index as u32,
+                            allocated: true,
+                        });
+                        true
+                    }
+                }
+
+                pub fn remove_components(&mut self, entity: $crate::Entity, mask: u64) -> bool {
+                    if let Some((table_index, array_index)) = [<get_location_ $world:snake>](&self.entity_locations, entity) {
+                        let current_mask = self.tables[table_index].mask;
+                        if current_mask & mask == 0 {
+                            return true;
+                        }
+
+                        let target_table = if mask.count_ones() == 1 {
+                            [<get_component_index_ $world:snake>](mask)
+                                .and_then(|idx| self.table_edges[table_index].remove_edges[idx])
+                        } else {
+                            self.table_edges[table_index].multi_remove_cache.get(&mask).copied()
+                        };
+
+                        let new_table_index = target_table.unwrap_or_else(|| {
+                            let new_idx = [<get_or_create_table_ $world:snake>](self, current_mask & !mask);
+                            self.table_edges[table_index].multi_remove_cache.insert(mask, new_idx);
+                            new_idx
+                        });
+
+                        [<move_entity_ $world:snake>](self, entity, table_index, array_index, new_table_index);
+                        true
+                    } else {
+                        false
+                    }
+                }
+
+                pub fn component_mask(&self, entity: $crate::Entity) -> Option<u64> {
+                    [<get_location_ $world:snake>](&self.entity_locations, entity)
+                        .map(|(table_index, _)| self.tables[table_index].mask)
+                }
+
+                pub fn get_all_entities(&self) -> Vec<$crate::Entity> {
+                    let mut result = Vec::with_capacity(self.entity_count());
+                    for table in &self.tables {
+                        result.extend(table.entity_indices.iter().copied());
+                    }
+                    result
+                }
+
+                pub fn entity_count(&self) -> usize {
+                    self.tables.iter().map(|table| table.entity_indices.len()).sum()
+                }
+
+                pub fn entity_has_components(&self, entity: $crate::Entity, components: u64) -> bool {
+                    self.component_mask(entity).unwrap_or(0) & components == components
+                }
+
+                pub fn increment_tick(&mut self) {
+                    self.last_tick = self.current_tick;
+                    self.current_tick = self.current_tick.wrapping_add(1);
+                }
+
+                pub fn current_tick(&self) -> u32 {
+                    self.current_tick
+                }
+
+                pub fn last_tick(&self) -> u32 {
+                    self.last_tick
+                }
+
+                $(
+                    $(#[$comp_attr])*
+                    $crate::paste::paste! {
+                        pub fn [<query_ $name _mut>]<F>(&mut self, mask: u64, mut f: F)
+                        where
+                            F: FnMut($crate::Entity, &mut $type),
+                        {
+                            let table_indices: Vec<usize> = self.get_cached_tables(mask).to_vec();
+                            for &table_index in &table_indices {
+                                let table = &mut self.tables[table_index];
+                                if table.mask & $mask == 0 {
+                                    continue;
+                                }
+                                for idx in 0..table.entity_indices.len() {
+                                    let entity = table.entity_indices[idx];
+                                    f(entity, &mut table.$name[idx]);
+                                }
+                            }
+                        }
+                    }
+                )*
+            }
+
+            #[allow(unused)]
+            impl $world {
+                #[inline]
+                pub fn for_each<F>(&self, include: u64, exclude: u64, mut f: F)
+                where
+                    F: FnMut($crate::Entity, &[<$world ComponentArrays>], usize),
+                {
+                    for table in &self.tables {
+                        if table.mask & include != include || table.mask & exclude != 0 {
+                            continue;
+                        }
+                        for (idx, &entity) in table.entity_indices.iter().enumerate() {
+                            f(entity, table, idx);
+                        }
+                    }
+                }
+
+                #[inline]
+                pub fn for_each_mut<F>(&mut self, include: u64, exclude: u64, mut f: F)
+                where
+                    F: FnMut($crate::Entity, &mut [<$world ComponentArrays>], usize),
+                {
+                    let table_indices: Vec<usize> = self.get_cached_tables(include).to_vec();
+
+                    for &table_index in &table_indices {
+                        let table = &mut self.tables[table_index];
+                        if table.mask & exclude != 0 {
+                            continue;
+                        }
+                        for idx in 0..table.entity_indices.len() {
+                            let entity = table.entity_indices[idx];
+                            f(entity, table, idx);
+                        }
+                    }
+                }
+
+                #[cfg(not(target_family = "wasm"))]
+                #[inline]
+                pub fn par_for_each_mut<F>(&mut self, include: u64, exclude: u64, f: F)
+                where
+                    F: Fn($crate::Entity, &mut [<$world ComponentArrays>], usize) + Send + Sync,
+                {
+                    use $crate::rayon::prelude::*;
+
+                    let table_indices: Vec<usize> = self.get_cached_tables(include).to_vec();
+                    let table_index_set: std::collections::HashSet<usize> = table_indices.iter().copied().collect();
+
+                    self.tables
+                        .par_iter_mut()
+                        .enumerate()
+                        .filter(|(idx, table)| table_index_set.contains(idx) && table.mask & exclude == 0)
+                        .for_each(|(_, table)| {
+                            for idx in 0..table.entity_indices.len() {
+                                let entity = table.entity_indices[idx];
+                                f(entity, table, idx);
+                            }
+                        });
+                }
+
+                #[inline]
+                pub fn for_each_mut_changed<F>(&mut self, include: u64, exclude: u64, mut f: F)
+                where
+                    F: FnMut($crate::Entity, &mut [<$world ComponentArrays>], usize),
+                {
+                    let table_indices: Vec<usize> = self.get_cached_tables(include).to_vec();
+                    let since_tick = self.last_tick;
+
+                    for &table_index in &table_indices {
+                        let table = &mut self.tables[table_index];
+                        if table.mask & exclude != 0 {
+                            continue;
+                        }
+
+                        for idx in 0..table.entity_indices.len() {
+                            let entity = table.entity_indices[idx];
+
+                            let mut changed = false;
+                            $(
+                                $(#[$comp_attr])*
+                                {
+                                    if include & $mask != 0 && table.mask & $mask != 0 && table.[<$name _changed>][idx] > since_tick {
+                                        changed = true;
+                                    }
+                                }
+                            )*
+
+                            if changed {
+                                f(entity, table, idx);
+                            }
+                        }
+                    }
+                }
+            }
+
+            #[allow(unused)]
+            impl $world {
+                #[inline]
+                pub fn for_each_with_tags<F>(
+                    &self,
+                    include: u64,
+                    exclude: u64,
+                    include_tags: &[&std::collections::HashSet<$crate::Entity>],
+                    exclude_tags: &[&std::collections::HashSet<$crate::Entity>],
+                    mut f: F,
+                )
+                where
+                    F: FnMut($crate::Entity, &[<$world ComponentArrays>], usize),
+                {
+                    let has_tag_filter = !include_tags.is_empty() || !exclude_tags.is_empty();
+
+                    for table in &self.tables {
+                        if table.mask & include != include || table.mask & exclude != 0 {
+                            continue;
+                        }
+
+                        if has_tag_filter {
+                            for (idx, &entity) in table.entity_indices.iter().enumerate() {
+                                if include_tags.iter().all(|tag_set| tag_set.contains(&entity))
+                                    && !exclude_tags.iter().any(|tag_set| tag_set.contains(&entity))
+                                {
+                                    f(entity, table, idx);
+                                }
+                            }
+                        } else {
+                            for (idx, &entity) in table.entity_indices.iter().enumerate() {
+                                f(entity, table, idx);
+                            }
+                        }
+                    }
+                }
+
+                #[inline]
+                pub fn for_each_mut_with_tags<F>(
+                    &mut self,
+                    include: u64,
+                    exclude: u64,
+                    include_tags: &[&std::collections::HashSet<$crate::Entity>],
+                    exclude_tags: &[&std::collections::HashSet<$crate::Entity>],
+                    mut f: F,
+                )
+                where
+                    F: FnMut($crate::Entity, &mut [<$world ComponentArrays>], usize),
+                {
+                    let has_tag_filter = !include_tags.is_empty() || !exclude_tags.is_empty();
+                    let table_indices: Vec<usize> = self.get_cached_tables(include).to_vec();
+
+                    if has_tag_filter {
+                        let matching_entities: std::collections::HashSet<$crate::Entity> = table_indices
+                            .iter()
+                            .filter_map(|&idx| self.tables.get(idx))
+                            .filter(|table| table.mask & exclude == 0)
+                            .flat_map(|table| table.entity_indices.iter().copied())
+                            .filter(|entity| {
+                                include_tags.iter().all(|tag_set| tag_set.contains(entity))
+                                    && !exclude_tags.iter().any(|tag_set| tag_set.contains(entity))
+                            })
+                            .collect();
+
+                        for &table_index in &table_indices {
+                            let table = &mut self.tables[table_index];
+                            if table.mask & exclude != 0 {
+                                continue;
+                            }
+                            for idx in 0..table.entity_indices.len() {
+                                let entity = table.entity_indices[idx];
+                                if matching_entities.contains(&entity) {
+                                    f(entity, table, idx);
+                                }
+                            }
+                        }
+                    } else {
+                        for &table_index in &table_indices {
+                            let table = &mut self.tables[table_index];
+                            if table.mask & exclude != 0 {
+                                continue;
+                            }
+                            for idx in 0..table.entity_indices.len() {
+                                let entity = table.entity_indices[idx];
+                                f(entity, table, idx);
+                            }
+                        }
+                    }
+                }
+
+                #[cfg(not(target_family = "wasm"))]
+                #[inline]
+                pub fn par_for_each_mut_with_tags<F>(
+                    &mut self,
+                    include: u64,
+                    exclude: u64,
+                    include_tags: &[&std::collections::HashSet<$crate::Entity>],
+                    exclude_tags: &[&std::collections::HashSet<$crate::Entity>],
+                    f: F,
+                )
+                where
+                    F: Fn($crate::Entity, &mut [<$world ComponentArrays>], usize) + Send + Sync,
+                {
+                    use $crate::rayon::prelude::*;
+
+                    let table_indices: Vec<usize> = self.get_cached_tables(include).to_vec();
+                    let table_index_set: std::collections::HashSet<usize> = table_indices.iter().copied().collect();
+                    let has_tag_filter = !include_tags.is_empty() || !exclude_tags.is_empty();
+
+                    if has_tag_filter {
+                        let matching_entities: std::collections::HashSet<$crate::Entity> = table_indices
+                            .iter()
+                            .filter_map(|&idx| self.tables.get(idx))
+                            .filter(|table| table.mask & exclude == 0)
+                            .flat_map(|table| table.entity_indices.iter().copied())
+                            .filter(|entity| {
+                                include_tags.iter().all(|tag_set| tag_set.contains(entity))
+                                    && !exclude_tags.iter().any(|tag_set| tag_set.contains(entity))
+                            })
+                            .collect();
+
+                        self.tables
+                            .par_iter_mut()
+                            .enumerate()
+                            .filter(|(idx, table)| table_index_set.contains(idx) && table.mask & exclude == 0)
+                            .for_each(|(_, table)| {
+                                for idx in 0..table.entity_indices.len() {
+                                    let entity = table.entity_indices[idx];
+                                    if matching_entities.contains(&entity) {
+                                        f(entity, table, idx);
+                                    }
+                                }
+                            });
+                    } else {
+                        self.tables
+                            .par_iter_mut()
+                            .enumerate()
+                            .filter(|(idx, table)| table_index_set.contains(idx) && table.mask & exclude == 0)
+                            .for_each(|(_, table)| {
+                                for idx in 0..table.entity_indices.len() {
+                                    let entity = table.entity_indices[idx];
+                                    f(entity, table, idx);
+                                }
+                            });
+                    }
+                }
+            }
+
+            #[allow(unused)]
+            pub struct [<$world QueryBuilder>]<'a> {
+                world: &'a $world,
+                include: u64,
+                exclude: u64,
+            }
+
+            #[allow(unused)]
+            impl<'a> [<$world QueryBuilder>]<'a> {
+                pub fn new(world: &'a $world) -> Self {
+                    Self {
+                        world,
+                        include: 0,
+                        exclude: 0,
+                    }
+                }
+
+                pub fn with(mut self, mask: u64) -> Self {
+                    self.include |= mask;
+                    self
+                }
+
+                pub fn without(mut self, mask: u64) -> Self {
+                    self.exclude |= mask;
+                    self
+                }
+
+                pub fn iter<F>(self, f: F)
+                where
+                    F: FnMut($crate::Entity, &[<$world ComponentArrays>], usize),
+                {
+                    self.world.for_each(self.include, self.exclude, f);
+                }
+            }
+
+            #[allow(unused)]
+            pub struct [<$world QueryBuilderMut>]<'a> {
+                world: &'a mut $world,
+                include: u64,
+                exclude: u64,
+            }
+
+            #[allow(unused)]
+            impl<'a> [<$world QueryBuilderMut>]<'a> {
+                pub fn new(world: &'a mut $world) -> Self {
+                    Self {
+                        world,
+                        include: 0,
+                        exclude: 0,
+                    }
+                }
+
+                pub fn with(mut self, mask: u64) -> Self {
+                    self.include |= mask;
+                    self
+                }
+
+                pub fn without(mut self, mask: u64) -> Self {
+                    self.exclude |= mask;
+                    self
+                }
+
+                pub fn iter<F>(self, f: F)
+                where
+                    F: FnMut($crate::Entity, &mut [<$world ComponentArrays>], usize),
+                {
+                    self.world.for_each_mut(self.include, self.exclude, f);
+                }
+            }
+
+            #[allow(unused)]
+            impl $world {
+                pub fn query(&self) -> [<$world QueryBuilder>]<'_> {
+                    [<$world QueryBuilder>]::new(self)
+                }
+
+                pub fn query_mut(&mut self) -> [<$world QueryBuilderMut>]<'_> {
+                    [<$world QueryBuilderMut>]::new(self)
+                }
+
+                $(
+                    $(#[$comp_attr])*
+                    $crate::paste::paste! {
+                        pub fn [<iter_ $name>]<F>(&self, mut f: F)
+                        where
+                            F: FnMut($crate::Entity, &$type),
+                        {
+                            self.for_each($mask, 0, |entity, table, idx| {
+                                f(entity, &table.$name[idx]);
+                            });
+                        }
+
+                        pub fn [<iter_ $name _mut>]<F>(&mut self, mut f: F)
+                        where
+                            F: FnMut($crate::Entity, &mut $type),
+                        {
+                            self.for_each_mut($mask, 0, |entity, table, idx| {
+                                f(entity, &mut table.$name[idx]);
+                            });
+                        }
+                    }
+                )*
+            }
+
+            pub struct [<$world EntityQueryIter>]<'a> {
+                tables: &'a [[<$world ComponentArrays>]],
+                mask: u64,
+                table_index: usize,
+                array_index: usize,
+            }
+
+            impl<'a> Iterator for [<$world EntityQueryIter>]<'a> {
+                type Item = $crate::Entity;
+
+                fn next(&mut self) -> Option<Self::Item> {
+                    loop {
+                        if self.table_index >= self.tables.len() {
+                            return None;
+                        }
+                        let table = &self.tables[self.table_index];
+                        if table.mask & self.mask != self.mask {
+                            self.table_index += 1;
+                            self.array_index = 0;
+                            continue;
+                        }
+                        if self.array_index >= table.entity_indices.len() {
+                            self.table_index += 1;
+                            self.array_index = 0;
+                            continue;
+                        }
+                        let entity = table.entity_indices[self.array_index];
+                        self.array_index += 1;
+                        return Some(entity);
+                    }
+                }
+
+                fn size_hint(&self) -> (usize, Option<usize>) {
+                    let mut remaining = 0;
+                    for table_idx in self.table_index..self.tables.len() {
+                        let table = &self.tables[table_idx];
+                        if table.mask & self.mask != self.mask {
+                            continue;
+                        }
+                        if table_idx == self.table_index {
+                            remaining += table.entity_indices.len().saturating_sub(self.array_index);
+                        } else {
+                            remaining += table.entity_indices.len();
+                        }
+                    }
+                    (remaining, Some(remaining))
+                }
+            }
+
+            pub struct [<$world ChangedEntityQueryIter>]<'a> {
+                tables: &'a [[<$world ComponentArrays>]],
+                mask: u64,
+                since_tick: u32,
+                table_index: usize,
+                array_index: usize,
+            }
+
+            impl<'a> Iterator for [<$world ChangedEntityQueryIter>]<'a> {
+                type Item = $crate::Entity;
+
+                fn next(&mut self) -> Option<Self::Item> {
+                    loop {
+                        if self.table_index >= self.tables.len() {
+                            return None;
+                        }
+                        let table = &self.tables[self.table_index];
+                        if table.mask & self.mask != self.mask {
+                            self.table_index += 1;
+                            self.array_index = 0;
+                            continue;
+                        }
+                        if self.array_index >= table.entity_indices.len() {
+                            self.table_index += 1;
+                            self.array_index = 0;
+                            continue;
+                        }
+                        let idx = self.array_index;
+                        self.array_index += 1;
+
+                        let mut changed = false;
+                        $(
+                            $(#[$comp_attr])*
+                            {
+                                if self.mask & $mask != 0 && table.mask & $mask != 0 && table.[<$name _changed>][idx] > self.since_tick {
+                                    changed = true;
+                                }
+                            }
+                        )*
+
+                        if changed {
+                            return Some(table.entity_indices[idx]);
+                        }
+                    }
+                }
+            }
+
+            $(
+                $(#[$comp_attr])*
+                $crate::paste::paste! {
+                    pub struct [<$mask:camel QueryIter>]<'a> {
+                        tables: &'a [[<$world ComponentArrays>]],
+                        table_index: usize,
+                        array_index: usize,
+                    }
+
+                    impl<'a> Iterator for [<$mask:camel QueryIter>]<'a> {
+                        type Item = &'a $type;
+
+                        fn next(&mut self) -> Option<Self::Item> {
+                            loop {
+                                if self.table_index >= self.tables.len() {
+                                    return None;
+                                }
+                                let table = &self.tables[self.table_index];
+                                if table.mask & $mask == 0 {
+                                    self.table_index += 1;
+                                    self.array_index = 0;
+                                    continue;
+                                }
+                                if self.array_index >= table.$name.len() {
+                                    self.table_index += 1;
+                                    self.array_index = 0;
+                                    continue;
+                                }
+                                let component = &table.$name[self.array_index];
+                                self.array_index += 1;
+                                return Some(component);
+                            }
+                        }
+
+                        fn size_hint(&self) -> (usize, Option<usize>) {
+                            let mut remaining = 0;
+                            for table_idx in self.table_index..self.tables.len() {
+                                let table = &self.tables[table_idx];
+                                if table.mask & $mask == 0 {
+                                    continue;
+                                }
+                                if table_idx == self.table_index {
+                                    remaining += table.$name.len().saturating_sub(self.array_index);
+                                } else {
+                                    remaining += table.$name.len();
+                                }
+                            }
+                            (remaining, Some(remaining))
+                        }
+                    }
+                }
+            )*
+
+            fn [<get_component_index_ $world:snake>](mask: u64) -> Option<usize> {
+                match mask {
+                    $($(#[$comp_attr])* $mask => Some([<$world Component>]::$mask as _),)*
+                    _ => None,
+                }
+            }
+
+            fn [<remove_from_table_ $world:snake>](arrays: &mut [<$world ComponentArrays>], index: usize) -> Option<$crate::Entity> {
+                let last_index = arrays.entity_indices.len() - 1;
+                let mut swapped_entity = None;
+                if index < last_index {
+                    swapped_entity = Some(arrays.entity_indices[last_index]);
+                }
+                $(
+                    $(#[$comp_attr])*
+                    {
+                        if arrays.mask & $mask != 0 {
+                            arrays.$name.swap_remove(index);
+                            arrays.[<$name _changed>].swap_remove(index);
+                        }
+                    }
+                )*
+                arrays.entity_indices.swap_remove(index);
+                swapped_entity
+            }
+
+            fn [<move_entity_ $world:snake>](
+                world: &mut $world,
+                entity: $crate::Entity,
+                from_table: usize,
+                from_index: usize,
+                to_table: usize,
+            ) {
+                let tick = world.current_tick;
+                let components = {
+                    let from_table_ref = &mut world.tables[from_table];
+                    (
+                        $(
+                            $(#[$comp_attr])*
+                            {
+                                if from_table_ref.mask & $mask != 0 {
+                                    Some(std::mem::take(&mut from_table_ref.$name[from_index]))
+                                } else {
+                                    None
+                                }
+                            },
+                        )*
+                    )
+                };
+
+                [<add_to_table_ $world:snake>](&mut world.tables[to_table], entity, components, tick);
+                let new_index = world.tables[to_table].entity_indices.len() - 1;
+                [<insert_location_ $world:snake>](&mut world.entity_locations, entity, (to_table, new_index));
+
+                if let Some(swapped) = [<remove_from_table_ $world:snake>](&mut world.tables[from_table], from_index) {
+                    [<insert_location_ $world:snake>](
+                        &mut world.entity_locations,
+                        swapped,
+                        (from_table, from_index),
+                    );
+                }
+            }
+
+            fn [<get_location_ $world:snake>](locations: &$crate::EntityLocations, entity: $crate::Entity) -> Option<(usize, usize)> {
+                let location = locations.get(entity.id)?;
+                if !location.allocated || location.generation != entity.generation {
+                    return None;
+                }
+                Some((location.table_index as usize, location.array_index as usize))
+            }
+
+            fn [<insert_location_ $world:snake>](
+                locations: &mut $crate::EntityLocations,
+                entity: $crate::Entity,
+                location: (usize, usize),
+            ) {
+                locations.insert(entity.id, $crate::EntityLocation {
+                    generation: entity.generation,
+                    table_index: location.0 as u32,
+                    array_index: location.1 as u32,
+                    allocated: true,
+                });
+            }
+
+            fn [<add_to_table_ $world:snake>](
+                arrays: &mut [<$world ComponentArrays>],
+                entity: $crate::Entity,
+                components: ( $($(#[$comp_attr])* Option<$type>,)* ),
+                tick: u32,
+            ) {
+                let ($($name,)*) = components;
+                $(
+                    $(#[$comp_attr])*
+                    {
+                        if arrays.mask & $mask != 0 {
+                            if let Some(component) = $name {
+                                arrays.$name.push(component);
+                            } else {
+                                arrays.$name.push(<$type>::default());
+                            }
+                            arrays.[<$name _changed>].push(tick);
+                        }
+                    }
+                )*
+                arrays.entity_indices.push(entity);
+            }
+
+            fn [<get_or_create_table_ $world:snake>](world: &mut $world, mask: u64) -> usize {
+                if let Some(&index) = world.table_lookup.get(&mask) {
+                    return index;
+                }
+
+                let table_index = world.tables.len();
+                world.tables.push([<$world ComponentArrays>] {
+                    mask,
+                    ..Default::default()
+                });
+                world.table_edges.push([<$world TableEdges>]::default());
+                world.table_lookup.insert(mask, table_index);
+
+                world.invalidate_query_cache_for_table(mask, table_index);
+
+                for comp_mask in [$($(#[$comp_attr])* $mask,)*] {
+                    if let Some(comp_idx) = [<get_component_index_ $world:snake>](comp_mask) {
+                        for (idx, table) in world.tables.iter().enumerate() {
+                            if table.mask | comp_mask == mask {
+                                world.table_edges[idx].add_edges[comp_idx] = Some(table_index);
+                            }
+                            if table.mask & !comp_mask == mask {
+                                world.table_edges[idx].remove_edges[comp_idx] = Some(table_index);
+                            }
+                        }
+                    }
+                }
+
+                table_index
+            }
+        }
+    };
+}
+
+#[macro_export]
+macro_rules! ecs_multi_impl {
+    (
+        $ecs:ident {
+            $($world_name:ident {
+                $($(#[$comp_attr:meta])* $name:ident: $type:ty => $mask:ident),* $(,)?
+            })+
+        }
+        Tags {
+            $($tag_name:ident => $tag_mask:ident),* $(,)?
+        }
+        Events {
+            $($event_name:ident: $event_type:ty),* $(,)?
+        }
+        $resources:ident {
+            $($(#[$attr:meta])* $resource_name:ident: $resource_type:ty),* $(,)?
+        }
+    ) => {
+        $(
+            $crate::ecs_world_impl! {
+                $world_name {
+                    $($(#[$comp_attr])* $name: $type => $mask),*
+                }
+            }
+        )+
+
+        #[derive(Default)]
+        pub struct $resources {
+            $($(#[$attr])* pub $resource_name: $resource_type,)*
+        }
+
+        $crate::paste::paste! {
+            #[allow(unused)]
+            #[derive(Default, Debug, Clone)]
+            pub struct EntityBuilder {
+                $($(
+                    $(#[$comp_attr])* $name: Option<$type>,
+                )*)+
+            }
+
+            #[allow(unused)]
+            impl EntityBuilder {
+                pub fn new() -> Self {
+                    Self::default()
+                }
+
+                $($(
+                    $(#[$comp_attr])*
+                    pub fn [<with_ $name>](mut self, value: $type) -> Self {
+                        self.$name = Some(value);
+                        self
+                    }
+                )*)+
+
+                pub fn spawn(self, ecs: &mut $ecs, instances: usize) -> Vec<$crate::Entity> {
+                    let mut entities = Vec::with_capacity(instances);
+                    for _ in 0..instances {
+                        entities.push(ecs.allocator.allocate());
+                    }
+
+                    $(
+                        {
+                            let mut mask: u64 = 0;
+                            $(
+                                $(#[$comp_attr])*
+                                if self.$name.is_some() {
+                                    mask |= $mask;
+                                }
+                            )*
+                            if mask != 0 {
+                                let last_entity_index = entities.len().saturating_sub(1);
+                                for (entity_index, entity) in entities.iter().enumerate() {
+                                    ecs.[<$world_name:snake>].add_components(*entity, mask);
+                                    if entity_index == last_entity_index {
+                                        $(
+                                            $(#[$comp_attr])*
+                                            if let Some(component) = self.$name {
+                                                ecs.[<$world_name:snake>].[<set_ $name>](*entity, component);
+                                            }
+                                        )*
+                                        break;
+                                    } else {
+                                        $(
+                                            $(#[$comp_attr])*
+                                            if let Some(ref component) = self.$name {
+                                                ecs.[<$world_name:snake>].[<set_ $name>](*entity, component.clone());
+                                            }
+                                        )*
+                                    }
+                                }
+                            }
+                        }
+                    )+
+
+                    entities
+                }
+            }
+
+            pub enum Command {
+                Spawn { count: usize },
+                Despawn { entities: Vec<$crate::Entity> },
+                $($(
+                    $(#[$comp_attr])*
+                    [<$world_name Set $mask:camel>] { entity: $crate::Entity, value: $type },
+                    $(#[$comp_attr])*
+                    [<$world_name AddComponents $mask:camel>] { entity: $crate::Entity },
+                    $(#[$comp_attr])*
+                    [<$world_name RemoveComponents $mask:camel>] { entity: $crate::Entity },
+                )*)+
+                $(
+                    [<Add $tag_mask:camel>] { entity: $crate::Entity },
+                    [<Remove $tag_mask:camel>] { entity: $crate::Entity },
+                )*
+            }
+
+            #[allow(unused)]
+            pub struct $ecs {
+                $(pub [<$world_name:snake>]: $world_name,)+
+                allocator: $crate::EntityAllocator,
+                pub resources: $resources,
+                $(pub $tag_name: std::collections::HashSet<$crate::Entity>,)*
+                command_buffer: Vec<Command>,
+                $($event_name: $crate::EventQueue<$event_type>,)*
+            }
+
+            impl Default for $ecs {
+                fn default() -> Self {
+                    Self {
+                        $([<$world_name:snake>]: $world_name::default(),)+
+                        allocator: $crate::EntityAllocator::default(),
+                        resources: $resources::default(),
+                        $(
+                            $tag_name: std::collections::HashSet::default(),
+                        )*
+                        command_buffer: Vec::default(),
+                        $(
+                            $event_name: $crate::EventQueue::new(),
+                        )*
+                    }
+                }
+            }
+
+            #[allow(unused)]
+            impl $ecs {
+                pub fn spawn(&mut self) -> $crate::Entity {
+                    self.allocator.allocate()
+                }
+
+                pub fn spawn_count(&mut self, count: usize) -> Vec<$crate::Entity> {
+                    let mut entities = Vec::with_capacity(count);
+                    for _ in 0..count {
+                        entities.push(self.allocator.allocate());
+                    }
+                    entities
+                }
+
+                pub fn despawn(&mut self, entity: $crate::Entity) {
+                    $(self.[<$world_name:snake>].remove_entity(entity);)+
+                    $(self.$tag_name.remove(&entity);)*
+                    self.allocator.deallocate(entity);
+                }
+
+                pub fn despawn_entities(&mut self, entities: &[$crate::Entity]) {
+                    for &entity in entities {
+                        self.despawn(entity);
+                    }
+                }
+
+                $(
+                    pub fn [<add_ $tag_name>](&mut self, entity: $crate::Entity) {
+                        self.$tag_name.insert(entity);
+                    }
+
+                    pub fn [<remove_ $tag_name>](&mut self, entity: $crate::Entity) -> bool {
+                        self.$tag_name.remove(&entity)
+                    }
+
+                    pub fn [<has_ $tag_name>](&self, entity: $crate::Entity) -> bool {
+                        self.$tag_name.contains(&entity)
+                    }
+
+                    pub fn [<query_ $tag_name>](&self) -> impl Iterator<Item = $crate::Entity> + '_ {
+                        self.$tag_name.iter().copied()
+                    }
+                )*
+
+                $(
+                    pub fn [<send_ $event_name>](&mut self, event: $event_type) {
+                        self.$event_name.send(event);
+                    }
+
+                    pub fn [<read_ $event_name>](&self) -> impl Iterator<Item = &$event_type> {
+                        self.$event_name.read()
+                    }
+
+                    pub fn [<drain_ $event_name>](&mut self) -> impl Iterator<Item = $event_type> + '_ {
+                        self.$event_name.drain()
+                    }
+
+                    pub fn [<clear_ $event_name>](&mut self) {
+                        self.$event_name.clear();
+                    }
+
+                    pub fn [<update_ $event_name>](&mut self) {
+                        self.$event_name.update();
+                    }
+
+                    pub fn [<len_ $event_name>](&self) -> usize {
+                        self.$event_name.len()
+                    }
+
+                    pub fn [<is_empty_ $event_name>](&self) -> bool {
+                        self.$event_name.is_empty()
+                    }
+
+                    pub fn [<peek_ $event_name>](&self) -> Option<&$event_type> {
+                        self.$event_name.peek()
+                    }
+
+                    pub fn [<collect_ $event_name>](&self) -> Vec<$event_type>
+                    where
+                        $event_type: Clone,
+                    {
+                        self.$event_name.read().cloned().collect()
+                    }
+                )*
+
+                fn update_events(&mut self) {
+                    $(
+                        self.$event_name.update();
+                    )*
+                }
+
+                pub fn step(&mut self) {
+                    self.update_events();
+                    $(
+                        self.[<$world_name:snake>].last_tick = self.[<$world_name:snake>].current_tick;
+                        self.[<$world_name:snake>].current_tick += 1;
+                    )+
+                }
+
+                pub fn queue_spawn(&mut self, count: usize) {
+                    self.command_buffer.push(Command::Spawn { count });
+                }
+
+                pub fn queue_despawn_entity(&mut self, entity: $crate::Entity) {
+                    self.command_buffer.push(Command::Despawn { entities: vec![entity] });
+                }
+
+                pub fn queue_despawn_entities(&mut self, entities: Vec<$crate::Entity>) {
+                    self.command_buffer.push(Command::Despawn { entities });
+                }
+
+                $($(
+                    $(#[$comp_attr])*
+                    pub fn [<queue_set_ $name>](&mut self, entity: $crate::Entity, value: $type) {
+                        self.command_buffer.push(Command::[<$world_name Set $mask:camel>] { entity, value });
+                    }
+
+                    $(#[$comp_attr])*
+                    pub fn [<queue_add_ $name>](&mut self, entity: $crate::Entity) {
+                        self.command_buffer.push(Command::[<$world_name AddComponents $mask:camel>] { entity });
+                    }
+
+                    $(#[$comp_attr])*
+                    pub fn [<queue_remove_ $name>](&mut self, entity: $crate::Entity) {
+                        self.command_buffer.push(Command::[<$world_name RemoveComponents $mask:camel>] { entity });
+                    }
+                )*)+
+
+                $(
+                    pub fn [<queue_add_ $tag_name>](&mut self, entity: $crate::Entity) {
+                        self.command_buffer.push(Command::[<Add $tag_mask:camel>] { entity });
+                    }
+
+                    pub fn [<queue_remove_ $tag_name>](&mut self, entity: $crate::Entity) {
+                        self.command_buffer.push(Command::[<Remove $tag_mask:camel>] { entity });
+                    }
+                )*
+
+                pub fn apply_commands(&mut self) {
+                    let commands = std::mem::take(&mut self.command_buffer);
+                    for command in commands {
+                        match command {
+                            Command::Spawn { count } => {
+                                self.spawn_count(count);
+                            }
+                            Command::Despawn { entities } => {
+                                self.despawn_entities(&entities);
+                            }
+                            $($(
+                                $(#[$comp_attr])*
+                                Command::[<$world_name Set $mask:camel>] { entity, value } => {
+                                    self.[<$world_name:snake>].[<set_ $name>](entity, value);
+                                }
+                                $(#[$comp_attr])*
+                                Command::[<$world_name AddComponents $mask:camel>] { entity } => {
+                                    self.[<$world_name:snake>].add_components(entity, $mask);
+                                }
+                                $(#[$comp_attr])*
+                                Command::[<$world_name RemoveComponents $mask:camel>] { entity } => {
+                                    self.[<$world_name:snake>].remove_components(entity, $mask);
+                                }
+                            )*)+
+                            $(
+                                Command::[<Add $tag_mask:camel>] { entity } => {
+                                    self.[<add_ $tag_name>](entity);
+                                }
+                                Command::[<Remove $tag_mask:camel>] { entity } => {
+                                    self.[<remove_ $tag_name>](entity);
+                                }
+                            )*
+                        }
+                    }
+                }
+
+                pub fn command_count(&self) -> usize {
+                    self.command_buffer.len()
+                }
+
+                pub fn clear_commands(&mut self) {
+                    self.command_buffer.clear();
+                }
+            }
         }
     };
 }
@@ -3938,7 +5609,6 @@ mod tests {
             let dt = world.resources._delta_time;
             let updates: Vec<(Entity, Velocity)> = world
                 .query_entities(POSITION | VELOCITY)
-                .into_iter()
                 .filter_map(|entity| world.get_velocity(entity).map(|vel| (entity, vel.clone())))
                 .collect();
 
@@ -3989,14 +5659,14 @@ mod tests {
         let mut schedule = Schedule::new();
 
         schedule.add_system_mut(|world: &mut World| {
-            let entities: Vec<Entity> = world.query_entities(POSITION).into_iter().collect();
+            let entities: Vec<Entity> = world.query_entities(POSITION).collect();
             if let Some(pos) = world.get_position_mut(entities[0]) {
                 pos.x = 10.0;
             }
         });
 
         schedule.add_system_mut(|world: &mut World| {
-            let entities: Vec<Entity> = world.query_entities(POSITION).into_iter().collect();
+            let entities: Vec<Entity> = world.query_entities(POSITION).collect();
             if let Some(pos) = world.get_position_mut(entities[0]) {
                 pos.x *= 2.0;
             }
@@ -4017,7 +5687,7 @@ mod tests {
         let mut schedule = Schedule::new();
 
         schedule.add_system_mut(|world: &mut World| {
-            let entities: Vec<Entity> = world.query_entities(HEALTH).into_iter().collect();
+            let entities: Vec<Entity> = world.query_entities(HEALTH).collect();
             for entity in entities {
                 if let Some(health) = world.get_health_mut(entity) {
                     health.value -= 10.0;
@@ -4026,7 +5696,7 @@ mod tests {
         });
 
         schedule.add_system_mut(|world: &mut World| {
-            let entities: Vec<Entity> = world.query_entities(HEALTH).into_iter().collect();
+            let entities: Vec<Entity> = world.query_entities(HEALTH).collect();
             for entity in entities {
                 if let Some(health) = world.get_health_mut(entity) {
                     health.value *= 0.9;
@@ -4583,6 +6253,460 @@ mod tests {
                 });
                 assert_eq!(world.get_debug_only(entities[0]).unwrap().debug_value, 43);
             }
+        }
+    }
+
+    mod multi_world_test {
+        use super::*;
+
+        #[derive(Default, Debug, Clone, PartialEq)]
+        pub struct Position {
+            pub x: f32,
+            pub y: f32,
+        }
+
+        #[derive(Default, Debug, Clone, PartialEq)]
+        pub struct Velocity {
+            pub x: f32,
+            pub y: f32,
+        }
+
+        #[derive(Default, Debug, Clone, PartialEq)]
+        pub struct Sprite {
+            pub id: u32,
+        }
+
+        #[derive(Default, Debug, Clone, PartialEq)]
+        pub struct Color {
+            pub r: f32,
+            pub g: f32,
+            pub b: f32,
+        }
+
+        #[derive(Debug, Clone)]
+        #[allow(dead_code)]
+        pub struct CollisionEvent {
+            pub entity_a: Entity,
+            pub entity_b: Entity,
+        }
+
+        crate::ecs! {
+            GameEcs {
+                CoreWorld {
+                    position: Position => MW_POSITION,
+                    velocity: Velocity => MW_VELOCITY,
+                }
+                RenderWorld {
+                    sprite: Sprite => MW_SPRITE,
+                    color: Color => MW_COLOR,
+                }
+            }
+            Tags {
+                player => MW_PLAYER,
+            }
+            Events {
+                collision: CollisionEvent,
+            }
+            GameResources {
+                delta_time: f32,
+            }
+        }
+
+        #[test]
+        fn test_multi_world_spawn() {
+            let mut ecs = GameEcs::default();
+            let entity = ecs.spawn();
+            assert_eq!(entity.id, 0);
+            assert_eq!(entity.generation, 0);
+        }
+
+        #[test]
+        fn test_multi_world_per_world_components() {
+            let mut ecs = GameEcs::default();
+            let entity = ecs.spawn();
+
+            ecs.core_world
+                .add_components(entity, MW_POSITION | MW_VELOCITY);
+            ecs.core_world
+                .set_position(entity, Position { x: 1.0, y: 2.0 });
+
+            assert_eq!(ecs.core_world.get_position(entity).unwrap().x, 1.0);
+            assert_eq!(ecs.core_world.get_position(entity).unwrap().y, 2.0);
+            assert!(ecs.core_world.get_velocity(entity).is_some());
+        }
+
+        #[test]
+        fn test_multi_world_cross_world_access() {
+            let mut ecs = GameEcs::default();
+            let entity = ecs.spawn();
+
+            ecs.core_world
+                .set_position(entity, Position { x: 5.0, y: 10.0 });
+            ecs.render_world.set_sprite(entity, Sprite { id: 42 });
+
+            assert_eq!(ecs.core_world.get_position(entity).unwrap().x, 5.0);
+            assert_eq!(ecs.render_world.get_sprite(entity).unwrap().id, 42);
+        }
+
+        #[test]
+        fn test_multi_world_split_borrow() {
+            let mut ecs = GameEcs::default();
+            let entity = ecs.spawn();
+
+            ecs.core_world
+                .set_position(entity, Position { x: 1.0, y: 2.0 });
+            ecs.render_world.set_sprite(entity, Sprite { id: 1 });
+
+            let GameEcs {
+                core_world,
+                render_world,
+                ..
+            } = &mut ecs;
+            core_world.for_each_mut(MW_POSITION, 0, |entity, table, idx| {
+                if let Some(sprite) = render_world.get_sprite(entity) {
+                    table.position[idx].x += sprite.id as f32;
+                }
+            });
+
+            assert_eq!(ecs.core_world.get_position(entity).unwrap().x, 2.0);
+        }
+
+        #[test]
+        fn test_multi_world_despawn_cascades() {
+            let mut ecs = GameEcs::default();
+            let entity = ecs.spawn();
+
+            ecs.core_world
+                .set_position(entity, Position { x: 1.0, y: 2.0 });
+            ecs.render_world.set_sprite(entity, Sprite { id: 1 });
+            ecs.add_player(entity);
+
+            assert!(ecs.core_world.get_position(entity).is_some());
+            assert!(ecs.render_world.get_sprite(entity).is_some());
+            assert!(ecs.has_player(entity));
+
+            ecs.despawn(entity);
+
+            assert!(ecs.core_world.get_position(entity).is_none());
+            assert!(ecs.render_world.get_sprite(entity).is_none());
+            assert!(!ecs.has_player(entity));
+        }
+
+        #[test]
+        fn test_multi_world_entity_in_one_world_only() {
+            let mut ecs = GameEcs::default();
+            let entity = ecs.spawn();
+
+            ecs.core_world
+                .set_position(entity, Position { x: 1.0, y: 2.0 });
+
+            assert!(ecs.core_world.get_position(entity).is_some());
+            assert!(ecs.render_world.get_sprite(entity).is_none());
+            assert!(ecs.render_world.get_color(entity).is_none());
+        }
+
+        #[test]
+        fn test_multi_world_entity_in_no_world() {
+            let mut ecs = GameEcs::default();
+            let entity = ecs.spawn();
+
+            assert!(ecs.core_world.get_position(entity).is_none());
+            assert!(ecs.render_world.get_sprite(entity).is_none());
+        }
+
+        #[test]
+        fn test_multi_world_entity_builder() {
+            let mut ecs = GameEcs::default();
+            let entities = EntityBuilder::new()
+                .with_position(Position { x: 1.0, y: 2.0 })
+                .with_sprite(Sprite { id: 42 })
+                .spawn(&mut ecs, 2);
+
+            assert_eq!(entities.len(), 2);
+            assert_eq!(ecs.core_world.get_position(entities[0]).unwrap().x, 1.0);
+            assert_eq!(ecs.core_world.get_position(entities[1]).unwrap().x, 1.0);
+            assert_eq!(ecs.render_world.get_sprite(entities[0]).unwrap().id, 42);
+            assert_eq!(ecs.render_world.get_sprite(entities[1]).unwrap().id, 42);
+        }
+
+        #[test]
+        fn test_multi_world_tags() {
+            let mut ecs = GameEcs::default();
+            let entity = ecs.spawn();
+
+            ecs.add_player(entity);
+            assert!(ecs.has_player(entity));
+
+            let players: Vec<Entity> = ecs.query_player().collect();
+            assert_eq!(players.len(), 1);
+
+            ecs.remove_player(entity);
+            assert!(!ecs.has_player(entity));
+        }
+
+        #[test]
+        fn test_multi_world_tag_split_borrow() {
+            let mut ecs = GameEcs::default();
+            let e1 = ecs.spawn();
+            let e2 = ecs.spawn();
+
+            ecs.core_world.set_position(e1, Position { x: 1.0, y: 0.0 });
+            ecs.core_world.set_position(e2, Position { x: 2.0, y: 0.0 });
+            ecs.add_player(e1);
+
+            let GameEcs {
+                core_world, player, ..
+            } = &mut ecs;
+            let mut player_positions = Vec::new();
+            core_world.for_each_mut(MW_POSITION, 0, |entity, table, idx| {
+                if player.contains(&entity) {
+                    player_positions.push(table.position[idx].clone());
+                }
+            });
+
+            assert_eq!(player_positions.len(), 1);
+            assert_eq!(player_positions[0].x, 1.0);
+        }
+
+        #[test]
+        fn test_multi_world_events() {
+            let mut ecs = GameEcs::default();
+            let e1 = ecs.spawn();
+            let e2 = ecs.spawn();
+
+            ecs.send_collision(CollisionEvent {
+                entity_a: e1,
+                entity_b: e2,
+            });
+
+            let events: Vec<_> = ecs.collect_collision();
+            assert_eq!(events.len(), 1);
+            assert_eq!(events[0].entity_a, e1);
+        }
+
+        #[test]
+        fn test_multi_world_resources() {
+            let mut ecs = GameEcs::default();
+            ecs.resources.delta_time = 0.016;
+            assert_eq!(ecs.resources.delta_time, 0.016);
+        }
+
+        #[test]
+        fn test_multi_world_schedule() {
+            let mut ecs = GameEcs::default();
+            let entity = ecs.spawn();
+            ecs.core_world
+                .set_position(entity, Position { x: 0.0, y: 0.0 });
+            ecs.core_world
+                .set_velocity(entity, Velocity { x: 1.0, y: 2.0 });
+            ecs.resources.delta_time = 0.1;
+
+            let mut schedule: Schedule<GameEcs> = Schedule::new();
+            schedule.add_system_mut(|ecs: &mut GameEcs| {
+                let dt = ecs.resources.delta_time;
+                ecs.core_world
+                    .for_each_mut(MW_POSITION | MW_VELOCITY, 0, |_entity, table, idx| {
+                        table.position[idx].x += table.velocity[idx].x * dt;
+                        table.position[idx].y += table.velocity[idx].y * dt;
+                    });
+            });
+
+            schedule.run(&mut ecs);
+
+            let pos = ecs.core_world.get_position(entity).unwrap();
+            assert!((pos.x - 0.1).abs() < f32::EPSILON);
+            assert!((pos.y - 0.2).abs() < f32::EPSILON);
+        }
+
+        #[test]
+        fn test_multi_world_mask_independence() {
+            assert_eq!(MW_POSITION, 1 << 0);
+            assert_eq!(MW_VELOCITY, 1 << 1);
+            assert_eq!(MW_SPRITE, 1 << 0);
+            assert_eq!(MW_COLOR, 1 << 1);
+        }
+
+        #[test]
+        fn test_multi_world_command_buffer() {
+            let mut ecs = GameEcs::default();
+            let entity = ecs.spawn();
+
+            ecs.core_world
+                .set_position(entity, Position { x: 0.0, y: 0.0 });
+
+            ecs.queue_set_position(entity, Position { x: 10.0, y: 20.0 });
+            ecs.queue_add_player(entity);
+
+            assert_eq!(ecs.core_world.get_position(entity).unwrap().x, 0.0);
+            assert!(!ecs.has_player(entity));
+
+            ecs.apply_commands();
+
+            assert_eq!(ecs.core_world.get_position(entity).unwrap().x, 10.0);
+            assert!(ecs.has_player(entity));
+        }
+
+        #[test]
+        fn test_multi_world_step() {
+            let mut ecs = GameEcs::default();
+
+            assert_eq!(ecs.core_world.current_tick(), 0);
+            assert_eq!(ecs.render_world.current_tick(), 0);
+
+            ecs.step();
+
+            assert_eq!(ecs.core_world.current_tick(), 1);
+            assert_eq!(ecs.render_world.current_tick(), 1);
+        }
+
+        #[test]
+        fn test_multi_world_for_each_within_world() {
+            let mut ecs = GameEcs::default();
+            let e1 = ecs.spawn();
+            let e2 = ecs.spawn();
+
+            ecs.core_world.set_position(e1, Position { x: 1.0, y: 0.0 });
+            ecs.core_world.set_position(e2, Position { x: 2.0, y: 0.0 });
+            ecs.core_world
+                .set_velocity(e2, Velocity { x: 10.0, y: 0.0 });
+
+            let mut count = 0;
+            ecs.core_world
+                .for_each(MW_POSITION, 0, |_entity, _table, _idx| {
+                    count += 1;
+                });
+            assert_eq!(count, 2);
+
+            count = 0;
+            ecs.core_world
+                .for_each(MW_POSITION | MW_VELOCITY, 0, |_entity, _table, _idx| {
+                    count += 1;
+                });
+            assert_eq!(count, 1);
+        }
+
+        #[test]
+        fn test_multi_world_query_builder() {
+            let mut ecs = GameEcs::default();
+            let e1 = ecs.spawn();
+            let e2 = ecs.spawn();
+
+            ecs.core_world.set_position(e1, Position { x: 1.0, y: 0.0 });
+            ecs.core_world.set_position(e2, Position { x: 2.0, y: 0.0 });
+            ecs.core_world
+                .set_velocity(e2, Velocity { x: 10.0, y: 0.0 });
+
+            let mut count = 0;
+            ecs.core_world
+                .query()
+                .with(MW_POSITION)
+                .without(MW_VELOCITY)
+                .iter(|_entity, _table, _idx| {
+                    count += 1;
+                });
+            assert_eq!(count, 1);
+        }
+
+        #[test]
+        fn test_multi_world_generational_reuse() {
+            let mut ecs = GameEcs::default();
+
+            let e1 = ecs.spawn();
+            ecs.core_world.set_position(e1, Position { x: 1.0, y: 0.0 });
+
+            ecs.despawn(e1);
+            assert!(ecs.core_world.get_position(e1).is_none());
+
+            let e2 = ecs.spawn();
+            assert_eq!(e2.id, e1.id);
+            assert_eq!(e2.generation, e1.generation + 1);
+
+            assert!(ecs.core_world.get_position(e1).is_none());
+        }
+
+        #[test]
+        fn test_multi_world_ghost_entity_guard() {
+            let mut ecs = GameEcs::default();
+            let e1 = ecs.spawn();
+            ecs.core_world.set_position(e1, Position { x: 1.0, y: 0.0 });
+            ecs.despawn(e1);
+
+            let e2 = ecs.spawn();
+            assert_eq!(e2.id, e1.id);
+
+            ecs.core_world.set_position(e2, Position { x: 5.0, y: 5.0 });
+            assert_eq!(ecs.core_world.get_position(e2).unwrap().x, 5.0);
+
+            assert!(ecs.core_world.get_position(e1).is_none());
+        }
+
+        #[test]
+        fn test_multi_world_for_each_with_tags() {
+            let mut ecs = GameEcs::default();
+            let e1 = ecs.spawn();
+            let e2 = ecs.spawn();
+            let e3 = ecs.spawn();
+
+            ecs.core_world.set_position(e1, Position { x: 1.0, y: 0.0 });
+            ecs.core_world.set_position(e2, Position { x: 2.0, y: 0.0 });
+            ecs.core_world.set_position(e3, Position { x: 3.0, y: 0.0 });
+
+            ecs.add_player(e1);
+            ecs.add_player(e3);
+
+            let GameEcs {
+                core_world, player, ..
+            } = &ecs;
+
+            let mut count = 0;
+            core_world.for_each_with_tags(
+                MW_POSITION,
+                0,
+                &[player],
+                &[],
+                |_entity, _table, _idx| {
+                    count += 1;
+                },
+            );
+            assert_eq!(count, 2);
+
+            count = 0;
+            core_world.for_each_with_tags(
+                MW_POSITION,
+                0,
+                &[],
+                &[player],
+                |_entity, _table, _idx| {
+                    count += 1;
+                },
+            );
+            assert_eq!(count, 1);
+        }
+
+        #[test]
+        fn test_multi_world_for_each_mut_with_tags() {
+            let mut ecs = GameEcs::default();
+            let e1 = ecs.spawn();
+            let e2 = ecs.spawn();
+
+            ecs.core_world.set_position(e1, Position { x: 1.0, y: 0.0 });
+            ecs.core_world.set_position(e2, Position { x: 2.0, y: 0.0 });
+
+            ecs.add_player(e1);
+
+            let player_set = ecs.player.clone();
+            ecs.core_world.for_each_mut_with_tags(
+                MW_POSITION,
+                0,
+                &[&player_set],
+                &[],
+                |_entity, table, idx| {
+                    table.position[idx].x += 100.0;
+                },
+            );
+
+            assert_eq!(ecs.core_world.get_position(e1).unwrap().x, 101.0);
+            assert_eq!(ecs.core_world.get_position(e2).unwrap().x, 2.0);
         }
     }
 }
