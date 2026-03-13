@@ -2230,17 +2230,17 @@ async fn main() {
         .push("tower_upgraded", tower_upgraded_event_handler)
         .push("wave_started", wave_started_event_handler)
         .push("wave_completed", wave_completed_event_handler)
-        .push_readonly("tag_query_example", tag_query_example_system);
+        .push("tag_query_example", |w| tag_query_example_system(w));
 
     let mut render_schedule = Schedule::new();
     render_schedule
-        .push_readonly("render_grid", render_grid)
-        .push_readonly("render_towers", render_towers)
-        .push_readonly("render_enemies", render_enemies)
-        .push_readonly("render_projectiles", render_projectiles)
-        .push_readonly("render_visual_effects", render_visual_effects)
-        .push_readonly("render_money_popups", render_money_popups)
-        .push_readonly("render_ui", render_ui);
+        .push("render_grid", |w| render_grid(w))
+        .push("render_towers", |w| render_towers(w))
+        .push("render_enemies", |w| render_enemies(w))
+        .push("render_projectiles", |w| render_projectiles(w))
+        .push("render_visual_effects", |w| render_visual_effects(w))
+        .push("render_money_popups", |w| render_money_popups(w))
+        .push("render_ui", |w| render_ui(w));
 
     loop {
         clear_background(Color::new(0.05, 0.05, 0.05, 1.0));

@@ -663,8 +663,8 @@ fn main() {
 
     let mut render_schedule = Schedule::new();
     render_schedule
-        .push_readonly("render_grid", render_grid)
-        .push_readonly("render_entities", render_entities);
+        .push("render_grid", |w| render_grid(w))
+        .push("render_entities", |w| render_entities(w));
 
     // Game loop
     loop {
@@ -697,13 +697,12 @@ fn render_entities(world: &World) {
 
 **Schedule API**:
 
-- `push(name, fn(&mut W))` - Append a named mutable system
-- `push_readonly(name, fn(&W))` - Append a named read-only system
+- `push(name, system)` - Append a named system
 - `insert_before(target, name, system)` / `insert_after(target, name, system)` - Positional insertion
 - `remove(name)` - Remove a system by name
 - `contains(name)` - Check if a system exists
 
-All systems require a `&'static str` name. Systems execute sequentially in insertion order.
+All systems require a unique `&'static str` name. Names are enforced unique — duplicates panic. For read-only systems, wrap with a closure: `.push("render", |w| render_system(w))`.
 
 ## Entity Builder
 

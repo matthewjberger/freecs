@@ -1290,8 +1290,10 @@ fn bench_scheduling(c: &mut Criterion) {
             |b, &count| {
                 b.iter(|| {
                     let mut schedule = freecs::Schedule::<World>::new();
-                    for _ in 0..count {
-                        schedule.push("system", |world: &mut World| {
+                    for index in 0..count {
+                        let name: &'static str =
+                            Box::leak(format!("system_{index}").into_boxed_str());
+                        schedule.push(name, |world: &mut World| {
                             world.resources.frame_count += 1;
                         });
                     }
@@ -1306,8 +1308,9 @@ fn bench_scheduling(c: &mut Criterion) {
         world.spawn_batch(POSITION | VELOCITY, 1000, |_table, _idx| {});
 
         let mut schedule = freecs::Schedule::new();
-        for _ in 0..10 {
-            schedule.push("system", |world: &mut World| {
+        for index in 0..10 {
+            let name: &'static str = Box::leak(format!("system_{index}").into_boxed_str());
+            schedule.push(name, |world: &mut World| {
                 world.resources.frame_count += 1;
             });
         }

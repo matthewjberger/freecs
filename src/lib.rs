@@ -272,7 +272,7 @@
 //! schedule
 //!     .push("input", input_system)
 //!     .push("physics", physics_system)
-//!     .push_readonly("render", render_system);
+//!     .push("render", |w| render_system(w));
 //!
 //! // Game loop
 //! loop {
@@ -658,22 +658,13 @@ impl<W> Schedule<W> {
     where
         F: FnMut(&mut W) + Send + 'static,
     {
+        assert!(
+            !self.contains(name),
+            "Schedule::push: system \"{name}\" already exists"
+        );
         self.entries.push(ScheduleEntry {
             name,
             system: Box::new(system),
-        });
-        self
-    }
-
-    pub fn push_readonly<F>(&mut self, name: &'static str, mut system: F) -> &mut Self
-    where
-        F: FnMut(&W) + Send + 'static,
-    {
-        self.entries.push(ScheduleEntry {
-            name,
-            system: Box::new(move |world: &mut W| {
-                system(&*world);
-            }),
         });
         self
     }
@@ -682,6 +673,10 @@ impl<W> Schedule<W> {
     where
         F: FnMut(&mut W) + Send + 'static,
     {
+        assert!(
+            !self.contains(name),
+            "Schedule::insert_before: system \"{name}\" already exists"
+        );
         let index = self
             .index_of(target)
             .unwrap_or_else(|| panic!("Schedule::insert_before: system \"{target}\" not found"));
@@ -695,34 +690,14 @@ impl<W> Schedule<W> {
         self
     }
 
-    pub fn insert_before_readonly<F>(
-        &mut self,
-        target: &str,
-        name: &'static str,
-        mut system: F,
-    ) -> &mut Self
-    where
-        F: FnMut(&W) + Send + 'static,
-    {
-        let index = self.index_of(target).unwrap_or_else(|| {
-            panic!("Schedule::insert_before_readonly: system \"{target}\" not found")
-        });
-        self.entries.insert(
-            index,
-            ScheduleEntry {
-                name,
-                system: Box::new(move |world: &mut W| {
-                    system(&*world);
-                }),
-            },
-        );
-        self
-    }
-
     pub fn insert_after<F>(&mut self, target: &str, name: &'static str, system: F) -> &mut Self
     where
         F: FnMut(&mut W) + Send + 'static,
     {
+        assert!(
+            !self.contains(name),
+            "Schedule::insert_after: system \"{name}\" already exists"
+        );
         let index = self
             .index_of(target)
             .unwrap_or_else(|| panic!("Schedule::insert_after: system \"{target}\" not found"));
@@ -731,30 +706,6 @@ impl<W> Schedule<W> {
             ScheduleEntry {
                 name,
                 system: Box::new(system),
-            },
-        );
-        self
-    }
-
-    pub fn insert_after_readonly<F>(
-        &mut self,
-        target: &str,
-        name: &'static str,
-        mut system: F,
-    ) -> &mut Self
-    where
-        F: FnMut(&W) + Send + 'static,
-    {
-        let index = self.index_of(target).unwrap_or_else(|| {
-            panic!("Schedule::insert_after_readonly: system \"{target}\" not found")
-        });
-        self.entries.insert(
-            index + 1,
-            ScheduleEntry {
-                name,
-                system: Box::new(move |world: &mut W| {
-                    system(&*world);
-                }),
             },
         );
         self
@@ -5878,19 +5829,49 @@ mod tests {
     }
 
     #[test]
-    fn test_schedule_push_readonly() {
+    fn test_schedule_readonly_wrapper() {
         let mut world = World::default();
         world.resources._delta_time = 42.0;
 
-        let mut schedule = Schedule::new();
+        fn read_system(world: &World) -> f32 {
+            world.resources._delta_time
+        }
+
         let observed = std::sync::Arc::new(std::sync::Mutex::new(0.0_f32));
         let observed_clone = observed.clone();
-        schedule.push_readonly("reader", move |world: &World| {
-            *observed_clone.lock().unwrap() = world.resources._delta_time;
+
+        let mut schedule = Schedule::new();
+        schedule.push("reader", move |w: &mut World| {
+            *observed_clone.lock().unwrap() = read_system(w);
         });
 
         schedule.run(&mut world);
         assert_eq!(*observed.lock().unwrap(), 42.0);
+    }
+
+    #[test]
+    #[should_panic(expected = "already exists")]
+    fn test_schedule_push_duplicate_panics() {
+        let mut schedule: Schedule<World> = Schedule::new();
+        schedule.push("a", |_w: &mut World| {});
+        schedule.push("a", |_w: &mut World| {});
+    }
+
+    #[test]
+    #[should_panic(expected = "already exists")]
+    fn test_schedule_insert_before_duplicate_panics() {
+        let mut schedule: Schedule<World> = Schedule::new();
+        schedule.push("a", |_w: &mut World| {});
+        schedule.push("b", |_w: &mut World| {});
+        schedule.insert_before("b", "a", |_w: &mut World| {});
+    }
+
+    #[test]
+    #[should_panic(expected = "already exists")]
+    fn test_schedule_insert_after_duplicate_panics() {
+        let mut schedule: Schedule<World> = Schedule::new();
+        schedule.push("a", |_w: &mut World| {});
+        schedule.insert_after("a", "a", |_w: &mut World| {});
     }
 
     #[test]
