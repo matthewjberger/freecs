@@ -14,9 +14,9 @@ A high-performance, archetype-based Entity Component System (ECS) for Rust
 - Command buffers for deferred structural changes
 - Change detection for incremental updates
 - Type-safe double-buffered event system
+- Multi-world support for >64 component types with shared entity allocator
 
-The `ecs!` macro generates the entire ECS at compile time. The core implementation is ~1,350 LOC,
-contains only plain data structures and functions, and uses zero unsafe code.
+The `ecs!` macro generates the entire ECS at compile time using only plain data structures, functions, and zero unsafe code.
 
 ## Quick Start
 
@@ -24,7 +24,7 @@ Add this to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-freecs = "1.6.0"
+freecs = "2.0.0"
 ```
 
 And in `main.rs`:
@@ -911,6 +911,67 @@ ecs! {
 ```
 
 When a component or resource has a `#[cfg(...)]` attribute, all related generated code (struct fields, accessor methods, mask constants, enum variants, etc.) is conditionally compiled based on the feature flag or target configuration.
+
+## Multi-World ECS
+
+For projects exceeding 64 component types, you can split components across multiple independent worlds that share a single entity allocator. Each world retains full `u64` bitmask performance (up to 64 components per world).
+
+```rust
+use freecs::{ecs, Entity, Schedule};
+
+ecs! {
+    GameEcs {
+        CoreWorld {
+            position: Position => POSITION,
+            velocity: Velocity => VELOCITY,
+        }
+        RenderWorld {
+            sprite: Sprite => SPRITE,
+            color: Color => COLOR,
+        }
+    }
+    Tags { player => PLAYER }
+    Events { collision: CollisionEvent }
+    GameResources { delta_time: f32 }
+}
+```
+
+Entities are spawned from the shared allocator and can have components in any combination of worlds:
+
+```rust
+let mut ecs = GameEcs::default();
+
+// Spawn an entity and add components across worlds
+let entity = ecs.spawn();
+ecs.core_world.set_position(entity, Position { x: 0.0, y: 0.0 });
+ecs.render_world.set_sprite(entity, Sprite { id: 1 });
+
+// EntityBuilder spans worlds automatically
+let entities = EntityBuilder::new()
+    .with_position(Position { x: 0.0, y: 0.0 })
+    .with_sprite(Sprite { id: 2 })
+    .spawn(&mut ecs, 1);
+
+// Per-world queries run at full bitmask speed
+ecs.core_world.for_each_mut(POSITION | VELOCITY, 0, |entity, table, idx| {
+    table.position[idx].x += table.velocity[idx].x;
+});
+
+// Cross-world access via split borrowing
+let GameEcs { core_world, render_world, player, .. } = &mut ecs;
+core_world.for_each(POSITION, 0, |entity, table, idx| {
+    if let Some(sprite) = render_world.get_sprite(entity) {
+        // Access components from both worlds
+    }
+});
+
+// Despawn cascades across all worlds
+ecs.despawn(entity);
+```
+
+Tags, events, resources, command buffers, and `Schedule` all work identically in multi-world mode. Mask constants (e.g. `POSITION`, `SPRITE`) are globally unique across worlds. Each world numbers its components independently starting at bit 0.
+
+Single-world syntax remains unchanged. Multi-world is detected by the presence of multiple `Ident { ... }` blocks inside the first group.
 
 ## License
 

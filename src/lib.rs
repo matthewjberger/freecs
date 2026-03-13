@@ -12,9 +12,9 @@
 //! - **Command Buffers**: Queue structural changes during iteration
 //! - **Change Detection**: Track component modifications for incremental updates
 //! - **Events**: Type-safe double-buffered event system
+//! - **Multi-World**: Split components across multiple worlds for >64 component types
 //!
-//! The `ecs!` macro generates the entire ECS at compile time. The core implementation is ~1,350 LOC,
-//! contains only plain data structures and functions, and uses zero unsafe code.
+//! The `ecs!` macro generates the entire ECS at compile time using only plain data structures, functions, and zero unsafe code.
 //!
 //! # Quick Start
 //!
