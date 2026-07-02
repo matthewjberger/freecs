@@ -656,6 +656,8 @@ Mutations through `set_*()`, `get_*_mut()`, and `modify_*()` mark the component 
 
 Each table also keeps a per-component high-water tick. Changed queries compare it first and skip whole tables that no write has touched since the last `step()`, so scanning cost is proportional to tables with activity rather than total entity count. Tick comparisons are wrapping-safe, so detection keeps working after the `u32` tick counter overflows.
 
+Multiple independent consumers can track their own change windows with the explicit-cursor variants `query_entities_changed_since(mask, since_tick)` and `for_each_mut_changed_since(include, exclude, since_tick, f)`. Record `current_tick()` when you consume, then call `increment_tick()` to fence, so writes made later in the same tick stamp a newer value and land in your next window.
+
 **Performance note**: Change detection adds a small overhead. Only use it when you need to track changes.
 
 ### System Scheduling

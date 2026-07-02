@@ -1433,10 +1433,14 @@ macro_rules! ecs_impl {
             }
 
             pub fn query_entities_changed(&self, mask: u64) -> ChangedEntityQueryIter<'_> {
+                self.query_entities_changed_since(mask, self.last_tick)
+            }
+
+            pub fn query_entities_changed_since(&self, mask: u64, since_tick: u32) -> ChangedEntityQueryIter<'_> {
                 ChangedEntityQueryIter {
                     tables: &self.tables,
                     mask,
-                    since_tick: self.last_tick,
+                    since_tick,
                     table_index: 0,
                     array_index: 0,
                 }
@@ -1960,7 +1964,15 @@ macro_rules! ecs_impl {
             }
 
             #[inline]
-            pub fn for_each_mut_changed<F>(&mut self, include: u64, exclude: u64, mut f: F)
+            pub fn for_each_mut_changed<F>(&mut self, include: u64, exclude: u64, f: F)
+            where
+                F: FnMut($crate::Entity, &mut ComponentArrays, usize),
+            {
+                let since_tick = self.last_tick;
+                self.for_each_mut_changed_since(include, exclude, since_tick, f);
+            }
+
+            pub fn for_each_mut_changed_since<F>(&mut self, include: u64, exclude: u64, since_tick: u32, mut f: F)
             where
                 F: FnMut($crate::Entity, &mut ComponentArrays, usize),
             {
@@ -1970,7 +1982,6 @@ macro_rules! ecs_impl {
                 let tag_exclude = exclude & ALL_TAGS_MASK;
 
                 let table_indices: Vec<usize> = self.get_cached_tables(component_include).to_vec();
-                let since_tick = self.last_tick;
 
                 if tag_include == 0 && tag_exclude == 0 {
                     for &table_index in &table_indices {
@@ -2850,10 +2861,14 @@ macro_rules! ecs_world_impl {
                 }
 
                 pub fn query_entities_changed(&self, mask: u64) -> [<$world ChangedEntityQueryIter>]<'_> {
+                    self.query_entities_changed_since(mask, self.last_tick)
+                }
+
+                pub fn query_entities_changed_since(&self, mask: u64, since_tick: u32) -> [<$world ChangedEntityQueryIter>]<'_> {
                     [<$world ChangedEntityQueryIter>] {
                         tables: &self.tables,
                         mask,
-                        since_tick: self.last_tick,
+                        since_tick,
                         table_index: 0,
                         array_index: 0,
                     }
@@ -3104,12 +3119,19 @@ macro_rules! ecs_world_impl {
                 }
 
                 #[inline]
-                pub fn for_each_mut_changed<F>(&mut self, include: u64, exclude: u64, mut f: F)
+                pub fn for_each_mut_changed<F>(&mut self, include: u64, exclude: u64, f: F)
+                where
+                    F: FnMut($crate::Entity, &mut [<$world ComponentArrays>], usize),
+                {
+                    let since_tick = self.last_tick;
+                    self.for_each_mut_changed_since(include, exclude, since_tick, f);
+                }
+
+                pub fn for_each_mut_changed_since<F>(&mut self, include: u64, exclude: u64, since_tick: u32, mut f: F)
                 where
                     F: FnMut($crate::Entity, &mut [<$world ComponentArrays>], usize),
                 {
                     let table_indices: Vec<usize> = self.get_cached_tables(include).to_vec();
-                    let since_tick = self.last_tick;
 
                     for &table_index in &table_indices {
                         let table = &mut self.tables[table_index];
@@ -5040,6 +5062,35 @@ mod tests {
                 ));
             }
         }
+    }
+
+    #[test]
+    fn test_change_detection_since_cursor() {
+        let mut world = World::default();
+        let e1 = world.spawn_entities(POSITION, 1)[0];
+        world.step();
+
+        let cursor = world.last_tick();
+        world.get_position_mut(e1).unwrap().x = 1.0;
+        world.step();
+        world.step();
+
+        let changed: Vec<_> = world
+            .query_entities_changed_since(POSITION, cursor)
+            .collect();
+        assert_eq!(changed, vec![e1]);
+
+        let cursor = world.current_tick();
+        let changed: Vec<_> = world
+            .query_entities_changed_since(POSITION, cursor)
+            .collect();
+        assert!(changed.is_empty());
+
+        let mut visited = Vec::new();
+        world.for_each_mut_changed_since(POSITION, 0, 0, |entity, _table, _idx| {
+            visited.push(entity)
+        });
+        assert_eq!(visited, vec![e1]);
     }
 
     #[test]
