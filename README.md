@@ -658,6 +658,23 @@ Each table also keeps a per-component high-water tick. Changed queries compare i
 
 Multiple independent consumers can track their own change windows with the explicit-cursor variants `query_entities_changed_since(mask, since_tick)` and `for_each_mut_changed_since(include, exclude, since_tick, f)`. Record `current_tick()` when you consume, then call `increment_tick()` to fence, so writes made later in the same tick stamp a newer value and land in your next window.
 
+### Structural Change Log
+
+Change ticks cover component writes. Structural changes (spawns, despawns, component adds and removes) are recorded in a per-world log of plain `StructuralChange` entries: entity, kind, and the component mask involved (the full mask for spawns and despawns, the delta for adds and removes). Consumers read `structural_changes_since(cursor)` against a `u64` sequence cursor they own and record `structural_sequence()` after consuming. The owner of the frame loop calls `trim_structural_log(up_to_sequence)` with the minimum cursor across consumers. A world whose log is never consumed self-clears at `STRUCTURAL_LOG_CAPACITY` entries, so it stays bounded instead of leaking.
+
+```rust
+let mut cursor = 0;
+// ... spawns, despawns, component adds and removes happen ...
+for change in world.structural_changes_since(cursor) {
+    match change.kind {
+        StructuralChangeKind::Spawned | StructuralChangeKind::ComponentsAdded => { /* mask gained */ }
+        StructuralChangeKind::Despawned | StructuralChangeKind::ComponentsRemoved => { /* mask lost */ }
+    }
+}
+cursor = world.structural_sequence();
+world.trim_structural_log(cursor);
+```
+
 **Performance note**: Change detection adds a small overhead. Only use it when you need to track changes.
 
 ### System Scheduling

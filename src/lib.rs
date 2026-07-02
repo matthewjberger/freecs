@@ -545,10 +545,37 @@ impl EntityLocations {
 }
 
 /// Returns true if `tick` was stamped after `since_tick`, treating ticks as a
-/// wrapping sequence so detection keeps working across `u32` overflow.
+/// wrapping sequence so detection keeps working after `u32` overflow.
 #[inline]
 pub const fn tick_is_newer(tick: u32, since_tick: u32) -> bool {
     tick.wrapping_sub(since_tick) as i32 > 0
+}
+
+/// Backstop for worlds whose structural log is never consumed. When the log
+/// reaches this length it is cleared wholesale, so a world with no consumer
+/// stays bounded instead of leaking. Consumers that drain every frame never
+/// come near it.
+pub const STRUCTURAL_LOG_CAPACITY: usize = 262_144;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StructuralChangeKind {
+    Spawned,
+    Despawned,
+    ComponentsAdded,
+    ComponentsRemoved,
+}
+
+/// One structural mutation recorded by the world: a spawn, a despawn, or a
+/// component add or remove. `mask` holds the components involved: the full
+/// mask for spawns and despawns, the delta for adds and removes. Consumers
+/// track their own `sequence` cursor via `structural_changes_since` and the
+/// owner trims consumed entries with `trim_structural_log`.
+#[derive(Debug, Clone, Copy)]
+pub struct StructuralChange {
+    pub sequence: u64,
+    pub entity: Entity,
+    pub kind: StructuralChangeKind,
+    pub mask: u64,
 }
 
 /// Double-buffered event queue for inter-system communication.
@@ -1146,6 +1173,8 @@ macro_rules! ecs_impl {
             query_cache: std::collections::HashMap<u64, Vec<usize>>,
             current_tick: u32,
             last_tick: u32,
+            structural_log: Vec<$crate::StructuralChange>,
+            structural_sequence: u64,
             $($tag_name: std::collections::HashSet<$crate::Entity>,)*
             command_buffer: Vec<Command>,
             $($event_name: $crate::EventQueue<$event_type>,)*
@@ -1163,6 +1192,8 @@ macro_rules! ecs_impl {
                     query_cache: std::collections::HashMap::default(),
                     current_tick: 0,
                     last_tick: 0,
+                    structural_log: Vec::default(),
+                    structural_sequence: 0,
                     $(
                         $tag_name: std::collections::HashSet::default(),
                     )*
@@ -1370,6 +1401,7 @@ macro_rules! ecs_impl {
                         entity,
                         (table_index, start_index + i),
                     );
+                    self.record_structural(entity, $crate::StructuralChangeKind::Spawned, mask);
                 }
 
                 entities
@@ -1416,6 +1448,7 @@ macro_rules! ecs_impl {
                         entity,
                         (table_index, start_index + i),
                     );
+                    self.record_structural(entity, $crate::StructuralChangeKind::Spawned, mask);
 
                     init(&mut self.tables[table_index], start_index + i);
                 }
@@ -1481,6 +1514,16 @@ macro_rules! ecs_impl {
                     }
                 }
 
+                for index in 0..despawned.len() {
+                    let (table_idx, _) = tables_to_update[index];
+                    let mask = if table_idx < self.tables.len() {
+                        self.tables[table_idx].mask
+                    } else {
+                        0
+                    };
+                    self.record_structural(despawned[index], $crate::StructuralChangeKind::Despawned, mask);
+                }
+
                 tables_to_update.sort_by(|a, b| b.cmp(a));
 
                 for (table_idx, array_idx) in tables_to_update {
@@ -1543,6 +1586,7 @@ macro_rules! ecs_impl {
                 });
 
                 move_entity(self, entity, table_index, array_index, new_table_index);
+                self.record_structural(entity, $crate::StructuralChangeKind::ComponentsAdded, mask & !current_mask);
             }
 
             pub fn add_components(&mut self, entity: $crate::Entity, mask: u64) -> bool {
@@ -1575,6 +1619,7 @@ macro_rules! ecs_impl {
                     });
 
                     move_entity(self, entity, table_index, array_index, new_table_index);
+                    self.record_structural(entity, $crate::StructuralChangeKind::ComponentsRemoved, current_mask & mask);
                     true
                 } else {
                     false
@@ -1613,6 +1658,37 @@ macro_rules! ecs_impl {
 
             pub fn last_tick(&self) -> u32 {
                 self.last_tick
+            }
+
+            fn record_structural(&mut self, entity: $crate::Entity, kind: $crate::StructuralChangeKind, mask: u64) {
+                if self.structural_log.len() >= $crate::STRUCTURAL_LOG_CAPACITY {
+                    self.structural_log.clear();
+                }
+                self.structural_sequence += 1;
+                self.structural_log.push($crate::StructuralChange {
+                    sequence: self.structural_sequence,
+                    entity,
+                    kind,
+                    mask,
+                });
+            }
+
+            pub fn structural_sequence(&self) -> u64 {
+                self.structural_sequence
+            }
+
+            pub fn structural_changes_since(&self, cursor: u64) -> &[$crate::StructuralChange] {
+                let start = self.structural_log.partition_point(|change| change.sequence <= cursor);
+                &self.structural_log[start..]
+            }
+
+            pub fn trim_structural_log(&mut self, up_to_sequence: u64) {
+                let end = self.structural_log.partition_point(|change| change.sequence <= up_to_sequence);
+                self.structural_log.drain(..end);
+            }
+
+            pub fn clear_structural_log(&mut self) {
+                self.structural_log.clear();
             }
 
             $(
@@ -2595,6 +2671,8 @@ macro_rules! ecs_world_impl {
                 query_cache: std::collections::HashMap<u64, Vec<usize>>,
                 current_tick: u32,
                 last_tick: u32,
+                structural_log: Vec<$crate::StructuralChange>,
+                structural_sequence: u64,
             }
 
             impl Default for $world {
@@ -2607,6 +2685,8 @@ macro_rules! ecs_world_impl {
                         query_cache: std::collections::HashMap::default(),
                         current_tick: 0,
                         last_tick: 0,
+                        structural_log: Vec::default(),
+                        structural_sequence: 0,
                     }
                 }
             }
@@ -2798,6 +2878,7 @@ macro_rules! ecs_world_impl {
                             entity,
                             (table_index, start_index + local_index),
                         );
+                        self.record_structural(entity, $crate::StructuralChangeKind::Spawned, mask);
                     }
 
                     entities
@@ -2844,6 +2925,7 @@ macro_rules! ecs_world_impl {
                             entity,
                             (table_index, start_index + local_index),
                         );
+                        self.record_structural(entity, $crate::StructuralChangeKind::Spawned, mask);
 
                         init(&mut self.tables[table_index], start_index + local_index);
                     }
@@ -2893,6 +2975,13 @@ macro_rules! ecs_world_impl {
                             let array_idx = loc.array_index as usize;
 
                             self.entity_locations.mark_deallocated(entity.id);
+
+                            let despawned_mask = if table_idx < self.tables.len() {
+                                self.tables[table_idx].mask
+                            } else {
+                                0
+                            };
+                            self.record_structural(entity, $crate::StructuralChangeKind::Despawned, despawned_mask);
 
                             if table_idx < self.tables.len() {
                                 let table = &mut self.tables[table_idx];
@@ -2946,6 +3035,7 @@ macro_rules! ecs_world_impl {
                         });
 
                         [<move_entity_ $world:snake>](self, entity, table_index, array_index, new_table_index);
+                        self.record_structural(entity, $crate::StructuralChangeKind::ComponentsAdded, mask & !current_mask);
                         true
                     } else {
                         if let Some(loc) = self.entity_locations.get(entity.id) {
@@ -2975,6 +3065,7 @@ macro_rules! ecs_world_impl {
                             array_index: start_index as u32,
                             allocated: true,
                         });
+                        self.record_structural(entity, $crate::StructuralChangeKind::Spawned, mask);
                         true
                     }
                 }
@@ -3000,6 +3091,7 @@ macro_rules! ecs_world_impl {
                         });
 
                         [<move_entity_ $world:snake>](self, entity, table_index, array_index, new_table_index);
+                        self.record_structural(entity, $crate::StructuralChangeKind::ComponentsRemoved, current_mask & mask);
                         true
                     } else {
                         false
@@ -3038,6 +3130,37 @@ macro_rules! ecs_world_impl {
 
                 pub fn last_tick(&self) -> u32 {
                     self.last_tick
+                }
+
+                fn record_structural(&mut self, entity: $crate::Entity, kind: $crate::StructuralChangeKind, mask: u64) {
+                    if self.structural_log.len() >= $crate::STRUCTURAL_LOG_CAPACITY {
+                        self.structural_log.clear();
+                    }
+                    self.structural_sequence += 1;
+                    self.structural_log.push($crate::StructuralChange {
+                        sequence: self.structural_sequence,
+                        entity,
+                        kind,
+                        mask,
+                    });
+                }
+
+                pub fn structural_sequence(&self) -> u64 {
+                    self.structural_sequence
+                }
+
+                pub fn structural_changes_since(&self, cursor: u64) -> &[$crate::StructuralChange] {
+                    let start = self.structural_log.partition_point(|change| change.sequence <= cursor);
+                    &self.structural_log[start..]
+                }
+
+                pub fn trim_structural_log(&mut self, up_to_sequence: u64) {
+                    let end = self.structural_log.partition_point(|change| change.sequence <= up_to_sequence);
+                    self.structural_log.drain(..end);
+                }
+
+                pub fn clear_structural_log(&mut self) {
+                    self.structural_log.clear();
                 }
 
                 $(
@@ -5091,6 +5214,53 @@ mod tests {
             visited.push(entity)
         });
         assert_eq!(visited, vec![e1]);
+    }
+
+    #[test]
+    fn test_structural_log_records_lifecycle() {
+        let mut world = World::default();
+        let entity = world.spawn_entities(POSITION, 1)[0];
+        world.add_components(entity, VELOCITY);
+        world.remove_components(entity, POSITION);
+        world.despawn_entities(&[entity]);
+
+        let changes: Vec<_> = world.structural_changes_since(0).to_vec();
+        assert_eq!(changes.len(), 4);
+        assert!(changes.iter().all(|change| change.entity == entity));
+        assert_eq!(changes[0].kind, StructuralChangeKind::Spawned);
+        assert_eq!(changes[0].mask, POSITION);
+        assert_eq!(changes[1].kind, StructuralChangeKind::ComponentsAdded);
+        assert_eq!(changes[1].mask, VELOCITY);
+        assert_eq!(changes[2].kind, StructuralChangeKind::ComponentsRemoved);
+        assert_eq!(changes[2].mask, POSITION);
+        assert_eq!(changes[3].kind, StructuralChangeKind::Despawned);
+        assert_eq!(changes[3].mask, VELOCITY);
+
+        let cursor = changes[1].sequence;
+        assert_eq!(world.structural_changes_since(cursor).len(), 2);
+
+        world.trim_structural_log(cursor);
+        assert_eq!(world.structural_changes_since(0).len(), 2);
+        assert_eq!(
+            world.structural_changes_since(0)[0].kind,
+            StructuralChangeKind::ComponentsRemoved
+        );
+
+        world.clear_structural_log();
+        assert!(world.structural_changes_since(0).is_empty());
+        assert_eq!(world.structural_sequence(), 4);
+    }
+
+    #[test]
+    fn test_structural_log_set_component_records_add() {
+        let mut world = World::default();
+        let entity = world.spawn_entities(POSITION, 1)[0];
+        world.set_velocity(entity, Velocity { x: 1.0, y: 0.0 });
+
+        let changes = world.structural_changes_since(0);
+        assert_eq!(changes.len(), 2);
+        assert_eq!(changes[1].kind, StructuralChangeKind::ComponentsAdded);
+        assert_eq!(changes[1].mask, VELOCITY);
     }
 
     #[test]
