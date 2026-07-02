@@ -23,13 +23,13 @@
 //!
 //! // First, define components (must implement Default)
 //! #[derive(Default, Clone, Debug)]
-//! struct Position { x: f32, y: f32 }
+//! pub struct Position { pub x: f32, pub y: f32 }
 //!
 //! #[derive(Default, Clone, Debug)]
-//! struct Velocity { x: f32, y: f32 }
+//! pub struct Velocity { pub x: f32, pub y: f32 }
 //!
 //! #[derive(Default, Clone, Debug)]
-//! struct Health { value: f32 }
+//! pub struct Health { pub value: f32 }
 //!
 //! // Then, create a world with the `ecs!` macro
 //! ecs! {
@@ -51,15 +51,20 @@
 //! }
 //!
 //! #[derive(Debug, Clone)]
-//! struct CollisionEvent {
-//!     entity_a: Entity,
-//!     entity_b: Entity,
+//! pub struct CollisionEvent {
+//!     pub entity_a: Entity,
+//!     pub entity_b: Entity,
 //! }
 //! ```
 //!
 //! ## Entity and Component Access
 //!
 //! ```rust
+//! # use freecs::ecs;
+//! # #[derive(Default, Clone)] pub struct Position { x: f32, y: f32 }
+//! # #[derive(Default, Clone)] pub struct Velocity { x: f32, y: f32 }
+//! # #[derive(Default, Clone)] pub struct Health { value: f32 }
+//! # ecs! { World { position: Position => POSITION, velocity: Velocity => VELOCITY, health: Health => HEALTH, } Resources { delta_time: f32 } }
 //! let mut world = World::default();
 //!
 //! // Spawn entities with components by mask
@@ -113,7 +118,7 @@
 //!
 //! ```rust
 //! # use freecs::{ecs, Entity};
-//! # #[derive(Default, Clone)] struct Position { x: f32, y: f32 }
+//! # #[derive(Default, Clone)] pub struct Position { x: f32, y: f32 }
 //! # ecs! { World { position: Position => POSITION, } Tags { player => PLAYER, enemy => ENEMY, } Resources { delta_time: f32 } }
 //! # let mut world = World::default();
 //! # let entity = world.spawn_entities(POSITION, 1)[0];
@@ -140,8 +145,8 @@
 //!
 //! ```rust
 //! # use freecs::{ecs, Entity};
-//! # #[derive(Default, Clone)] struct Position { x: f32, y: f32 }
-//! # #[derive(Debug, Clone)] struct CollisionEvent { entity_a: Entity, entity_b: Entity }
+//! # #[derive(Default, Clone)] pub struct Position { x: f32, y: f32 }
+//! # #[derive(Debug, Clone)] pub struct CollisionEvent { entity_a: Entity, entity_b: Entity }
 //! # ecs! { World { position: Position => POSITION, } Events { collision: CollisionEvent, } Resources { delta_time: f32 } }
 //! # let mut world = World::default();
 //! # let entity = world.spawn_entities(POSITION, 1)[0];
@@ -166,11 +171,15 @@
 //! For maximum performance, use the query builder API for direct table access:
 //!
 //! ```rust
+//! # use freecs::ecs;
+//! # #[derive(Default, Clone)] pub struct Position { x: f32, y: f32 }
+//! # #[derive(Default, Clone)] pub struct Velocity { x: f32, y: f32 }
+//! # ecs! { World { position: Position => POSITION, velocity: Velocity => VELOCITY, } Resources { delta_time: f32 } }
 //! fn physics_system(world: &mut World) {
 //!     let dt = world.resources.delta_time;
 //!
 //!     // Method 1: High-performance query builder (recommended)
-//!     world.query()
+//!     world.query_mut()
 //!         .with(POSITION | VELOCITY)
 //!         .iter(|entity, table, idx| {
 //!             table.position[idx].x += table.velocity[idx].x * dt;
@@ -178,9 +187,10 @@
 //!         });
 //!
 //!     // Method 2: Per-entity lookups (simpler but slower)
-//!     for entity in world.query_entities(POSITION | VELOCITY) {
-//!         if let Some(position) = world.get_position_mut(entity) {
-//!             if let Some(velocity) = world.get_velocity(entity) {
+//!     let entities: Vec<_> = world.query_entities(POSITION | VELOCITY).collect();
+//!     for entity in entities {
+//!         if let Some(velocity) = world.get_velocity(entity).cloned() {
+//!             if let Some(position) = world.get_position_mut(entity) {
 //!                 position.x += velocity.x * dt;
 //!                 position.y += velocity.y * dt;
 //!             }
@@ -195,6 +205,10 @@
 //! automatically available on non-WASM platforms:
 //!
 //! ```rust
+//! # use freecs::ecs;
+//! # #[derive(Default, Clone)] pub struct Position { x: f32, y: f32 }
+//! # #[derive(Default, Clone)] pub struct Velocity { x: f32, y: f32 }
+//! # ecs! { World { position: Position => POSITION, velocity: Velocity => VELOCITY, } Resources { delta_time: f32 } }
 //! use freecs::rayon::prelude::*;
 //!
 //! fn parallel_physics(world: &mut World) {
@@ -216,8 +230,8 @@
 //!
 //! ```rust
 //! # use freecs::{ecs, Entity};
-//! # #[derive(Default, Clone)] struct Position { x: f32, y: f32 }
-//! # #[derive(Default, Clone)] struct Health { value: f32 }
+//! # #[derive(Default, Clone)] pub struct Position { x: f32, y: f32 }
+//! # #[derive(Default, Clone)] pub struct Health { value: f32 }
 //! # ecs! { World { position: Position => POSITION, health: Health => HEALTH, } Resources { delta_time: f32 } }
 //! # let mut world = World::default();
 //! # world.spawn_entities(POSITION | HEALTH, 10);
@@ -243,7 +257,7 @@
 //!
 //! ```rust
 //! # use freecs::{ecs, Entity};
-//! # #[derive(Default, Clone)] struct Position { x: f32, y: f32 }
+//! # #[derive(Default, Clone)] pub struct Position { x: f32, y: f32 }
 //! # ecs! { World { position: Position => POSITION, } Resources { delta_time: f32 } }
 //! # let mut world = World::default();
 //! // Process only entities with changed components
@@ -255,13 +269,19 @@
 //! world.step();
 //! ```
 //!
+//! Writes through `set_*`, `get_*_mut`, and `modify_*` mark the slot as
+//! changed, as do spawns and component add/remove migrations. Raw table
+//! access does not mark. Changed queries skip whole tables that no write
+//! has touched since the last `step()`, using a per-table high-water tick
+//! per component.
+//!
 //! ## System Scheduling
 //!
 //! Organize systems into a schedule:
 //!
 //! ```rust
 //! # use freecs::{ecs, Schedule, Entity};
-//! # #[derive(Default, Clone)] struct Position { x: f32, y: f32 }
+//! # #[derive(Default, Clone)] pub struct Position { x: f32, y: f32 }
 //! # ecs! { World { position: Position => POSITION, } Resources { delta_time: f32 } }
 //! # fn input_system(world: &mut World) {}
 //! # fn physics_system(world: &mut World) {}
@@ -285,6 +305,10 @@
 //! ## Entity Builder
 //!
 //! ```rust
+//! # use freecs::ecs;
+//! # #[derive(Default, Clone)] pub struct Position { x: f32, y: f32 }
+//! # #[derive(Default, Clone)] pub struct Velocity { x: f32, y: f32 }
+//! # ecs! { World { position: Position => POSITION, velocity: Velocity => VELOCITY, } Resources { delta_time: f32 } }
 //! let mut world = World::default();
 //! let entities = EntityBuilder::new()
 //!     .with_position(Position { x: 1.0, y: 2.0 })
@@ -302,8 +326,8 @@
 //!
 //! ```rust
 //! # use freecs::{ecs, Entity};
-//! # #[derive(Default, Clone)] struct Position { x: f32, y: f32 }
-//! # #[derive(Default, Clone)] struct Velocity { x: f32, y: f32 }
+//! # #[derive(Default, Clone)] pub struct Position { x: f32, y: f32 }
+//! # #[derive(Default, Clone)] pub struct Velocity { x: f32, y: f32 }
 //! # ecs! { World { position: Position => POSITION, velocity: Velocity => VELOCITY, } Resources { delta_time: f32 } }
 //! # let mut world = World::default();
 //! // Spawn with initialization callback
@@ -317,11 +341,11 @@
 //!
 //! ```rust
 //! # use freecs::{ecs, Entity};
-//! # #[derive(Default, Clone)] struct Position { x: f32, y: f32 }
+//! # #[derive(Default, Clone)] pub struct Position { x: f32, y: f32 }
 //! # ecs! { World { position: Position => POSITION, } Resources { delta_time: f32 } }
 //! # let mut world = World::default();
 //! // Iterate over single component
-//! world.iter_position_mut(|position| {
+//! world.iter_position_mut(|_entity, position| {
 //!     position.x += 1.0;
 //! });
 //!
@@ -337,8 +361,8 @@
 //!
 //! ```rust
 //! # use freecs::{ecs, Entity};
-//! # #[derive(Default, Clone)] struct Position { x: f32, y: f32 }
-//! # #[derive(Default, Clone)] struct Velocity { x: f32, y: f32 }
+//! # #[derive(Default, Clone)] pub struct Position { x: f32, y: f32 }
+//! # #[derive(Default, Clone)] pub struct Velocity { x: f32, y: f32 }
 //! # ecs! { World { position: Position => POSITION, velocity: Velocity => VELOCITY, } Tags { player => PLAYER, } Resources { delta_time: f32 } }
 //! # let mut world = World::default();
 //! // Include/exclude with masks
@@ -352,7 +376,7 @@
 //!
 //! ```rust
 //! # use freecs::{ecs, Entity};
-//! # #[derive(Default, Clone)] struct Position { x: f32, y: f32 }
+//! # #[derive(Default, Clone)] pub struct Position { x: f32, y: f32 }
 //! # ecs! { World { position: Position => POSITION, } Tags { player => PLAYER, } Resources { delta_time: f32 } }
 //! # let mut world = World::default();
 //! # let entity = world.spawn_entities(POSITION, 1)[0];
@@ -374,8 +398,8 @@
 //!
 //! ```rust
 //! # use freecs::{ecs, Entity};
-//! # #[derive(Default, Clone)] struct Position { x: f32, y: f32 }
-//! # #[derive(Debug, Clone)] struct CollisionEvent { entity_a: Entity, entity_b: Entity }
+//! # #[derive(Default, Clone)] pub struct Position { x: f32, y: f32 }
+//! # #[derive(Debug, Clone)] pub struct CollisionEvent { entity_a: Entity, entity_b: Entity }
 //! # ecs! { World { position: Position => POSITION, } Events { collision: CollisionEvent, } Resources { delta_time: f32 } }
 //! # let mut world = World::default();
 //! # let entity = world.spawn_entities(POSITION, 1)[0];
@@ -518,6 +542,13 @@ impl EntityLocations {
             loc.allocated = false;
         }
     }
+}
+
+/// Returns true if `tick` was stamped after `since_tick`, treating ticks as a
+/// wrapping sequence so detection keeps working across `u32` overflow.
+#[inline]
+pub const fn tick_is_newer(tick: u32, since_tick: u32) -> bool {
+    tick.wrapping_sub(since_tick) as i32 > 0
 }
 
 /// Double-buffered event queue for inter-system communication.
@@ -1010,7 +1041,7 @@ macro_rules! ecs_impl {
         }
     ) => {
         #[allow(unused)]
-        #[derive(Default, Debug, Clone)]
+        #[derive(Default, Clone)]
         pub struct EntityBuilder {
             $($(#[$comp_attr])* $name: Option<$type>,)*
         }
@@ -1196,6 +1227,7 @@ macro_rules! ecs_impl {
                             }
 
                             table.[<$name _changed>][array_index] = current_tick;
+                            table.[<$name _peak_changed>] = current_tick;
                             Some(&mut table.$name[array_index])
                         }
                     }
@@ -1212,6 +1244,7 @@ macro_rules! ecs_impl {
                             }
 
                             table.[<$name _changed>][array_index] = current_tick;
+                            table.[<$name _peak_changed>] = current_tick;
                             Some(f(&mut table.$name[array_index]))
                         }
                     }
@@ -1226,6 +1259,8 @@ macro_rules! ecs_impl {
                         if let Some((table_index, array_index)) = get_location(&self.entity_locations, entity) {
                             if self.tables[table_index].mask & $mask != 0 {
                                 self.tables[table_index].$name[array_index] = value;
+                                self.tables[table_index].[<$name _changed>][array_index] = self.current_tick;
+                                self.tables[table_index].[<$name _peak_changed>] = self.current_tick;
                                 return;
                             }
                             self.add_components_at(entity, $mask, table_index, array_index);
@@ -1310,6 +1345,7 @@ macro_rules! ecs_impl {
                         if mask & $mask != 0 {
                             self.tables[table_index].$name.reserve(count);
                             self.tables[table_index].[<$name _changed>].reserve(count);
+                            self.tables[table_index].[<$name _peak_changed>] = self.current_tick;
                         }
                     }
                 )*
@@ -1353,6 +1389,7 @@ macro_rules! ecs_impl {
                         if mask & $mask != 0 {
                             self.tables[table_index].$name.reserve(count);
                             self.tables[table_index].[<$name _changed>].reserve(count);
+                            self.tables[table_index].[<$name _peak_changed>] = self.current_tick;
                         }
                     }
                 )*
@@ -1660,7 +1697,7 @@ macro_rules! ecs_impl {
             pub fn step(&mut self) {
                 self.update_events();
                 self.last_tick = self.current_tick;
-                self.current_tick += 1;
+                self.current_tick = self.current_tick.wrapping_add(1);
             }
 
             pub fn queue_spawn_entities(&mut self, mask: u64, count: usize) {
@@ -1942,13 +1979,25 @@ macro_rules! ecs_impl {
                             continue;
                         }
 
+                        let mut table_changed = false;
+                        $(
+                            $crate::paste::paste! {
+                                if component_include & $mask != 0 && table.mask & $mask != 0 && $crate::tick_is_newer(table.[<$name _peak_changed>], since_tick) {
+                                    table_changed = true;
+                                }
+                            }
+                        )*
+                        if !table_changed {
+                            continue;
+                        }
+
                         for idx in 0..table.entity_indices.len() {
                             let entity = table.entity_indices[idx];
 
                             let mut changed = false;
                             $(
                                 $crate::paste::paste! {
-                                    if component_include & $mask != 0 && table.mask & $mask != 0 && table.[<$name _changed>][idx] > since_tick {
+                                    if component_include & $mask != 0 && table.mask & $mask != 0 && $crate::tick_is_newer(table.[<$name _changed>][idx], since_tick) {
                                         changed = true;
                                     }
                                 }
@@ -1963,6 +2012,18 @@ macro_rules! ecs_impl {
                     for &table_index in &table_indices {
                         let table = &mut self.tables[table_index];
                         if table.mask & component_exclude != 0 {
+                            continue;
+                        }
+
+                        let mut table_changed = false;
+                        $(
+                            $crate::paste::paste! {
+                                if component_include & $mask != 0 && table.mask & $mask != 0 && $crate::tick_is_newer(table.[<$name _peak_changed>], since_tick) {
+                                    table_changed = true;
+                                }
+                            }
+                        )*
+                        if !table_changed {
                             continue;
                         }
 
@@ -1984,7 +2045,7 @@ macro_rules! ecs_impl {
                             let mut changed = false;
                             $(
                                 $crate::paste::paste! {
-                                    if component_include & $mask != 0 && table.mask & $mask != 0 && table.[<$name _changed>][idx] > since_tick {
+                                    if component_include & $mask != 0 && table.mask & $mask != 0 && $crate::tick_is_newer(table.[<$name _changed>][idx], since_tick) {
                                         changed = true;
                                     }
                                 }
@@ -2011,6 +2072,7 @@ macro_rules! ecs_impl {
             pub struct ComponentArrays {
                 $($(#[$comp_attr])* pub $name: Vec<$type>,)*
                 $($(#[$comp_attr])* pub [<$name _changed>]: Vec<u32>,)*
+                $($(#[$comp_attr])* pub [<$name _peak_changed>]: u32,)*
                 pub entity_indices: Vec<$crate::Entity>,
                 pub mask: u64,
             }
@@ -2194,6 +2256,21 @@ macro_rules! ecs_impl {
                         continue;
                     }
 
+                    if self.array_index == 0 {
+                        let mut table_changed = false;
+                        $(
+                            $crate::paste::paste! {
+                                if self.mask & $mask != 0 && table.mask & $mask != 0 && $crate::tick_is_newer(table.[<$name _peak_changed>], self.since_tick) {
+                                    table_changed = true;
+                                }
+                            }
+                        )*
+                        if !table_changed {
+                            self.table_index += 1;
+                            continue;
+                        }
+                    }
+
                     if self.array_index >= table.entity_indices.len() {
                         self.table_index += 1;
                         self.array_index = 0;
@@ -2206,7 +2283,7 @@ macro_rules! ecs_impl {
                     let mut changed = false;
                     $(
                         $crate::paste::paste! {
-                            if self.mask & $mask != 0 && table.mask & $mask != 0 && table.[<$name _changed>][idx] > self.since_tick {
+                            if self.mask & $mask != 0 && table.mask & $mask != 0 && $crate::tick_is_newer(table.[<$name _changed>][idx], self.since_tick) {
                                 changed = true;
                             }
                         }
@@ -2407,6 +2484,7 @@ macro_rules! ecs_impl {
                             arrays.$name.push(<$type>::default());
                         }
                         arrays.[<$name _changed>].push(tick);
+                        arrays.[<$name _peak_changed>] = tick;
                     }
                 }
             )*
@@ -2473,6 +2551,7 @@ macro_rules! ecs_world_impl {
             pub struct [<$world ComponentArrays>] {
                 $($(#[$comp_attr])* pub $name: Vec<$type>,)*
                 $($(#[$comp_attr])* pub [<$name _changed>]: Vec<u32>,)*
+                $($(#[$comp_attr])* pub [<$name _peak_changed>]: u32,)*
                 pub entity_indices: Vec<$crate::Entity>,
                 pub mask: u64,
             }
@@ -2569,6 +2648,7 @@ macro_rules! ecs_world_impl {
                                 return None;
                             }
                             table.[<$name _changed>][array_index] = current_tick;
+                            table.[<$name _peak_changed>] = current_tick;
                             Some(&mut table.$name[array_index])
                         }
 
@@ -2581,6 +2661,7 @@ macro_rules! ecs_world_impl {
                                 return None;
                             }
                             table.[<$name _changed>][array_index] = current_tick;
+                            table.[<$name _peak_changed>] = current_tick;
                             Some(f(&mut table.$name[array_index]))
                         }
 
@@ -2591,10 +2672,13 @@ macro_rules! ecs_world_impl {
 
                         #[inline]
                         pub fn [<set_ $name>](&mut self, entity: $crate::Entity, value: $type) {
+                            let current_tick = self.current_tick;
                             if let Some((table_index, array_index)) = [<get_location_ $world:snake>](&self.entity_locations, entity) {
                                 let table = &mut self.tables[table_index];
                                 if table.mask & $mask != 0 {
                                     table.$name[array_index] = value;
+                                    table.[<$name _changed>][array_index] = current_tick;
+                                    table.[<$name _peak_changed>] = current_tick;
                                     return;
                                 }
                             }
@@ -2677,6 +2761,7 @@ macro_rules! ecs_world_impl {
                             if mask & $mask != 0 {
                                 self.tables[table_index].$name.reserve(count);
                                 self.tables[table_index].[<$name _changed>].reserve(count);
+                                self.tables[table_index].[<$name _peak_changed>] = self.current_tick;
                             }
                         }
                     )*
@@ -2721,6 +2806,7 @@ macro_rules! ecs_world_impl {
                             if mask & $mask != 0 {
                                 self.tables[table_index].$name.reserve(count);
                                 self.tables[table_index].[<$name _changed>].reserve(count);
+                                self.tables[table_index].[<$name _peak_changed>] = self.current_tick;
                             }
                         }
                     )*
@@ -2863,6 +2949,7 @@ macro_rules! ecs_world_impl {
                                 if mask & $mask != 0 {
                                     self.tables[table_index].$name.push(<$type>::default());
                                     self.tables[table_index].[<$name _changed>].push(self.current_tick);
+                                    self.tables[table_index].[<$name _peak_changed>] = self.current_tick;
                                 }
                             }
                         )*
@@ -3030,6 +3117,19 @@ macro_rules! ecs_world_impl {
                             continue;
                         }
 
+                        let mut table_changed = false;
+                        $(
+                            $(#[$comp_attr])*
+                            {
+                                if include & $mask != 0 && table.mask & $mask != 0 && $crate::tick_is_newer(table.[<$name _peak_changed>], since_tick) {
+                                    table_changed = true;
+                                }
+                            }
+                        )*
+                        if !table_changed {
+                            continue;
+                        }
+
                         for idx in 0..table.entity_indices.len() {
                             let entity = table.entity_indices[idx];
 
@@ -3037,7 +3137,7 @@ macro_rules! ecs_world_impl {
                             $(
                                 $(#[$comp_attr])*
                                 {
-                                    if include & $mask != 0 && table.mask & $mask != 0 && table.[<$name _changed>][idx] > since_tick {
+                                    if include & $mask != 0 && table.mask & $mask != 0 && $crate::tick_is_newer(table.[<$name _changed>][idx], since_tick) {
                                         changed = true;
                                     }
                                 }
@@ -3374,6 +3474,21 @@ macro_rules! ecs_world_impl {
                             self.array_index = 0;
                             continue;
                         }
+                        if self.array_index == 0 {
+                            let mut table_changed = false;
+                            $(
+                                $(#[$comp_attr])*
+                                {
+                                    if self.mask & $mask != 0 && table.mask & $mask != 0 && $crate::tick_is_newer(table.[<$name _peak_changed>], self.since_tick) {
+                                        table_changed = true;
+                                    }
+                                }
+                            )*
+                            if !table_changed {
+                                self.table_index += 1;
+                                continue;
+                            }
+                        }
                         if self.array_index >= table.entity_indices.len() {
                             self.table_index += 1;
                             self.array_index = 0;
@@ -3386,7 +3501,7 @@ macro_rules! ecs_world_impl {
                         $(
                             $(#[$comp_attr])*
                             {
-                                if self.mask & $mask != 0 && table.mask & $mask != 0 && table.[<$name _changed>][idx] > self.since_tick {
+                                if self.mask & $mask != 0 && table.mask & $mask != 0 && $crate::tick_is_newer(table.[<$name _changed>][idx], self.since_tick) {
                                     changed = true;
                                 }
                             }
@@ -3553,6 +3668,7 @@ macro_rules! ecs_world_impl {
                                 arrays.$name.push(<$type>::default());
                             }
                             arrays.[<$name _changed>].push(tick);
+                            arrays.[<$name _peak_changed>] = tick;
                         }
                     }
                 )*
@@ -3626,7 +3742,7 @@ macro_rules! ecs_multi_impl {
 
         $crate::paste::paste! {
             #[allow(unused)]
-            #[derive(Default, Debug, Clone)]
+            #[derive(Default, Clone)]
             pub struct EntityBuilder {
                 $($(
                     $(#[$comp_attr])* $name: Option<$type>,
@@ -3830,7 +3946,7 @@ macro_rules! ecs_multi_impl {
                     self.update_events();
                     $(
                         self.[<$world_name:snake>].last_tick = self.[<$world_name:snake>].current_tick;
-                        self.[<$world_name:snake>].current_tick += 1;
+                        self.[<$world_name:snake>].current_tick = self.[<$world_name:snake>].current_tick.wrapping_add(1);
                     )+
                 }
 
@@ -4853,6 +4969,87 @@ mod tests {
         assert_eq!(changed_entities.len(), 1);
         assert!(changed_entities.contains(&e1));
         assert!(!changed_entities.contains(&e2));
+    }
+
+    #[test]
+    fn test_change_detection_set() {
+        let mut world = World::default();
+        let e1 = world.spawn_entities(POSITION, 1)[0];
+        let e2 = world.spawn_entities(POSITION, 1)[0];
+
+        world.step();
+
+        world.set_position(e1, Position { x: 5.0, y: 0.0 });
+
+        let mut changed_entities = Vec::new();
+        world.for_each_mut_changed(POSITION, 0, |entity, _table, _idx| {
+            changed_entities.push(entity);
+        });
+
+        assert_eq!(changed_entities.len(), 1);
+        assert!(changed_entities.contains(&e1));
+        assert!(!changed_entities.contains(&e2));
+
+        let queried: Vec<_> = world.query_entities_changed(POSITION).collect();
+        assert_eq!(queried, vec![e1]);
+    }
+
+    #[test]
+    fn test_change_detection_spawn() {
+        let mut world = World::default();
+        let e1 = world.spawn_entities(POSITION, 1)[0];
+
+        world.step();
+
+        let e2 = world.spawn_entities(POSITION, 1)[0];
+
+        let changed: Vec<_> = world.query_entities_changed(POSITION).collect();
+        assert_eq!(changed, vec![e2]);
+
+        world.step();
+
+        let changed: Vec<_> = world.query_entities_changed(POSITION).collect();
+        assert!(changed.is_empty());
+        assert!(world.get_position(e1).is_some());
+    }
+
+    #[test]
+    fn test_change_detection_skips_untouched_tables() {
+        let mut world = World::default();
+        world.spawn_entities(POSITION, 3);
+        let e2 = world.spawn_entities(POSITION | VELOCITY, 1)[0];
+
+        world.step();
+
+        world.get_position_mut(e2).unwrap().x = 1.0;
+
+        let changed: Vec<_> = world.query_entities_changed(POSITION).collect();
+        assert_eq!(changed, vec![e2]);
+
+        for table in &world.tables {
+            if table.mask == POSITION {
+                assert!(!crate::tick_is_newer(
+                    table.position_peak_changed,
+                    world.last_tick
+                ));
+            }
+            if table.mask == POSITION | VELOCITY {
+                assert!(crate::tick_is_newer(
+                    table.position_peak_changed,
+                    world.last_tick
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn test_tick_is_newer() {
+        assert!(crate::tick_is_newer(1, 0));
+        assert!(!crate::tick_is_newer(0, 0));
+        assert!(!crate::tick_is_newer(0, 1));
+        assert!(crate::tick_is_newer(0, u32::MAX));
+        assert!(crate::tick_is_newer(5, u32::MAX - 3));
+        assert!(!crate::tick_is_newer(u32::MAX, 0));
     }
 
     #[test]

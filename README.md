@@ -652,7 +652,9 @@ fn network_sync_system(world: &mut World) {
 world.step();  // Increments tick counter and swaps event buffers
 ```
 
-Change detection tracks modifications at the component table level. Any mutation via `get_*_mut()` or table access marks that component slot as changed for the current tick.
+Mutations through `set_*()`, `get_*_mut()`, and `modify_*()` mark the component slot as changed for the current tick, as do spawns and component add/remove migrations. Raw table access (`query_mut()` closures, slice iterators) does not mark, so route writes through the accessors when you rely on change detection.
+
+Each table also keeps a per-component high-water tick. Changed queries compare it first and skip whole tables that no write has touched since the last `step()`, so scanning cost is proportional to tables with activity rather than total entity count. Tick comparisons are wrapping-safe, so detection keeps working after the `u32` tick counter overflows.
 
 **Performance note**: Change detection adds a small overhead. Only use it when you need to track changes.
 
