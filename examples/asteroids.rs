@@ -363,10 +363,10 @@ fn render_system(world: &World) {
                 draw_line(start.x, start.y, end.x, end.y, 2.0, WHITE);
             }
 
-            if let Some(player) = world.get_player(entity) {
-                if player.thrusting {
-                    render_thrust(position, rotation);
-                }
+            if let Some(player) = world.get_player(entity)
+                && player.thrusting
+            {
+                render_thrust(position, rotation);
             }
         });
 

@@ -88,7 +88,7 @@ fn bench_spawn_entities(c: &mut Criterion) {
             &count,
             |b, &count| {
                 b.iter_batched(
-                    || World::default(),
+                    World::default,
                     |mut world| {
                         for _ in 0..count {
                             world.spawn_entities(POSITION | VELOCITY, 1);
@@ -105,7 +105,7 @@ fn bench_spawn_entities(c: &mut Criterion) {
             &count,
             |b, &count| {
                 b.iter_batched(
-                    || World::default(),
+                    World::default,
                     |mut world| {
                         world.spawn_batch(POSITION | VELOCITY, count, |_table, _idx| {});
                         black_box(world);
@@ -120,7 +120,7 @@ fn bench_spawn_entities(c: &mut Criterion) {
             &count,
             |b, &count| {
                 b.iter_batched(
-                    || World::default(),
+                    World::default,
                     |mut world| {
                         world.spawn_batch(POSITION | VELOCITY, count, |table, idx| {
                             table.position[idx] = Position {
@@ -240,11 +240,11 @@ fn bench_complex_queries(c: &mut Criterion) {
         };
     });
 
-    for i in 0..entity_count / 2 {
-        world.add_enemy(entities[i]);
+    for &entity in &entities[..entity_count / 2] {
+        world.add_enemy(entity);
     }
-    for i in entity_count / 2..entity_count {
-        world.add_friendly(entities[i]);
+    for &entity in &entities[entity_count / 2..] {
+        world.add_friendly(entity);
     }
 
     group.throughput(Throughput::Elements(entity_count as u64));
@@ -489,11 +489,11 @@ fn bench_fragmentation_resistance(c: &mut Criterion) {
             let mut world = World::default();
             let entities = world.spawn_batch(POSITION | VELOCITY, 5000, |_table, _idx| {});
 
-            for i in 0..entities.len() {
-                match i % 4 {
-                    0 => world.add_player(entities[i]),
-                    1 => world.add_enemy(entities[i]),
-                    2 => world.add_friendly(entities[i]),
+            for (index, &entity) in entities.iter().enumerate() {
+                match index % 4 {
+                    0 => world.add_player(entity),
+                    1 => world.add_enemy(entity),
+                    2 => world.add_friendly(entity),
                     _ => {}
                 }
             }
@@ -563,11 +563,12 @@ fn bench_realistic_game_loop(c: &mut Criterion) {
                 table.damage[idx] = Damage { value: 10.0 };
             });
 
-            for i in 0..entities.len() / 2 {
-                world.add_enemy(entities[i]);
+            let half = entities.len() / 2;
+            for &entity in &entities[..half] {
+                world.add_enemy(entity);
             }
-            for i in entities.len() / 2..entities.len() {
-                world.add_friendly(entities[i]);
+            for &entity in &entities[half..] {
+                world.add_friendly(entity);
             }
 
             world
@@ -818,7 +819,7 @@ fn bench_large_scale(c: &mut Criterion) {
             &count,
             |b, &count| {
                 b.iter_batched(
-                    || World::default(),
+                    World::default,
                     |mut world| {
                         world.spawn_batch(POSITION | VELOCITY, count, |table, idx| {
                             table.position[idx] = Position {
@@ -1579,10 +1580,7 @@ fn bench_query_optimizations(c: &mut Criterion) {
 
     group.bench_function("query_entities_full_scan", |b| {
         b.iter(|| {
-            let entities: Vec<_> = world
-                .query_entities(POSITION | VELOCITY)
-                .into_iter()
-                .collect();
+            let entities: Vec<_> = world.query_entities(POSITION | VELOCITY).collect();
             black_box(entities[0]);
         });
     });

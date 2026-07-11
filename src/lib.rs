@@ -8,10 +8,11 @@
 //!
 //! - **Zero-cost Abstractions**: Fully statically dispatched, no custom traits
 //! - **Parallel Processing**: Multi-threaded iteration using Rayon (automatically enabled on non-WASM platforms)
-//! - **Sparse Set Tags**: Lightweight markers that don't fragment archetypes
+//! - **Sparse Set Tags**: Deterministic, generation-checked markers that don't fragment archetypes
 //! - **Command Buffers**: Queue structural changes during iteration
 //! - **Change Detection**: Track component modifications for incremental updates
-//! - **Events**: Type-safe double-buffered event system
+//! - **Events**: Sequence-numbered channels with exactly-once cursor consumption
+//! - **Structural Change Log**: Cursor-based log of spawns, despawns, component moves, and tag flips
 //! - **Multi-World**: Split components across multiple worlds for >64 component types
 //!
 //! The `ecs!` macro generates the entire ECS at compile time using only plain data structures, functions, and zero unsafe code.
@@ -456,9 +457,8 @@ pub use paste;
 #[cfg(not(target_family = "wasm"))]
 pub use rayon;
 
-#[derive(
-    Default, Clone, Copy, Debug, Eq, PartialEq, Hash, serde::Serialize, serde::Deserialize,
-)]
+#[derive(Default, Clone, Copy, Debug, Eq, PartialEq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Entity {
     pub id: u32,
     pub generation: u32,

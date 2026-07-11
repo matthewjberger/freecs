@@ -43,7 +43,6 @@ fn physics_system(world: &mut World) {
 
     let updates: Vec<(freecs::Entity, Velocity)> = world
         .query_entities(POSITION | VELOCITY)
-        .into_iter()
         .filter_map(|entity| world.get_velocity(entity).map(|vel| (entity, *vel)))
         .collect();
 
@@ -70,7 +69,7 @@ fn damage_system(world: &mut World) {
 fn health_decay_system(world: &mut World) {
     let dt = world.resources.delta_time;
 
-    let entities: Vec<freecs::Entity> = world.query_entities(HEALTH).into_iter().collect();
+    let entities: Vec<freecs::Entity> = world.query_entities(HEALTH).collect();
 
     for entity in entities {
         if let Some(health) = world.get_health_mut(entity) {
@@ -81,7 +80,7 @@ fn health_decay_system(world: &mut World) {
 
 fn frame_counter_system(world: &mut World) {
     world.resources.frame_count += 1;
-    if world.resources.frame_count % 60 == 0 {
+    if world.resources.frame_count.is_multiple_of(60) {
         println!("Frame {}", world.resources.frame_count);
     }
 }
@@ -120,13 +119,13 @@ fn main() {
 
     println!("\nFinal positions:");
     for (index, &entity) in entities.iter().enumerate() {
-        if let Some(pos) = world.get_position(entity) {
-            if let Some(health) = world.get_health(entity) {
-                println!(
-                    "  Entity {}: pos=({:.2}, {:.2}), health={:.2}",
-                    index, pos.x, pos.y, health.value
-                );
-            }
+        if let Some(pos) = world.get_position(entity)
+            && let Some(health) = world.get_health(entity)
+        {
+            println!(
+                "  Entity {}: pos=({:.2}, {:.2}), health={:.2}",
+                index, pos.x, pos.y, health.value
+            );
         }
     }
 

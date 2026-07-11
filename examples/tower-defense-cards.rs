@@ -100,20 +100,15 @@ pub enum GameState {
     Forge,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum NodeType {
+    #[default]
     Combat,
     Elite,
     Boss,
     Shop,
     Rest,
     Forge,
-}
-
-impl Default for NodeType {
-    fn default() -> Self {
-        NodeType::Combat
-    }
 }
 
 impl NodeType {
@@ -157,8 +152,9 @@ pub struct MapData {
     pub nodes_per_layer: Vec<usize>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum EnemyType {
+    #[default]
     Normal,
     Fast,
     Tank,
@@ -179,12 +175,6 @@ impl EnemyType {
             EnemyType::Healer => Color::new(0.2, 0.8, 0.3, 1.0),
             EnemyType::Boss => Color::new(0.6, 0.0, 0.6, 1.0),
         }
-    }
-}
-
-impl Default for EnemyType {
-    fn default() -> Self {
-        EnemyType::Normal
     }
 }
 
@@ -386,17 +376,12 @@ pub struct GridPosition {
 #[derive(Debug, Clone, Copy, Default)]
 pub struct HealthBar {}
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum EffectType {
+    #[default]
     Explosion,
     PoisonBubble,
     DeathParticle,
-}
-
-impl Default for EffectType {
-    fn default() -> Self {
-        EffectType::Explosion
-    }
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -432,18 +417,13 @@ pub struct Player {
     pub max_health: u32,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum CardRarity {
+    #[default]
     Common,
     Rare,
     Epic,
     Legendary,
-}
-
-impl Default for CardRarity {
-    fn default() -> Self {
-        CardRarity::Common
-    }
 }
 
 impl CardRarity {
@@ -457,17 +437,12 @@ impl CardRarity {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum CardState {
+    #[default]
     InDeck,
     Drawing,
     InHand,
-}
-
-impl Default for CardState {
-    fn default() -> Self {
-        CardState::InDeck
-    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -674,21 +649,11 @@ pub struct MetaGameState {
     pub forge_uses_remaining: u32,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct GameConfig {
     pub tower_configs: TowerConfigs,
     pub enemy_configs: EnemyConfigs,
     pub gameplay_constants: GameplayConstants,
-}
-
-impl Default for GameConfig {
-    fn default() -> Self {
-        Self {
-            tower_configs: TowerConfigs::default(),
-            enemy_configs: EnemyConfigs::default(),
-            gameplay_constants: GameplayConstants::default(),
-        }
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -1320,7 +1285,7 @@ fn initialize_grid(world: &mut GameWorld) {
 }
 
 fn create_path(world: &mut GameWorld) {
-    let path = vec![
+    let path = [
         Vec2::new(-6.0, 0.0),
         Vec2::new(-3.0, 0.0),
         Vec2::new(-3.0, -4.0),
@@ -2129,9 +2094,7 @@ fn generate_map() -> MapData {
     };
 
     for layer in 0..layers {
-        let nodes_in_layer = if layer == 0 {
-            1
-        } else if layer == layers - 1 {
+        let nodes_in_layer = if layer == 0 || layer == layers - 1 {
             1
         } else {
             rand::gen_range(3, 6)
@@ -2300,15 +2263,15 @@ fn update_card_animations(world: &mut GameWorld, delta_time: f32) {
     let card_entities: Vec<_> = world.query_entities(CARD).collect();
 
     for entity in card_entities {
-        if let Some(card) = world.get_card_mut(entity) {
-            if card.card_state == CardState::Drawing {
-                card.draw_animation_progress += delta_time * 3.0;
+        if let Some(card) = world.get_card_mut(entity)
+            && card.card_state == CardState::Drawing
+        {
+            card.draw_animation_progress += delta_time * 3.0;
 
-                if card.draw_animation_progress >= 1.0 {
-                    card.draw_animation_progress = 1.0;
-                    card.card_state = CardState::InHand;
-                    card.in_hand = true;
-                }
+            if card.draw_animation_progress >= 1.0 {
+                card.draw_animation_progress = 1.0;
+                card.card_state = CardState::InHand;
+                card.in_hand = true;
             }
         }
     }
@@ -2382,22 +2345,21 @@ fn mouse_input_system(world: &mut GameWorld) {
     let mouse_pos = Vec2::new(mouse_position().0, mouse_position().1);
     world.resources.ui.mouse_grid_pos = screen_to_grid(mouse_pos);
 
-    if is_mouse_button_pressed(MouseButton::Left) {
-        if world.resources.combat.game_state == GameState::WaitingForWave
-            && world.resources.combat.wave == 0
-        {
-            let button_width = 300.0;
-            let button_height = 80.0;
-            let button_x = (screen_width() - button_width) / 2.0;
-            let button_y = screen_height() / 2.0 - button_height / 2.0;
+    if is_mouse_button_pressed(MouseButton::Left)
+        && world.resources.combat.game_state == GameState::WaitingForWave
+        && world.resources.combat.wave == 0
+    {
+        let button_width = 300.0;
+        let button_height = 80.0;
+        let button_x = (screen_width() - button_width) / 2.0;
+        let button_y = screen_height() / 2.0 - button_height / 2.0;
 
-            if mouse_pos.x >= button_x
-                && mouse_pos.x <= button_x + button_width
-                && mouse_pos.y >= button_y
-                && mouse_pos.y <= button_y + button_height
-            {
-                let _ = CommandExecutor::execute(GameCommand::StartWave, world);
-            }
+        if mouse_pos.x >= button_x
+            && mouse_pos.x <= button_x + button_width
+            && mouse_pos.y >= button_y
+            && mouse_pos.y <= button_y + button_height
+        {
+            let _ = CommandExecutor::execute(GameCommand::StartWave, world);
         }
     }
 
@@ -2455,44 +2417,42 @@ fn card_interaction_system(world: &mut GameWorld) {
             } else {
                 world.resources.card_system.selected_card = Some(card_index);
             }
-        } else if let Some((grid_x, grid_y)) = world.resources.ui.mouse_grid_pos {
-            if let Some(selected_card_index) = world.resources.card_system.selected_card {
-                if let Some((card_entity, card)) = cards.get(selected_card_index) {
-                    if world.resources.economy.money >= card.cost {
-                        let mut all_placeable = true;
-                        let placements = get_card_placements(grid_x, grid_y, &card.tower_pattern);
+        } else if let Some((grid_x, grid_y)) = world.resources.ui.mouse_grid_pos
+            && let Some(selected_card_index) = world.resources.card_system.selected_card
+            && let Some((card_entity, card)) = cards.get(selected_card_index)
+            && world.resources.economy.money >= card.cost
+        {
+            let mut all_placeable = true;
+            let placements = get_card_placements(grid_x, grid_y, &card.tower_pattern);
 
-                        for (check_x, check_y, _tower_type) in &placements {
-                            if !can_place_tower_at(world, *check_x, *check_y) {
-                                all_placeable = false;
-                                break;
-                            }
-                        }
-
-                        if all_placeable && !placements.is_empty() {
-                            for (place_x, place_y, tower_type) in placements {
-                                spawn_tower(world, place_x, place_y, tower_type);
-                                mark_cell_occupied(world, place_x, place_y);
-                            }
-
-                            world.resources.economy.money =
-                                world.resources.economy.money.saturating_sub(card.cost);
-                            let pos = grid_to_base(grid_x, grid_y);
-                            spawn_money_popup(world, pos, -(card.cost as i32));
-                            world.resources.card_system.selected_card = None;
-
-                            if let Some(used_card) = world.get_card_mut(*card_entity) {
-                                used_card.in_hand = false;
-                                used_card.card_state = CardState::InDeck;
-                                used_card.draw_animation_progress = 0.0;
-                                world.resources.card_system.hand_size =
-                                    world.resources.card_system.hand_size.saturating_sub(1);
-                            }
-
-                            draw_random_cards(world, 1);
-                        }
-                    }
+            for (check_x, check_y, _tower_type) in &placements {
+                if !can_place_tower_at(world, *check_x, *check_y) {
+                    all_placeable = false;
+                    break;
                 }
+            }
+
+            if all_placeable && !placements.is_empty() {
+                for (place_x, place_y, tower_type) in placements {
+                    spawn_tower(world, place_x, place_y, tower_type);
+                    mark_cell_occupied(world, place_x, place_y);
+                }
+
+                world.resources.economy.money =
+                    world.resources.economy.money.saturating_sub(card.cost);
+                let pos = grid_to_base(grid_x, grid_y);
+                spawn_money_popup(world, pos, -(card.cost as i32));
+                world.resources.card_system.selected_card = None;
+
+                if let Some(used_card) = world.get_card_mut(*card_entity) {
+                    used_card.in_hand = false;
+                    used_card.card_state = CardState::InDeck;
+                    used_card.draw_animation_progress = 0.0;
+                    world.resources.card_system.hand_size =
+                        world.resources.card_system.hand_size.saturating_sub(1);
+                }
+
+                draw_random_cards(world, 1);
             }
         }
     }
@@ -2503,43 +2463,39 @@ fn tower_interaction_system(world: &mut GameWorld) {
     let upgrade_pressed =
         is_key_pressed(KeyCode::U) || is_mouse_button_pressed(MouseButton::Middle);
 
-    if right_clicked {
-        if let Some((grid_x, grid_y)) = world.resources.ui.mouse_grid_pos {
-            let mut tower_entity = None;
-            world
-                .query()
-                .with(TOWER | GRID_POSITION)
-                .iter(|entity, table, index| {
-                    if table.grid_position[index].coord.x == grid_x
-                        && table.grid_position[index].coord.y == grid_y
-                    {
-                        tower_entity = Some(entity);
-                    }
-                });
+    if right_clicked && let Some((grid_x, grid_y)) = world.resources.ui.mouse_grid_pos {
+        let mut tower_entity = None;
+        world
+            .query()
+            .with(TOWER | GRID_POSITION)
+            .iter(|entity, table, index| {
+                if table.grid_position[index].coord.x == grid_x
+                    && table.grid_position[index].coord.y == grid_y
+                {
+                    tower_entity = Some(entity);
+                }
+            });
 
-            if let Some(tower_entity) = tower_entity {
-                sell_tower(world, tower_entity, grid_x, grid_y);
-            }
+        if let Some(tower_entity) = tower_entity {
+            sell_tower(world, tower_entity, grid_x, grid_y);
         }
     }
 
-    if upgrade_pressed {
-        if let Some((grid_x, grid_y)) = world.resources.ui.mouse_grid_pos {
-            let mut tower_entity = None;
-            world
-                .query()
-                .with(TOWER | GRID_POSITION)
-                .iter(|entity, table, index| {
-                    if table.grid_position[index].coord.x == grid_x
-                        && table.grid_position[index].coord.y == grid_y
-                    {
-                        tower_entity = Some(entity);
-                    }
-                });
+    if upgrade_pressed && let Some((grid_x, grid_y)) = world.resources.ui.mouse_grid_pos {
+        let mut tower_entity = None;
+        world
+            .query()
+            .with(TOWER | GRID_POSITION)
+            .iter(|entity, table, index| {
+                if table.grid_position[index].coord.x == grid_x
+                    && table.grid_position[index].coord.y == grid_y
+                {
+                    tower_entity = Some(entity);
+                }
+            });
 
-            if let Some(tower_entity) = tower_entity {
-                upgrade_tower(world, tower_entity, grid_x, grid_y);
-            }
+        if let Some(tower_entity) = tower_entity {
+            upgrade_tower(world, tower_entity, grid_x, grid_y);
         }
     }
 }
@@ -2561,13 +2517,13 @@ fn keyboard_input_system(world: &mut GameWorld) {
         }
     }
 
-    if is_key_pressed(KeyCode::R) {
-        if matches!(
+    if is_key_pressed(KeyCode::R)
+        && matches!(
             world.resources.combat.game_state,
             GameState::GameOver | GameState::Victory
-        ) {
-            restart_game(world);
-        }
+        )
+    {
+        restart_game(world);
     }
 
     if is_key_pressed(KeyCode::D) {
@@ -2791,13 +2747,13 @@ fn enemy_movement_system(world: &mut GameWorld, delta_time: f32) {
                 }
             }
 
-            if poison_damage_to_apply > 0.0 {
-                if let Some(health) = world.get_health_mut(entity) {
-                    health.apply_damage(poison_damage_to_apply);
+            if poison_damage_to_apply > 0.0
+                && let Some(health) = world.get_health_mut(entity)
+            {
+                health.apply_damage(poison_damage_to_apply);
 
-                    if !health.is_alive() {
-                        poison_death = true;
-                    }
+                if !health.is_alive() {
+                    poison_death = true;
                 }
             }
 
@@ -2811,23 +2767,22 @@ fn enemy_movement_system(world: &mut GameWorld, delta_time: f32) {
         }
     }
 
-    if hp_damage > 0 {
-        if let Some(player_entity) = world.query_entities(PLAYER).next() {
-            if let Some(player) = world.get_player_mut(player_entity) {
-                if player.health >= hp_damage {
-                    player.health -= hp_damage;
-                } else {
-                    player.health = 0;
-                }
+    if hp_damage > 0
+        && let Some(player_entity) = world.query_entities(PLAYER).next()
+        && let Some(player) = world.get_player_mut(player_entity)
+    {
+        if player.health >= hp_damage {
+            player.health -= hp_damage;
+        } else {
+            player.health = 0;
+        }
 
-                if player.health == 0 {
-                    player.health = player.max_health;
-                    world.resources.combat.lives = world.resources.combat.lives.saturating_sub(1);
+        if player.health == 0 {
+            player.health = player.max_health;
+            world.resources.combat.lives = world.resources.combat.lives.saturating_sub(1);
 
-                    if world.resources.combat.lives == 0 {
-                        world.resources.combat.game_state = GameState::GameOver;
-                    }
-                }
+            if world.resources.combat.lives == 0 {
+                world.resources.combat.game_state = GameState::GameOver;
             }
         }
     }
@@ -2943,7 +2898,9 @@ fn tower_shooting_system(world: &mut GameWorld, delta_time: f32) {
 
         let is_ready = world.get_cooldown(entity).unwrap().is_ready();
 
-        if is_ready && target_position.is_some() {
+        if let Some(target_position) = target_position
+            && is_ready
+        {
             let can_fire = if tower_type == TowerType::Sniper {
                 tracking_time >= 2.0
             } else {
@@ -2951,17 +2908,12 @@ fn tower_shooting_system(world: &mut GameWorld, delta_time: f32) {
             };
 
             if can_fire {
-                projectiles_to_spawn.push((
-                    tower_pos,
-                    target_position.unwrap(),
-                    tower_type,
-                    tower_level,
-                ));
+                projectiles_to_spawn.push((tower_pos, target_position, tower_type, tower_level));
 
                 if has_double_tap {
                     projectiles_to_spawn.push((
                         tower_pos,
-                        target_position.unwrap(),
+                        target_position,
                         tower_type,
                         tower_level,
                     ));
@@ -3027,9 +2979,8 @@ fn projectile_movement_system(world: &mut GameWorld, delta_time: f32) {
                 (projectile_comp.speed * delta_time) / total_distance;
             projectile_comp.flight_progress = projectile_comp.flight_progress.min(1.0);
 
-            let horizontal_pos = projectile_comp.start_position
-                + (target_pos - projectile_comp.start_position) * projectile_comp.flight_progress;
-            horizontal_pos
+            projectile_comp.start_position
+                + (target_pos - projectile_comp.start_position) * projectile_comp.flight_progress
         } else {
             let direction = (target_pos - old_pos).normalize();
             old_pos + direction * projectile_comp.speed * delta_time
@@ -3171,10 +3122,8 @@ fn damage_handler_system(world: &mut GameWorld) {
                 damage *= 1.25;
             }
 
-            if has_critical_strike {
-                if rand::gen_range(0.0, 1.0) < 0.2 {
-                    damage *= 2.0;
-                }
+            if has_critical_strike && rand::gen_range(0.0, 1.0) < 0.2 {
+                damage *= 2.0;
             }
 
             health.apply_damage(damage);
@@ -3329,7 +3278,6 @@ fn sell_tower(world: &mut GameWorld, tower_entity: freecs::Entity, grid_x: i32, 
         let grid_coord = GridCoord::new(grid_x, grid_y);
         let range_indicators_to_remove: Vec<_> = world
             .query_entities(RANGE_INDICATOR)
-            .into_iter()
             .filter_map(|range_entity| {
                 world
                     .get_range_indicator(range_entity)
@@ -3348,7 +3296,7 @@ fn sell_tower(world: &mut GameWorld, tower_entity: freecs::Entity, grid_x: i32, 
 }
 
 fn restart_game(world: &mut GameWorld) {
-    let towers_to_remove: Vec<_> = world.query_entities(TOWER).into_iter().collect();
+    let towers_to_remove: Vec<_> = world.query_entities(TOWER).collect();
     for entity in towers_to_remove {
         world.queue_despawn_entity(entity);
     }
@@ -3368,13 +3316,12 @@ fn restart_game(world: &mut GameWorld) {
         world.queue_despawn_entity(entity);
     }
 
-    let money_popups_to_remove: Vec<_> = world.query_entities(MONEY_POPUP).into_iter().collect();
+    let money_popups_to_remove: Vec<_> = world.query_entities(MONEY_POPUP).collect();
     for entity in money_popups_to_remove {
         world.queue_despawn_entity(entity);
     }
 
-    let range_indicators_to_remove: Vec<_> =
-        world.query_entities(RANGE_INDICATOR).into_iter().collect();
+    let range_indicators_to_remove: Vec<_> = world.query_entities(RANGE_INDICATOR).collect();
     for entity in range_indicators_to_remove {
         world.queue_despawn_entity(entity);
     }
@@ -3387,11 +3334,11 @@ fn restart_game(world: &mut GameWorld) {
     world.resources.combat.current_hp = 20;
     world.resources.combat.max_hp = 20;
 
-    if let Some(player_entity) = world.query_entities(PLAYER).next() {
-        if let Some(player) = world.get_player_mut(player_entity) {
-            player.health = 20;
-            player.max_health = 20;
-        }
+    if let Some(player_entity) = world.query_entities(PLAYER).next()
+        && let Some(player) = world.get_player_mut(player_entity)
+    {
+        player.health = 20;
+        player.max_health = 20;
     }
 
     world.resources.combat.game_state = GameState::WaitingForWave;
@@ -3441,69 +3388,69 @@ fn render_grid(world: &GameWorld) {
         }
     }
 
-    if let Some((grid_x, grid_y)) = world.resources.ui.mouse_grid_pos {
-        if let Some(selected_card_index) = world.resources.card_system.selected_card {
-            let cards_in_hand: Vec<_> = world
-                .query_entities(CARD)
-                .filter_map(|entity| {
-                    world.get_card(entity).and_then(|card| {
-                        if card.card_state == CardState::InHand {
-                            Some((entity, card.clone()))
-                        } else {
-                            None
-                        }
-                    })
-                })
-                .collect();
-
-            if let Some((_entity, card)) = cards_in_hand.get(selected_card_index) {
-                let placements = get_card_placements(grid_x, grid_y, &card.tower_pattern);
-                let mut all_placeable = true;
-
-                for (check_x, check_y, _tower_type) in &placements {
-                    if !can_place_tower_at(world, *check_x, *check_y) {
-                        all_placeable = false;
-                        break;
-                    }
-                }
-
-                for (place_x, place_y, tower_type) in &placements {
-                    let pos = grid_to_screen(*place_x, *place_y);
-
-                    if all_placeable {
-                        let tower_size = 20.0 * scale;
-                        let tower_color = tower_type.color();
-                        let preview_color =
-                            Color::new(tower_color.r, tower_color.g, tower_color.b, 0.5);
-
-                        draw_circle(pos.x, pos.y, tower_size / 2.0, preview_color);
-                        draw_circle_lines(
-                            pos.x,
-                            pos.y,
-                            tower_size / 2.0,
-                            2.0,
-                            Color::new(tower_color.r, tower_color.g, tower_color.b, 0.7),
-                        );
-
-                        let tower_stats = world.resources.config.tower_configs.get(*tower_type);
-                        let range = tower_stats.range(1);
-                        draw_circle_lines(
-                            pos.x,
-                            pos.y,
-                            range * scale,
-                            1.5,
-                            Color::new(tower_color.r, tower_color.g, tower_color.b, 0.3),
-                        );
+    if let Some((grid_x, grid_y)) = world.resources.ui.mouse_grid_pos
+        && let Some(selected_card_index) = world.resources.card_system.selected_card
+    {
+        let cards_in_hand: Vec<_> = world
+            .query_entities(CARD)
+            .filter_map(|entity| {
+                world.get_card(entity).and_then(|card| {
+                    if card.card_state == CardState::InHand {
+                        Some((entity, card.clone()))
                     } else {
-                        let preview_color = Color::new(1.0, 0.0, 0.0, 0.3);
-                        draw_rectangle(
-                            pos.x - TILE_SIZE * scale / 2.0 + scale,
-                            pos.y - TILE_SIZE * scale / 2.0 + scale,
-                            (TILE_SIZE - 2.0) * scale,
-                            (TILE_SIZE - 2.0) * scale,
-                            preview_color,
-                        );
+                        None
                     }
+                })
+            })
+            .collect();
+
+        if let Some((_entity, card)) = cards_in_hand.get(selected_card_index) {
+            let placements = get_card_placements(grid_x, grid_y, &card.tower_pattern);
+            let mut all_placeable = true;
+
+            for (check_x, check_y, _tower_type) in &placements {
+                if !can_place_tower_at(world, *check_x, *check_y) {
+                    all_placeable = false;
+                    break;
+                }
+            }
+
+            for (place_x, place_y, tower_type) in &placements {
+                let pos = grid_to_screen(*place_x, *place_y);
+
+                if all_placeable {
+                    let tower_size = 20.0 * scale;
+                    let tower_color = tower_type.color();
+                    let preview_color =
+                        Color::new(tower_color.r, tower_color.g, tower_color.b, 0.5);
+
+                    draw_circle(pos.x, pos.y, tower_size / 2.0, preview_color);
+                    draw_circle_lines(
+                        pos.x,
+                        pos.y,
+                        tower_size / 2.0,
+                        2.0,
+                        Color::new(tower_color.r, tower_color.g, tower_color.b, 0.7),
+                    );
+
+                    let tower_stats = world.resources.config.tower_configs.get(*tower_type);
+                    let range = tower_stats.range(1);
+                    draw_circle_lines(
+                        pos.x,
+                        pos.y,
+                        range * scale,
+                        1.5,
+                        Color::new(tower_color.r, tower_color.g, tower_color.b, 0.3),
+                    );
+                } else {
+                    let preview_color = Color::new(1.0, 0.0, 0.0, 0.3);
+                    draw_rectangle(
+                        pos.x - TILE_SIZE * scale / 2.0 + scale,
+                        pos.y - TILE_SIZE * scale / 2.0 + scale,
+                        (TILE_SIZE - 2.0) * scale,
+                        (TILE_SIZE - 2.0) * scale,
+                        preview_color,
+                    );
                 }
             }
         }
@@ -3544,21 +3491,21 @@ fn render_towers(world: &GameWorld) {
                 draw_circle_lines(screen_pos.x, screen_pos.y, ring_radius, 1.5, upgraded_color);
             }
 
-            if tower.tower_type == TowerType::Sniper {
-                if let Some(target_pos) = targeting.target_position {
-                    let target_screen_pos = Vec2::new(
-                        offset.x + target_pos.x * scale,
-                        offset.y + target_pos.y * scale,
-                    );
-                    draw_line(
-                        screen_pos.x,
-                        screen_pos.y,
-                        target_screen_pos.x,
-                        target_screen_pos.y,
-                        2.0,
-                        RED,
-                    );
-                }
+            if tower.tower_type == TowerType::Sniper
+                && let Some(target_pos) = targeting.target_position
+            {
+                let target_screen_pos = Vec2::new(
+                    offset.x + target_pos.x * scale,
+                    offset.y + target_pos.y * scale,
+                );
+                draw_line(
+                    screen_pos.x,
+                    screen_pos.y,
+                    target_screen_pos.x,
+                    target_screen_pos.y,
+                    2.0,
+                    RED,
+                );
             }
         });
 
@@ -4096,7 +4043,7 @@ fn render_cards(world: &GameWorld) {
 
             let can_afford = world.resources.economy.money >= card.cost;
             render_card_preview(
-                &card,
+                card,
                 current_x,
                 current_y,
                 card_width,
@@ -4135,7 +4082,7 @@ fn render_cards(world: &GameWorld) {
         let can_afford = world.resources.economy.money >= card.cost;
 
         render_card_preview(
-            &card,
+            card,
             display_x,
             display_y,
             display_width,
@@ -4196,34 +4143,34 @@ fn render_card_preview_overlay(world: &GameWorld) {
         }
     }
 
-    if let Some(hovered_index) = hovered_card_index {
-        if let Some((_entity, card)) = cards.get(hovered_index) {
-            draw_rectangle(
-                0.0,
-                0.0,
-                screen_width(),
-                screen_height(),
-                Color::new(0.0, 0.0, 0.0, 0.8),
-            );
+    if let Some(hovered_index) = hovered_card_index
+        && let Some((_entity, card)) = cards.get(hovered_index)
+    {
+        draw_rectangle(
+            0.0,
+            0.0,
+            screen_width(),
+            screen_height(),
+            Color::new(0.0, 0.0, 0.0, 0.8),
+        );
 
-            let preview_width = 400.0;
-            let preview_height = 533.0;
-            let preview_x = (screen_width() - preview_width) / 2.0;
-            let preview_y = (screen_height() - preview_height) / 2.0;
+        let preview_width = 400.0;
+        let preview_height = 533.0;
+        let preview_x = (screen_width() - preview_width) / 2.0;
+        let preview_y = (screen_height() - preview_height) / 2.0;
 
-            let can_afford = world.resources.economy.money >= card.cost;
-            let is_selected = world.resources.card_system.selected_card == Some(hovered_index);
+        let can_afford = world.resources.economy.money >= card.cost;
+        let is_selected = world.resources.card_system.selected_card == Some(hovered_index);
 
-            render_card_preview(
-                &card,
-                preview_x,
-                preview_y,
-                preview_width,
-                preview_height,
-                is_selected,
-                can_afford,
-            );
-        }
+        render_card_preview(
+            card,
+            preview_x,
+            preview_y,
+            preview_width,
+            preview_height,
+            is_selected,
+            can_afford,
+        );
     }
 }
 
@@ -4342,7 +4289,7 @@ fn render_deck_view(world: &GameWorld) {
 
     let all_cards: Vec<_> = world
         .query_entities(CARD)
-        .filter_map(|entity| world.get_card(entity).map(|card| card.clone()))
+        .filter_map(|entity| world.get_card(entity).cloned())
         .collect();
 
     let mut card_counts: Vec<(Card, usize)> = Vec::new();
@@ -4378,7 +4325,7 @@ fn render_deck_view(world: &GameWorld) {
         let x = start_x + col as f32 * (card_width + card_spacing);
         let y = start_y + row as f32 * (card_height + card_spacing);
 
-        render_card_preview(&card, x, y, card_width, card_height, false, true);
+        render_card_preview(card, x, y, card_width, card_height, false, true);
 
         if *count > 1 {
             let count_text = format!("x{}", count);
@@ -4432,7 +4379,6 @@ fn deck_view_input_system(world: &mut GameWorld) {
 fn render_shop_offering(
     world: &GameWorld,
     offering: &ShopOffering,
-    _index: usize,
     x: f32,
     y: f32,
     card_width: f32,
@@ -4762,16 +4708,7 @@ fn render_shop(world: &GameWorld) {
     for (index, offering) in offerings.iter().enumerate() {
         let x = start_x + index as f32 * (card_width + spacing);
         let y = start_y;
-        render_shop_offering(
-            world,
-            offering,
-            index,
-            x,
-            y,
-            card_width,
-            card_height,
-            mouse_pos,
-        );
+        render_shop_offering(world, offering, x, y, card_width, card_height, mouse_pos);
     }
 
     let info = "Click card to purchase | ESC to leave";
@@ -4830,12 +4767,12 @@ fn shop_input_system(world: &mut GameWorld) {
                             world.resources.meta_game.shop_offerings.remove(index);
                         }
                     }
-                    ShopOffering::Relic { relic_type, cost } => {
-                        if world.resources.economy.money >= *cost {
-                            world.resources.economy.money -= cost;
-                            world.resources.economy.owned_relics.push(*relic_type);
-                            world.resources.meta_game.shop_offerings.remove(index);
-                        }
+                    ShopOffering::Relic { relic_type, cost }
+                        if world.resources.economy.money >= *cost =>
+                    {
+                        world.resources.economy.money -= cost;
+                        world.resources.economy.owned_relics.push(*relic_type);
+                        world.resources.meta_game.shop_offerings.remove(index);
                     }
                     _ => {}
                 }
@@ -4982,13 +4919,13 @@ fn rest_input_system(world: &mut GameWorld) {
             {
                 match option {
                     RestOption::Heal { amount } => {
-                        if let Some(player_entity) = world.query_entities(PLAYER).next() {
-                            if let Some(player) = world.get_player_mut(player_entity) {
-                                player.health = (player.health + amount).min(player.max_health);
-                                world.resources.combat.current_hp =
-                                    (world.resources.combat.current_hp + amount)
-                                        .min(world.resources.combat.max_hp);
-                            }
+                        if let Some(player_entity) = world.query_entities(PLAYER).next()
+                            && let Some(player) = world.get_player_mut(player_entity)
+                        {
+                            player.health = (player.health + amount).min(player.max_health);
+                            world.resources.combat.current_hp = (world.resources.combat.current_hp
+                                + amount)
+                                .min(world.resources.combat.max_hp);
                         }
                     }
                     RestOption::UpgradeCard => {
@@ -5329,13 +5266,8 @@ fn forge_input_system(world: &mut GameWorld) {
                     && mouse_pos.y <= y + card_height
                 {
                     let cards: Vec<_> = world.query_entities(CARD).collect();
-                    let mut selected_indices: Vec<_> = world
-                        .resources
-                        .meta_game
-                        .forge_selected_cards
-                        .iter()
-                        .cloned()
-                        .collect();
+                    let mut selected_indices: Vec<_> =
+                        world.resources.meta_game.forge_selected_cards.to_vec();
                     selected_indices.sort_by(|a, b| b.cmp(a));
 
                     for card_index in selected_indices {

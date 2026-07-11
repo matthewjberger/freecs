@@ -102,7 +102,7 @@ pub fn main() {
 
     let entities_to_despawn: Vec<Entity> = world
         .query_entities(HEALTH)
-        .filter(|&entity| world.get_health(entity).map_or(false, |h| h.value <= 0.0))
+        .filter(|&entity| world.get_health(entity).is_some_and(|h| h.value <= 0.0))
         .collect();
 
     if entities_to_despawn.is_empty() {

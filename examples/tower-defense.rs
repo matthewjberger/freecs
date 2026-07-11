@@ -1150,7 +1150,9 @@ fn tower_shooting_system(world: &mut GameWorld, delta_time: f32) {
                 tower.fire_animation -= delta_time * 3.0;
             }
 
-            if tower.cooldown <= 0.0 && tower.target.is_some() {
+            if let Some(target) = tower.target
+                && tower.cooldown <= 0.0
+            {
                 let can_fire = if tower.tower_type == TowerType::Sniper {
                     tower.tracking_time >= 2.0
                 } else {
@@ -1158,12 +1160,7 @@ fn tower_shooting_system(world: &mut GameWorld, delta_time: f32) {
                 };
 
                 if can_fire {
-                    projectiles_to_spawn.push((
-                        tower_pos,
-                        tower.target.unwrap(),
-                        tower.tower_type,
-                        tower.level,
-                    ));
+                    projectiles_to_spawn.push((tower_pos, target, tower.tower_type, tower.level));
                     tower.cooldown = tower.tower_type.fire_rate(tower.level);
                     tower.fire_animation = 1.0;
                     tower.tracking_time = 0.0;

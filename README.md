@@ -12,11 +12,13 @@ A high-performance, archetype-based Entity Component System (ECS) for Rust
 
 - Zero-cost abstractions with static dispatch
 - Multi-threaded parallel processing using Rayon (automatically enabled on non-WASM platforms)
-- Sparse set tags that don't fragment archetypes
+- Sparse set tags with deterministic iteration that don't fragment archetypes
 - Command buffers for deferred structural changes
 - Change detection for incremental updates
-- Type-safe double-buffered event system
+- Sequence-numbered event channels with exactly-once cursor consumption
+- Structural change log covering spawns, despawns, component moves, and tag flips
 - Multi-world support for >64 component types with shared entity allocator
+- Plain public data all the way down: tables, allocator, tag sets, and logs are inspectable structs and vecs
 
 The `ecs!` macro generates the entire ECS at compile time using only plain data structures, functions, and zero unsafe code.
 
@@ -36,7 +38,7 @@ Add this to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-freecs = "2.0.1"
+freecs = "3"
 ```
 
 And in `main.rs`:
@@ -97,8 +99,8 @@ pub fn main() {
     // Query all entities
     let _entities = world.get_all_entities();
 
-    // Query all entities with a specific component
-    let _players = world.query_entities(POSITION | VELOCITY | HEALTH);
+    // Query all entities with a specific set of components
+    let _players: Vec<Entity> = world.query_entities(POSITION | VELOCITY | HEALTH).collect();
 
     // Query the first entity with a specific component,
     // returning early instead of checking remaining entities
@@ -174,7 +176,6 @@ mod systems {
     use super::*;
 
     pub fn run_systems(world: &mut World) {
-        // Systems use queries and component accessors
         example_system(world);
         update_positions_system(world);
         collision_handler_system(world);
@@ -182,47 +183,30 @@ mod systems {
     }
 
     fn example_system(world: &mut World) {
-        for entity in world.query_entities(POSITION | VELOCITY) {
-            if let Some(position) = world.get_position_mut(entity) {
-                position.x += 1.0;
-            }
-        }
+        world.query_position_mut(VELOCITY, |_entity, position| {
+            position.x += 1.0;
+        });
     }
 
     fn update_positions_system(world: &mut World) {
         let dt = world.resources.delta_time;
 
-        // Collect entities with their velocities first to avoid borrow conflicts
-        let updates: Vec<(Entity, Velocity)> = world
-            .query_entities(POSITION | VELOCITY)
-            .into_iter()
-            .filter_map(|entity| {
-                world.get_velocity(entity).map(|vel| (entity, *vel))
-            })
-            .collect();
-
-        // Now update positions
-        for (entity, vel) in updates {
-            if let Some(pos) = world.get_position_mut(entity) {
-                pos.x += vel.x * dt;
-                pos.y += vel.y * dt;
-            }
-        }
+        world.for_each_mut(POSITION | VELOCITY, 0, |_entity, table, idx| {
+            table.position[idx].x += table.velocity[idx].x * dt;
+            table.position[idx].y += table.velocity[idx].y * dt;
+        });
     }
 
     fn collision_handler_system(world: &mut World) {
-        // Process collision events
         for event in world.collect_collision() {
             println!("Collision detected between {:?} and {:?}", event.entity_a, event.entity_b);
         }
     }
 
     fn health_system(world: &mut World) {
-        for entity in world.query_entities(HEALTH) {
-            if let Some(health) = world.get_health_mut(entity) {
-                health.value *= 0.98;
-            }
-        }
+        world.query_health_mut(0, |_entity, health| {
+            health.value *= 0.98;
+        });
     }
 }
 ```
@@ -233,13 +217,21 @@ The `ecs!` macro generates type-safe methods for each component:
 
 ```rust
 // For each component, you get:
-world.get_position(entity)        // -> Option<&Position>
-world.get_position_mut(entity)    // -> Option<&mut Position>
-world.modify_position(entity, f)  // -> Option<R> - mutate via closure, returns closure result
-world.set_position(entity, pos)   // Sets or adds the component
-world.add_position(entity)        // Adds with default value
-world.remove_position(entity)     // Removes the component
-world.entity_has_position(entity) // Checks if entity has component
+world.get_position(entity)          // -> Option<&Position>
+world.get_position_mut(entity)      // -> Option<&mut Position>
+world.modify_position(entity, f)    // -> Option<R> - mutate via closure, returns closure result
+world.set_position(entity, pos)     // Sets or adds the component
+world.add_position(entity)          // Adds with default value
+world.remove_position(entity)       // Removes the component
+world.entity_has_position(entity)   // Checks if entity has component
+world.query_position()              // Iterator over &Position across all tables
+world.query_position_mut(mask, f)   // Visit (Entity, &mut Position) for entities matching mask
+world.iter_position(f)              // Visit (Entity, &Position)
+world.iter_position_mut(f)          // Visit (Entity, &mut Position)
+world.for_each_position_mut(f)      // Visit &mut Position only, fastest typed path, no change stamping
+world.par_for_each_position_mut(f)  // Parallel &mut Position (non-WASM)
+world.iter_position_slices()        // Iterator over &[Position], one slice per table
+world.iter_position_slices_mut()    // Iterator over &mut [Position]
 ```
 
 ### Closure-Based Mutation
@@ -271,19 +263,19 @@ Systems are functions that query entities and transform their components:
 
 ```rust
 pub fn update_global_transforms_system(world: &mut World) {
-    world
+    let entities: Vec<Entity> = world
         .query_entities(LOCAL_TRANSFORM | GLOBAL_TRANSFORM)
-        .into_iter()
-        .for_each(|entity| {
-            // The entities we queried for are guaranteed to have
-            // a local transform and global transform here
-            let new_global_transform = query_global_transform(world, entity);
-            let global_transform = world.get_global_transform_mut(entity).unwrap();
-            *global_transform = GlobalTransform(new_global_transform);
-        });
+        .collect();
+    for entity in entities {
+        // The entities we queried for are guaranteed to have
+        // a local transform and global transform here
+        let new_global_transform = query_global_transform(world, entity);
+        let global_transform = world.get_global_transform_mut(entity).unwrap();
+        *global_transform = GlobalTransform(new_global_transform);
+    }
 }
 
-pub fn query_global_transform(world: &World, entity: EntityId) -> nalgebra_glm::Mat4 {
+pub fn query_global_transform(world: &World, entity: Entity) -> nalgebra_glm::Mat4 {
     let Some(local_transform) = world.get_local_transform(entity) else {
         return nalgebra_glm::Mat4::identity();
     };
@@ -295,117 +287,53 @@ pub fn query_global_transform(world: &World, entity: EntityId) -> nalgebra_glm::
 }
 ```
 
-## Batched Processing
+## Events
 
-For performance-critical systems with large numbers of entities, you can batch process components:
+Events are stored in sequence-numbered channels, the same cursor scheme the structural change log uses. Two consumption styles are supported.
+
+**Frame-scoped** consumption reads whatever is buffered. Events stay visible for two frames, then `world.step()` expires them:
 
 ```rust
-fn batched_physics_system(world: &mut World) {
-    let dt = world.resources.delta_time;
-    
-    // Collect entity data
-    let mut entities: Vec<(Entity, Position, Velocity)> = world
-        .query_entities(POSITION | VELOCITY)
-        .into_iter()
-        .filter_map(|entity| {
-            match (world.get_position(entity), world.get_velocity(entity)) {
-                (Some(pos), Some(vel)) => Some((entity, *pos, *vel)),
-                _ => None
-            }
-        })
-        .collect();
-    
-    // Process all entities
-    for (_, pos, vel) in &mut entities {
-        pos.x += vel.x * dt;
-        pos.y += vel.y * dt;
-    }
-    
-    // Write back results
-    for (entity, new_pos, _) in entities {
-        world.set_position(entity, new_pos);
+fn collision_handler_system(world: &mut World) {
+    for event in world.collect_collision() {
+        println!("Collision: {:?} and {:?}", event.entity_a, event.entity_b);
     }
 }
 ```
 
-This approach minimizes borrowing conflicts and can improve performance by processing data in batches.
-
-## Events
-
-Events provide a type-safe way to communicate between systems:
+**Cursor-based** consumption gives each consumer exactly-once delivery. Record the channel sequence after reading, and read everything newer next time. Two systems consuming the same channel never steal from or double-process each other, and a consumer that skips a frame catches up:
 
 ```rust
-ecs! {
-    World {
-        position: Position => POSITION,
-        velocity: Velocity => VELOCITY,
-    }
-    Events {
-        collision: CollisionEvent,
-        damage: DamageEvent,
-    }
+struct RenderSync {
+    collision_cursor: u64,
 }
 
-use events::*;
-mod events {
-    use super::*;
-
-    #[derive(Debug, Clone)]
-    pub struct CollisionEvent {
-        pub entity_a: Entity,
-        pub entity_b: Entity,
+fn render_sync_system(world: &mut World, sync: &mut RenderSync) {
+    for event in world.read_collision_since(sync.collision_cursor) {
+        // Seen exactly once by this consumer
     }
-
-    #[derive(Debug, Clone)]
-    pub struct DamageEvent {
-        pub entity: Entity,
-        pub amount: f32,
-    }
-}
-
-fn physics_system(world: &mut World) {
-    for entity_a in world.query_entities(POSITION) {
-        for entity_b in world.query_entities(POSITION) {
-            if check_collision(entity_a, entity_b) {
-                world.send_collision(CollisionEvent { entity_a, entity_b });
-            }
-        }
-    }
-}
-
-fn damage_system(world: &mut World) {
-    for event in world.collect_collision() {
-        world.send_damage(DamageEvent {
-            entity: event.entity_a,
-            amount: 10.0
-        });
-    }
-}
-
-fn health_system(world: &mut World) {
-    for event in world.collect_damage() {
-        if let Some(health) = world.get_health_mut(event.entity) {
-            health.value -= event.amount;
-        }
-    }
+    sync.collision_cursor = world.sequence_collision();
 }
 ```
 
 Each event type gets these generated methods:
 
 - `send_<event>(event)` - Queue an event
-- `read_<event>()` - Get an iterator over all queued events
-- `collect_<event>()` - Collect events into a Vec (eliminates boilerplate)
-- `peek_<event>()` - Get reference to first event without consuming
-- `drain_<event>()` - Consume all events (takes ownership)
-- `update_<event>()` - Swap buffers (old events cleared, current becomes previous)
-- `clear_<event>()` - Immediately clear all events
-- `len_<event>()` - Get count of all queued events
-- `is_empty_<event>()` - Check if queue is empty
+- `read_<event>()` - Iterator over all buffered events
+- `read_<event>_since(cursor)` - Slice of events sent after `cursor`
+- `sequence_<event>()` - Sequence number of the newest event; record it as your cursor
+- `trim_<event>(up_to_sequence)` - Drop consumed events early (pass the minimum cursor across consumers)
+- `collect_<event>()` - Collect buffered events into a Vec
+- `peek_<event>()` - Reference to the oldest buffered event
+- `update_<event>()` - Expire events older than one frame (called by `step()`)
+- `clear_<event>()` - Immediately drop all buffered events
+- `len_<event>()` / `is_empty_<event>()` - Buffered event count
+
+Channels are bounded: a channel nobody consumes drops its oldest half at `EVENT_CHANNEL_CAPACITY` entries instead of leaking.
 
 ### Game Loop Integration
 
-Call `world.step()` at the end of each frame to handle event cleanup:
+Call `world.step()` at the end of each frame to handle event expiry and the change-detection tick:
 
 ```rust
 loop {
@@ -413,15 +341,13 @@ loop {
     physics_system(&mut world);
     collision_system(&mut world);
 
-    world.step();  // Cleans up events and increments tick counter
+    world.step();  // Expires old events and increments the tick counter
 }
 ```
 
-The `step()` method handles event lifecycle and tick counter automatically. For fine-grained control, you can use `update_<event>()` to update individual event types.
+### Event Lifetime
 
-### Double Buffering
-
-Events use double buffering to prevent systems from missing events in parallel execution. Events persist for 2 frames by default, then auto-clear on the next `step()` call. For immediate clearing, use `clear_<event>()`.
+Events sent during frame N remain readable through frame N+1 and are dropped by the `step()` that ends frame N+1. This preserves the classic double-buffer property: a system scheduled before the sender still sees the event on the next frame. Cursor consumers are unaffected by expiry as long as they read at least every other frame; `read_<event>_since` with a cursor older than the buffer returns everything still buffered.
 
 ## High-Performance Features
 
@@ -433,7 +359,7 @@ For maximum performance, use the query builder which provides direct table acces
 fn physics_update_system(world: &mut World) {
     let dt = world.resources.delta_time;
 
-    world.query()
+    world.query_mut()
         .with(POSITION | VELOCITY)
         .iter(|entity, table, idx| {
             table.position[idx].x += table.velocity[idx].x * dt;
@@ -472,9 +398,11 @@ for entity in world.query_entities(POSITION | VELOCITY) {
 }
 ```
 
+Query iteration allocates nothing per call. Mutable iteration paths maintain a query cache keyed by component mask so repeated queries skip table matching. One asymmetry to know about: the read-only `for_each` can consult the cache but cannot populate it (it takes `&self`), so a mask that has only ever been used read-only falls back to a linear scan over tables. Table counts are small in practice, and any mutable query with the same mask warms the cache for both.
+
 ### Batch Spawning
 
-Spawn multiple entities efficiently (5.5x faster than individual spawns):
+Spawn multiple entities efficiently:
 
 ```rust
 // Method 1: spawn_batch with initialization callback
@@ -495,15 +423,22 @@ let entities = EntityBuilder::new()
 
 ### Single-Component Iteration
 
-Optimized iteration for single components:
+Optimized iteration when you only need one component type:
 
 ```rust
-world.for_each_position(|position| {
-    position.x += 1.0;
+// Entity and component reference
+world.iter_position(|entity, position| {
+    println!("{entity}: ({}, {})", position.x, position.y);
 });
 
-world.for_each_position_mut(|position| {
+// Mutable, marks the component changed for change detection
+world.iter_position_mut(|_entity, position| {
     position.y *= 0.99;
+});
+
+// Component-only fast path, no entity, no change stamping
+world.for_each_position_mut(|position| {
+    position.x += 1.0;
 });
 ```
 
@@ -512,8 +447,6 @@ world.for_each_position_mut(|position| {
 Process large entity counts across multiple CPU cores using Rayon. Parallel iteration is automatically available on non-WASM platforms:
 
 ```rust
-use freecs::rayon::prelude::*;
-
 fn parallel_physics_system(world: &mut World) {
     let dt = world.resources.delta_time;
 
@@ -524,13 +457,15 @@ fn parallel_physics_system(world: &mut World) {
 }
 ```
 
+**Parallelism granularity**: `par_for_each_mut` parallelizes across archetype tables, so a world with two big archetypes gets at most two-way parallelism from it. The single-component variant `par_for_each_<component>_mut` additionally parallelizes within each table and is the better choice when most matching entities live in one archetype.
+
 Best for 100K+ entities with non-trivial per-entity computation. For smaller entity counts, serial iteration may be more efficient due to parallelization overhead.
 
 **Note**: Parallel methods are only available when targeting non-WASM platforms. On WASM targets, use the regular serial iteration methods instead.
 
 ### Sparse Set Tags
 
-Tags are lightweight markers stored in sparse sets rather than archetypes. This means adding/removing tags doesn't trigger archetype migrations, avoiding fragmentation:
+Tags are lightweight markers stored in sparse sets (a dense `Vec<Entity>` plus a sparse index array), not in archetypes. Adding or removing a tag never migrates the entity, membership checks are O(1) array lookups with no hashing, iteration over a tag is contiguous and deterministic, and membership is generation-checked so a stale handle never matches a reused id:
 
 ```rust
 ecs! {
@@ -545,7 +480,8 @@ ecs! {
     }
 }
 
-// Adding tags doesn't move entities between archetypes
+// Adding tags doesn't move entities between archetypes.
+// The entity must be alive; tags on dead handles are refused.
 world.add_player(entity);
 world.add_selected(entity);
 
@@ -554,17 +490,21 @@ if world.has_player(entity) {
     println!("Entity is a player");
 }
 
-// Query entities by component and filter by tag
-for entity in world.query_entities(POSITION | VELOCITY) {
-    if world.has_enemy(entity) {
-        // Process enemies
-    }
+// Iterate a tag directly (deterministic order)
+for entity in world.query_player() {
+    println!("Player entity: {:?}", entity);
 }
+
+// Tags participate in query masks alongside components
+world.for_each_mut(POSITION | VELOCITY, PLAYER, |entity, table, idx| {
+    // Entities with position and velocity that are NOT players
+});
 
 // Remove tags
 world.remove_player(entity);
-world.remove_selected(entity);
 ```
+
+Tag masks occupy the top bits of the `u64`, components fill from the bottom, and the macro asserts at compile time that they fit together. Tag adds and removes are recorded in the structural change log, so incremental consumers see tag flips the same way they see component changes.
 
 Tags are perfect for:
 
@@ -594,39 +534,22 @@ fn death_system(world: &mut World) {
     // Apply all queued commands at once
     world.apply_commands();
 }
-
-fn spawn_system(world: &mut World) {
-    // Queue entity spawns
-    for _ in 0..10 {
-        world.queue_spawn(POSITION | VELOCITY);
-    }
-
-    // Queue component additions
-    for entity in world.query_entities(POSITION) {
-        if should_add_health(entity) {
-            world.queue_add_components(entity, HEALTH);
-        }
-    }
-
-    // Queue component removals
-    for entity in world.query_entities(VELOCITY) {
-        if should_stop(entity) {
-            world.queue_remove_components(entity, VELOCITY);
-        }
-    }
-
-    world.apply_commands();
-}
 ```
 
 Available command buffer operations:
 
-- `queue_spawn(mask)` - Queue entity spawn
-- `queue_despawn_entity(entity)` - Queue entity despawn
+- `queue_spawn_entities(mask, count)` - Queue a batch spawn
+- `queue_despawn_entity(entity)` / `queue_despawn_entities(entities)` - Queue despawns
 - `queue_add_components(entity, mask)` - Queue component addition
 - `queue_remove_components(entity, mask)` - Queue component removal
-- `queue_set_component(entity, component)` - Queue component set/update
+- `queue_set_<component>(entity, value)` - Queue component set/update
+- `queue_add_<tag>(entity)` / `queue_remove_<tag>(entity)` - Queue tag changes
 - `apply_commands()` - Apply all queued commands
+- `command_count()` / `clear_commands()` - Inspect or drop the queue
+
+### Mask Hygiene
+
+Component masks and tag masks share the `u64` but not the same APIs. Spawn masks, `add_components`, `remove_components`, and the mask-only queries (`query_entities`, `query_first_entity`, changed queries) take component bits only; `for_each`, `for_each_mut`, their changed and parallel variants, and `query_<component>_mut` accept tag bits and filter per entity. Passing tag bits where they don't belong is a `debug_assert` failure rather than a silently empty result, so misuse fails loudly in debug builds and costs nothing in release.
 
 ### Change Detection
 
@@ -636,46 +559,41 @@ Track which components have been modified since the last frame. Useful for incre
 fn render_system(world: &mut World) {
     // Process only entities whose components changed since last step()
     world.for_each_mut_changed(POSITION, 0, |entity, table, idx| {
-        // Only processes entities where position changed
         update_sprite_position(&table.position[idx]);
     });
 }
 
-fn network_sync_system(world: &mut World) {
-    // Sync changed entities to network clients
-    world.for_each_mut_changed(POSITION | VELOCITY, 0, |entity, table, idx| {
-        sync_to_network(entity, &table.position[idx], &table.velocity[idx]);
-    });
-}
-
 // At the end of your game loop
-world.step();  // Increments tick counter and swaps event buffers
+world.step();  // Increments tick counter and expires old events
 ```
 
-Mutations through `set_*()`, `get_*_mut()`, and `modify_*()` mark the component slot as changed for the current tick, as do spawns and component add/remove migrations. Raw table access (`query_mut()` closures, slice iterators) does not mark, so route writes through the accessors when you rely on change detection.
+Mutations through `set_*()`, `get_*_mut()`, `modify_*()`, `query_*_mut()`, and `iter_*_mut()` mark the component slot as changed for the current tick, as do spawns and component add/remove migrations. Raw table access (`query_mut()` closures, slice iterators, `for_each_*_mut`) does not mark, so route writes through the accessors when you rely on change detection.
 
 Each table also keeps a per-component high-water tick. Changed queries compare it first and skip whole tables that no write has touched since the last `step()`, so scanning cost is proportional to tables with activity rather than total entity count. Tick comparisons are wrapping-safe, so detection keeps working after the `u32` tick counter overflows.
 
 Multiple independent consumers can track their own change windows with the explicit-cursor variants `query_entities_changed_since(mask, since_tick)` and `for_each_mut_changed_since(include, exclude, since_tick, f)`. Record `current_tick()` when you consume, then call `increment_tick()` to fence, so writes made later in the same tick stamp a newer value and land in your next window.
 
+**Fixed cost**: change tracking stores one `u32` per component per entity plus a tick stamp on every accessor write, whether or not you consume it. That is the price of the feature always being available.
+
 ### Structural Change Log
 
-Change ticks cover component writes. Structural changes (spawns, despawns, component adds and removes) are recorded in a per-world log of plain `StructuralChange` entries: entity, kind, and the component mask involved (the full mask for spawns and despawns, the delta for adds and removes). Consumers read `structural_changes_since(cursor)` against a `u64` sequence cursor they own and record `structural_sequence()` after consuming. The owner of the frame loop calls `trim_structural_log(up_to_sequence)` with the minimum cursor across consumers. A world whose log is never consumed self-clears at `STRUCTURAL_LOG_CAPACITY` entries, so it stays bounded instead of leaking.
+Change ticks cover component writes. Structural changes are recorded in a per-world log of plain `StructuralChange` entries: entity, kind, and the mask involved. Kinds cover `Spawned`, `Despawned`, `ComponentsAdded`, `ComponentsRemoved`, `TagsAdded`, and `TagsRemoved` (the full mask for spawns and despawns, the delta for adds and removes, the tag mask for tag flips). Consumers read `structural_changes_since(cursor)` against a `u64` sequence cursor they own and record `structural_sequence()` after consuming. The owner of the frame loop calls `trim_structural_log(up_to_sequence)` with the minimum cursor across consumers. A world whose log is never consumed self-clears at `STRUCTURAL_LOG_CAPACITY` entries, so it stays bounded instead of leaking.
 
 ```rust
 let mut cursor = 0;
-// ... spawns, despawns, component adds and removes happen ...
+// ... spawns, despawns, component and tag changes happen ...
 for change in world.structural_changes_since(cursor) {
     match change.kind {
         StructuralChangeKind::Spawned | StructuralChangeKind::ComponentsAdded => { /* mask gained */ }
         StructuralChangeKind::Despawned | StructuralChangeKind::ComponentsRemoved => { /* mask lost */ }
+        StructuralChangeKind::TagsAdded | StructuralChangeKind::TagsRemoved => { /* tag mask flipped */ }
     }
 }
 cursor = world.structural_sequence();
 world.trim_structural_log(cursor);
 ```
 
-**Performance note**: Change detection adds a small overhead. Only use it when you need to track changes.
+A despawn is logged as a single `Despawned` entry; the tags an entity held are dropped implicitly rather than logged individually.
 
 ### System Scheduling
 
@@ -706,26 +624,6 @@ fn main() {
         world.step();
     }
 }
-
-fn input_system(world: &mut World) {
-    // Handle input - mutates world state
-}
-
-fn physics_system(world: &mut World) {
-    // Update physics - mutates positions
-}
-
-fn collision_system(world: &mut World) {
-    // Check collisions - sends events
-}
-
-fn render_grid(world: &World) {
-    // Render grid - read-only
-}
-
-fn render_entities(world: &World) {
-    // Render entities - read-only
-}
 ```
 
 **Schedule API**:
@@ -754,6 +652,10 @@ assert_eq!(world.get_position(entities[0]).unwrap().x, 1.0);
 assert_eq!(world.get_position(entities[1]).unwrap().y, 2.0);
 ```
 
+## Entity Liveness
+
+Entity handles are generational, and the allocator is the single source of truth for liveness. Double despawns and despawns through stale handles are refused rather than corrupting the free list, so two live entities can never share an id and generation. `world.is_alive(entity)` answers liveness directly, and `despawn_entities` returns the subset of handles that were actually despawned.
+
 ## Advanced Features
 
 ### Per-Component Iteration
@@ -761,17 +663,17 @@ assert_eq!(world.get_position(entities[1]).unwrap().y, 2.0);
 For iterating over a single component type, specialized methods are generated:
 
 ```rust
-// Read-only iteration
-world.iter_position(|position| {
-    println!("Position: ({}, {})", position.x, position.y);
+// Read-only iteration with the owning entity
+world.iter_position(|entity, position| {
+    println!("{entity}: ({}, {})", position.x, position.y);
 });
 
-// Mutable iteration
-world.iter_position_mut(|position| {
+// Mutable iteration (marks changed)
+world.iter_position_mut(|_entity, position| {
     position.x += 1.0;
 });
 
-// Slice-based iteration (most efficient)
+// Slice-based iteration (most efficient, no change stamping)
 for slice in world.iter_position_slices() {
     for position in slice {
         println!("Position: ({}, {})", position.x, position.y);
@@ -784,78 +686,15 @@ for slice in world.iter_position_slices_mut() {
     }
 }
 
-// Query entities with specific component
-for entity in world.query_position() {
-    println!("Entity with position: {:?}", entity);
-}
-```
-
-### Tag Queries
-
-Query entities by specific tags:
-
-```rust
-// Get all entities with a specific tag
-for entity in world.query_player() {
-    println!("Player entity: {:?}", entity);
+// Iterate component values directly
+for position in world.query_position() {
+    println!("Position: ({}, {})", position.x, position.y);
 }
 
-for entity in world.query_enemy() {
-    if let Some(pos) = world.get_position(entity) {
-        println!("Enemy at ({}, {})", pos.x, pos.y);
-    }
-}
-```
-
-### Advanced Command Buffer Operations
-
-Beyond the basic command buffer operations, you can queue additional operations:
-
-```rust
-// Queue batch spawns
-world.queue_spawn_entities(POSITION | VELOCITY, 100);
-
-// Queue batch despawns
-let entities_to_remove = vec![entity1, entity2, entity3];
-world.queue_despawn_entities(entities_to_remove);
-
-// Queue component sets (generated per component)
-world.queue_set_position(entity, Position { x: 10.0, y: 20.0 });
-world.queue_set_velocity(entity, Velocity { x: 1.0, y: 0.0 });
-
-// Queue tag operations
-world.queue_add_player(entity);
-world.queue_remove_enemy(entity);
-
-// Check command buffer status
-if world.command_count() > 100 {
-    world.apply_commands();
-}
-
-// Clear pending commands without applying
-world.clear_commands();
-```
-
-### Query Builder (Advanced)
-
-The query builder provides a fluent API for complex queries:
-
-```rust
-// Mutable query builder
-world.query_mut()
-    .with(POSITION | VELOCITY)
-    .without(PLAYER)
-    .iter(|entity, table, idx| {
-        table.position[idx].x += table.velocity[idx].x;
-    });
-
-// Read-only query builder
-world.query()
-    .with(POSITION)
-    .without(ENEMY)
-    .iter(|entity, table, idx| {
-        println!("Position: ({}, {})", table.position[idx].x, table.position[idx].y);
-    });
+// Visit a component for entities matching an additional mask (components or tags)
+world.query_position_mut(VELOCITY | PLAYER, |entity, position| {
+    // Position of every player that also has velocity; marks position changed
+});
 ```
 
 ### Low-Level Iteration
@@ -863,7 +702,7 @@ world.query()
 For maximum control, use the low-level iteration methods:
 
 ```rust
-// Read-only iteration with include/exclude masks
+// Read-only iteration with include/exclude masks (tags allowed in both)
 world.for_each(POSITION | VELOCITY, PLAYER, |entity, table, idx| {
     let pos = &table.position[idx];
     let vel = &table.velocity[idx];
@@ -899,28 +738,6 @@ world.for_each_mut_changed(POSITION, 0, |entity, table, idx| {
 world.step();
 ```
 
-### Event Peeking
-
-Preview events without consuming them:
-
-```rust
-// Peek at the first event
-if let Some(event) = world.peek_collision() {
-    println!("Next collision: {:?} and {:?}", event.entity_a, event.entity_b);
-}
-
-// Check if events exist
-if !world.is_empty_collision() {
-    let count = world.len_collision();
-    println!("Processing {} collision events", count);
-}
-
-// Drain events (takes ownership)
-for event in world.drain_collision() {
-    process_collision(event);
-}
-```
-
 ## Conditional Compilation
 
 Both components and resources support `#[cfg(...)]` attributes for conditional compilation. This is useful for debug-only components, optional features, or platform-specific functionality:
@@ -944,6 +761,10 @@ ecs! {
 ```
 
 When a component or resource has a `#[cfg(...)]` attribute, all related generated code (struct fields, accessor methods, mask constants, enum variants, etc.) is conditionally compiled based on the feature flag or target configuration.
+
+## Cargo Features
+
+- `serde` (default): derives `Serialize`/`Deserialize` on `Entity`. Disable with `default-features = false` if you don't need it.
 
 ## Multi-World ECS
 
@@ -998,13 +819,39 @@ core_world.for_each(POSITION, 0, |entity, table, idx| {
     }
 });
 
-// Despawn cascades across all worlds
+// Despawn cascades across all worlds; returns false for stale handles
 ecs.despawn(entity);
 ```
 
-Tags, events, resources, command buffers, and `Schedule` all work identically in multi-world mode. Mask constants (e.g. `POSITION`, `SPRITE`) are globally unique across worlds. Each world numbers its components independently starting at bit 0.
+Despawning is safe against reuse: `despawn` refuses stale or already-despawned handles (returning `false`), and stale handles cannot re-add components in any world, including worlds that never stored the entity.
+
+Tags, events, resources, command buffers, and `Schedule` all work identically in multi-world mode, and the ECS keeps its own lifecycle log (`structural_changes_since` on the ECS) covering spawns, despawns, and tag flips, while each world logs its own component-level changes.
+
+One asymmetry: per-world query masks contain only that world's component bits, so tags cannot appear in per-world masks (this is asserted in debug builds). Tag filtering in multi-world uses the tag-set variants with split borrows:
+
+```rust
+let GameEcs { core_world, player, .. } = &ecs;
+core_world.for_each_with_tags(POSITION, 0, &[player], &[], |entity, table, idx| {
+    // Entities with position that carry the player tag
+});
+```
+
+Component mask constants (e.g. `POSITION`, `SPRITE`) have globally unique names but each world numbers its components independently starting at bit 0, so never mix masks from different worlds in one query.
 
 Single-world syntax remains unchanged. Multi-world is detected by the presence of multiple `Ident { ... }` blocks inside the first group.
+
+## Migrating from 2.x
+
+3.0 is a breaking release. The changes that affect user code:
+
+- `drain_<event>()` is gone; use `collect_<event>()` plus `clear_<event>()`, or better, the cursor API (`read_<event>_since` / `sequence_<event>`).
+- Tags are `SparseTagSet` instead of `HashSet<Entity>`: `contains(entity)` takes the entity by value, and tag adds require a live entity.
+- Tag mask values moved to the top bits of the `u64`. Constants are opaque, so this only matters for masks you serialized.
+- Multi-world `despawn` returns `bool`, and `EntityAllocator::deallocate` returns `bool` (false for stale or double frees).
+- Multi-world `remove_entity` is now `retire_entity` and is generation-safe.
+- The single-world `Component` enum is now named `<World>Component`, and `COMPONENT_COUNT` is `<WORLD>_COMPONENT_COUNT` (components only, tags are counted separately).
+- Passing tag bits to spawn masks, `add_components`/`remove_components`, or the mask-only queries is a `debug_assert` failure instead of silent misbehavior.
+- `serde` support is now behind the (default-on) `serde` feature.
 
 ## License
 

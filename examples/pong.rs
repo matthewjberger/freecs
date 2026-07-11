@@ -151,10 +151,10 @@ fn ball_collision(world: &mut World, ball: Entity) {
     let pos = *world.get_position(ball).unwrap();
     let ball_data = *world.get_ball(ball).unwrap();
 
-    if pos.y - ball_data.radius <= 0.0 || pos.y + ball_data.radius >= screen_height() {
-        if let Some(vel) = world.get_velocity_mut(ball) {
-            vel.y = -vel.y;
-        }
+    if (pos.y - ball_data.radius <= 0.0 || pos.y + ball_data.radius >= screen_height())
+        && let Some(vel) = world.get_velocity_mut(ball)
+    {
+        vel.y = -vel.y;
     }
 }
 
@@ -175,12 +175,11 @@ fn ball_paddle_collision(world: &mut World, ball: Entity, paddles: &[Entity]) {
             && ball_pos.x - ball_data.radius <= paddle_right
             && ball_pos.y + ball_data.radius >= paddle_top
             && ball_pos.y - ball_data.radius <= paddle_bottom
+            && let Some(vel) = world.get_velocity_mut(ball)
         {
-            if let Some(vel) = world.get_velocity_mut(ball) {
-                vel.x = -vel.x;
-                vel.x *= 1.05;
-                vel.y += (ball_pos.y - paddle_pos.y) * 2.0;
-            }
+            vel.x = -vel.x;
+            vel.x *= 1.05;
+            vel.y += (ball_pos.y - paddle_pos.y) * 2.0;
         }
     }
 }
