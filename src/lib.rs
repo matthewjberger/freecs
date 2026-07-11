@@ -467,29 +467,64 @@ impl std::fmt::Display for Entity {
     }
 }
 
+/// Allocates generational entity handles and tracks which handles are live.
+///
+/// Liveness is authoritative here: `deallocate` refuses stale or already-freed
+/// handles, so an id can never enter the free list twice and two live entities
+/// can never share an id and generation.
 #[derive(Default)]
 pub struct EntityAllocator {
     pub next_id: u32,
     pub free_ids: Vec<(u32, u32)>,
+    generations: Vec<u32>,
+    alive: Vec<u64>,
 }
 
 impl EntityAllocator {
     pub fn allocate(&mut self) -> Entity {
-        if let Some((id, next_gen)) = self.free_ids.pop() {
+        let entity = if let Some((id, next_generation)) = self.free_ids.pop() {
             Entity {
                 id,
-                generation: next_gen,
+                generation: next_generation,
             }
         } else {
             let id = self.next_id;
             self.next_id += 1;
             Entity { id, generation: 0 }
-        }
+        };
+        self.ensure_capacity(entity.id);
+        self.generations[entity.id as usize] = entity.generation;
+        self.alive[entity.id as usize / 64] |= 1 << (entity.id as usize % 64);
+        entity
     }
 
-    pub fn deallocate(&mut self, entity: Entity) {
+    /// Frees the handle if it is currently live. Returns false for stale
+    /// generations and double frees, leaving the allocator untouched.
+    pub fn deallocate(&mut self, entity: Entity) -> bool {
+        if !self.is_alive(entity) {
+            return false;
+        }
+        self.alive[entity.id as usize / 64] &= !(1 << (entity.id as usize % 64));
         self.free_ids
             .push((entity.id, entity.generation.wrapping_add(1)));
+        true
+    }
+
+    pub fn is_alive(&self, entity: Entity) -> bool {
+        let index = entity.id as usize;
+        index / 64 < self.alive.len()
+            && self.alive[index / 64] & (1 << (index % 64)) != 0
+            && self.generations[index] == entity.generation
+    }
+
+    fn ensure_capacity(&mut self, id: u32) {
+        let index = id as usize;
+        if index >= self.generations.len() {
+            self.generations.resize(index + 1, 0);
+        }
+        if index / 64 >= self.alive.len() {
+            self.alive.resize(index / 64 + 1, 0);
+        }
     }
 }
 
@@ -1501,12 +1536,14 @@ macro_rules! ecs_impl {
                             let table_idx = loc.table_index as usize;
                             let array_idx = loc.array_index as usize;
 
-                            let next_gen = loc.generation.wrapping_add(1);
+                            if !self.allocator.deallocate(entity) {
+                                continue;
+                            }
+                            let next_gen = entity.generation.wrapping_add(1);
                             self.entity_locations.mark_deallocated(entity.id);
                             if let Some(loc) = self.entity_locations.get_mut(entity.id) {
                                 loc.generation = next_gen;
                             }
-                            self.allocator.free_ids.push((entity.id, next_gen));
 
                             tables_to_update.push((table_idx, array_idx));
                             despawned.push(entity);
@@ -4010,10 +4047,13 @@ macro_rules! ecs_multi_impl {
                     entities
                 }
 
-                pub fn despawn(&mut self, entity: $crate::Entity) {
+                pub fn despawn(&mut self, entity: $crate::Entity) -> bool {
+                    if !self.allocator.deallocate(entity) {
+                        return false;
+                    }
                     $(self.[<$world_name:snake>].remove_entity(entity);)+
                     $(self.$tag_name.remove(&entity);)*
-                    self.allocator.deallocate(entity);
+                    true
                 }
 
                 pub fn despawn_entities(&mut self, entities: &[$crate::Entity]) {
@@ -5271,6 +5311,60 @@ mod tests {
         assert!(crate::tick_is_newer(0, u32::MAX));
         assert!(crate::tick_is_newer(5, u32::MAX - 3));
         assert!(!crate::tick_is_newer(u32::MAX, 0));
+    }
+
+    #[test]
+    fn test_allocator_liveness() {
+        let mut allocator = EntityAllocator::default();
+
+        let entity = allocator.allocate();
+        assert!(allocator.is_alive(entity));
+
+        assert!(allocator.deallocate(entity));
+        assert!(!allocator.is_alive(entity));
+        assert!(!allocator.deallocate(entity), "double free must be refused");
+
+        let reused = allocator.allocate();
+        assert_eq!(reused.id, entity.id);
+        assert_eq!(reused.generation, entity.generation + 1);
+        assert!(allocator.is_alive(reused));
+        assert!(!allocator.is_alive(entity));
+
+        assert!(
+            !allocator.deallocate(entity),
+            "stale free must not kill the reused id"
+        );
+        assert!(allocator.is_alive(reused));
+
+        let other = allocator.allocate();
+        assert_ne!((other.id, other.generation), (reused.id, reused.generation));
+    }
+
+    #[test]
+    fn test_single_world_double_despawn() {
+        let mut world = World::default();
+        let entity = world.spawn_entities(POSITION, 1)[0];
+
+        assert_eq!(world.despawn_entities(&[entity]).len(), 1);
+        assert!(world.despawn_entities(&[entity]).is_empty());
+        assert!(world.despawn_entities(&[entity, entity]).is_empty());
+
+        let e1 = world.spawn_entities(POSITION, 1)[0];
+        let e2 = world.spawn_entities(POSITION, 1)[0];
+        assert_ne!((e1.id, e1.generation), (e2.id, e2.generation));
+    }
+
+    #[test]
+    fn test_single_world_duplicate_despawn_in_one_call() {
+        let mut world = World::default();
+        let entity = world.spawn_entities(POSITION, 1)[0];
+
+        let despawned = world.despawn_entities(&[entity, entity, entity]);
+        assert_eq!(despawned.len(), 1);
+
+        let e1 = world.spawn_entities(POSITION, 1)[0];
+        let e2 = world.spawn_entities(POSITION, 1)[0];
+        assert_ne!((e1.id, e1.generation), (e2.id, e2.generation));
     }
 
     #[test]
@@ -7634,6 +7728,69 @@ mod tests {
             assert!(ecs.render_world.get_color(entities[0]).is_some());
             assert!(ecs.core_world.get_position(entities[0]).is_none());
             assert!(ecs.render_world.get_sprite(entities[0]).is_none());
+        }
+
+        #[test]
+        fn test_multi_world_double_despawn_is_rejected() {
+            let mut ecs = GameEcs::default();
+            let entity = ecs.spawn();
+            ecs.core_world.set_position(entity, Position::default());
+
+            assert!(ecs.despawn(entity));
+            assert!(!ecs.despawn(entity));
+
+            let e1 = ecs.spawn();
+            let e2 = ecs.spawn();
+            assert_ne!(
+                (e1.id, e1.generation),
+                (e2.id, e2.generation),
+                "double despawn must never mint two identical live handles"
+            );
+
+            ecs.core_world.set_position(e1, Position { x: 1.0, y: 0.0 });
+            ecs.core_world.set_position(e2, Position { x: 2.0, y: 0.0 });
+            assert_eq!(ecs.core_world.get_position(e1).unwrap().x, 1.0);
+            assert_eq!(ecs.core_world.get_position(e2).unwrap().x, 2.0);
+        }
+
+        #[test]
+        fn test_multi_world_componentless_double_despawn_is_rejected() {
+            let mut ecs = GameEcs::default();
+            let entity = ecs.spawn();
+
+            assert!(ecs.despawn(entity));
+            assert!(!ecs.despawn(entity));
+
+            let e1 = ecs.spawn();
+            let e2 = ecs.spawn();
+            assert_ne!((e1.id, e1.generation), (e2.id, e2.generation));
+        }
+
+        #[test]
+        fn test_multi_world_stale_despawn_cannot_kill_reused_id() {
+            let mut ecs = GameEcs::default();
+            let old = ecs.spawn();
+            ecs.core_world.set_position(old, Position::default());
+            assert!(ecs.despawn(old));
+
+            let reused = ecs.spawn();
+            assert_eq!(reused.id, old.id);
+            ecs.core_world
+                .set_position(reused, Position { x: 7.0, y: 0.0 });
+
+            assert!(!ecs.despawn(old), "stale handle must not despawn anything");
+            assert_eq!(
+                ecs.core_world.get_position(reused).unwrap().x,
+                7.0,
+                "live entity must survive a stale despawn attempt"
+            );
+
+            let fresh = ecs.spawn();
+            assert_ne!(
+                (fresh.id, fresh.generation),
+                (reused.id, reused.generation),
+                "stale despawn must not recycle a live handle"
+            );
         }
     }
 }
