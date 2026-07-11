@@ -415,10 +415,14 @@
 //!     println!("Processing {} events", count);
 //! }
 //!
-//! // Drain events (takes ownership)
-//! for event in world.drain_collision() {
+//! // Cursor-based, exactly-once consumption: record where you left off,
+//! // read everything newer, then advance your cursor.
+//! let mut cursor = 0;
+//! for event in world.read_collision_since(cursor) {
 //!     // Process event
 //! }
+//! cursor = world.sequence_collision();
+//! assert!(world.read_collision_since(cursor).is_empty());
 //! ```
 //!
 //! ## Conditional Compilation
@@ -710,121 +714,143 @@ pub struct StructuralChange {
     pub mask: u64,
 }
 
-/// Double-buffered event queue for inter-system communication.
+/// Backstop for event channels whose events are never consumed or expired.
+/// When the buffer reaches this length the oldest events are dropped, so a
+/// channel with no consumer stays bounded instead of leaking.
+pub const EVENT_CHANNEL_CAPACITY: usize = 262_144;
+
+/// A sequence-numbered event channel for inter-system communication.
 ///
-/// Events persist for 2 frames to prevent systems from missing events
-/// during execution. Call [`update()`](EventQueue::update) between frames to swap buffers.
+/// Events live in one flat `Vec` and every event gets a monotonically
+/// increasing sequence number, the same cursor scheme the structural log
+/// uses. Two consumption styles are supported:
+///
+/// - **Frame-scoped**: [`read()`](EventChannel::read) sees every buffered
+///   event, and [`update()`](EventChannel::update) once per frame expires
+///   events after they have been visible for two frames, matching the old
+///   double-buffer lifetime.
+/// - **Cursor-based, exactly-once**: each consumer records
+///   [`sequence()`](EventChannel::sequence) after reading
+///   [`events_since(cursor)`](EventChannel::events_since). Multiple consumers
+///   each see every event exactly once, and a consumer that skips a frame
+///   catches up instead of double-processing or missing events.
 ///
 /// # Examples
 ///
 /// ```
-/// use freecs::EventQueue;
+/// use freecs::EventChannel;
 ///
 /// #[derive(Debug, Clone)]
 /// struct DamageEvent { amount: i32 }
 ///
-/// let mut queue = EventQueue::new();
+/// let mut channel = EventChannel::new();
 ///
-/// queue.send(DamageEvent { amount: 10 });
-/// assert_eq!(queue.len(), 1);
+/// channel.send(DamageEvent { amount: 10 });
+/// assert_eq!(channel.len(), 1);
 ///
-/// for event in queue.read() {
-///     println!("Damage: {}", event.amount);
-/// }
+/// let mut cursor = 0;
+/// let seen = channel.events_since(cursor);
+/// assert_eq!(seen.len(), 1);
+/// cursor = channel.sequence();
 ///
-/// queue.update();
-/// assert_eq!(queue.len(), 1, "Event persists after first update");
+/// assert!(channel.events_since(cursor).is_empty(), "cursor consumers see each event once");
 ///
-/// queue.update();
-/// assert_eq!(queue.len(), 0, "Event cleared after second update");
+/// channel.update();
+/// assert_eq!(channel.len(), 1, "event persists after first update");
+///
+/// channel.update();
+/// assert_eq!(channel.len(), 0, "event expired after second update");
 /// ```
 #[derive(Clone)]
-pub struct EventQueue<T> {
-    current: Vec<T>,
-    previous: Vec<T>,
+pub struct EventChannel<T> {
+    pub events: Vec<T>,
+    pub base_sequence: u64,
+    pub previous_update_sequence: u64,
 }
 
-impl<T> Default for EventQueue<T> {
+impl<T> Default for EventChannel<T> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<T> EventQueue<T> {
-    /// Creates a new empty event queue.
+impl<T> EventChannel<T> {
     pub fn new() -> Self {
         Self {
-            current: Vec::new(),
-            previous: Vec::new(),
+            events: Vec::new(),
+            base_sequence: 0,
+            previous_update_sequence: 0,
         }
     }
 
-    /// Sends an event to the queue.
-    ///
-    /// The event will be available for reading until two [`update()`](EventQueue::update) calls have been made.
+    /// Sends an event. It stays readable until it expires two `update()`
+    /// calls later or a cursor consumer trims past it.
     pub fn send(&mut self, event: T) {
-        #[cfg(debug_assertions)]
-        {
-            const WARN_THRESHOLD: usize = 10000;
-            let total = self.len();
-            if total > WARN_THRESHOLD {
-                eprintln!(
-                    "WARNING: EventQueue has {} events. Did you forget to call update()?",
-                    total
-                );
-            }
+        if self.events.len() >= EVENT_CHANNEL_CAPACITY {
+            let half = self.events.len() / 2;
+            self.events.drain(..half);
+            self.base_sequence += half as u64;
         }
-        self.current.push(event);
+        self.events.push(event);
     }
 
-    /// Returns an iterator over all events in both buffers (previous frame, then current frame).
-    ///
-    /// Events are yielded in the order they were sent, with previous frame events first.
+    /// The sequence number of the most recently sent event. Record this as
+    /// your cursor after consuming `events_since`.
+    pub fn sequence(&self) -> u64 {
+        self.base_sequence + self.events.len() as u64
+    }
+
+    /// All buffered events sent after `cursor`, oldest first. A cursor older
+    /// than the buffer yields everything still buffered.
+    pub fn events_since(&self, cursor: u64) -> &[T] {
+        let start = cursor
+            .saturating_sub(self.base_sequence)
+            .min(self.events.len() as u64) as usize;
+        &self.events[start..]
+    }
+
+    /// Returns an iterator over every buffered event, oldest first.
     pub fn read(&self) -> impl Iterator<Item = &T> {
-        self.previous.iter().chain(self.current.iter())
+        self.events.iter()
     }
 
-    /// Returns a reference to the first event without consuming it, if any exists.
+    /// Returns a reference to the oldest buffered event, if any.
     pub fn peek(&self) -> Option<&T> {
-        self.previous.first().or_else(|| self.current.first())
+        self.events.first()
     }
 
-    /// Drains all events from both buffers, returning an iterator that takes ownership.
-    ///
-    /// After calling this, the queue will be empty.
-    pub fn drain(&mut self) -> impl Iterator<Item = T> + '_ {
-        self.previous.drain(..).chain(self.current.drain(..))
+    /// Drops all events up to and including `up_to_sequence`. Call with the
+    /// minimum cursor across consumers to reclaim memory early.
+    pub fn trim(&mut self, up_to_sequence: u64) {
+        let drop_count = up_to_sequence
+            .saturating_sub(self.base_sequence)
+            .min(self.events.len() as u64) as usize;
+        self.events.drain(..drop_count);
+        self.base_sequence += drop_count as u64;
     }
 
-    /// Swaps the event buffers and clears old events.
-    ///
-    /// After calling this:
-    /// - Events from the previous frame are cleared
-    /// - Events from the current frame become the previous frame
-    /// - The current frame is empty
-    ///
-    /// Call this once per frame to maintain the 2-frame event lifetime.
+    /// Expires events that have now been visible for two frames. Call once
+    /// per frame; `step()` on a generated world does this for every channel.
     pub fn update(&mut self) {
-        self.previous.clear();
-        std::mem::swap(&mut self.current, &mut self.previous);
+        let expire = self.previous_update_sequence;
+        self.trim(expire);
+        self.previous_update_sequence = self.sequence();
     }
 
-    /// Immediately clears all events from both buffers.
-    ///
-    /// Unlike [`update()`](EventQueue::update), this discards events immediately without the 2-frame persistence.
+    /// Immediately drops every buffered event, advancing past them.
     pub fn clear(&mut self) {
-        self.current.clear();
-        self.previous.clear();
+        let sequence = self.sequence();
+        self.trim(sequence);
     }
 
-    /// Returns the total number of events in both buffers.
+    /// Returns the number of buffered events.
     pub fn len(&self) -> usize {
-        self.current.len() + self.previous.len()
+        self.events.len()
     }
 
-    /// Returns `true` if both buffers are empty.
+    /// Returns `true` if no events are buffered.
     pub fn is_empty(&self) -> bool {
-        self.current.is_empty() && self.previous.is_empty()
+        self.events.is_empty()
     }
 }
 
@@ -2573,7 +2599,7 @@ macro_rules! ecs_impl {
                 pub structural_sequence: u64,
                 $(pub $tag_name: $crate::SparseTagSet,)*
                 pub command_buffer: Vec<Command>,
-                $(pub $event_name: $crate::EventQueue<$event_type>,)*
+                $(pub $event_name: $crate::EventChannel<$event_type>,)*
             }
         }
 
@@ -2880,8 +2906,16 @@ macro_rules! ecs_impl {
                         self.$event_name.read()
                     }
 
-                    pub fn [<drain_ $event_name>](&mut self) -> impl Iterator<Item = $event_type> + '_ {
-                        self.$event_name.drain()
+                    pub fn [<read_ $event_name _since>](&self, cursor: u64) -> &[$event_type] {
+                        self.$event_name.events_since(cursor)
+                    }
+
+                    pub fn [<sequence_ $event_name>](&self) -> u64 {
+                        self.$event_name.sequence()
+                    }
+
+                    pub fn [<trim_ $event_name>](&mut self, up_to_sequence: u64) {
+                        self.$event_name.trim(up_to_sequence);
                     }
 
                     pub fn [<clear_ $event_name>](&mut self) {
@@ -3341,7 +3375,7 @@ macro_rules! ecs_multi_impl {
                 pub resources: $resources,
                 $(pub $tag_name: $crate::SparseTagSet,)*
                 pub command_buffer: Vec<Command>,
-                $(pub $event_name: $crate::EventQueue<$event_type>,)*
+                $(pub $event_name: $crate::EventChannel<$event_type>,)*
                 pub structural_log: Vec<$crate::StructuralChange>,
                 pub structural_sequence: u64,
             }
@@ -3449,8 +3483,16 @@ macro_rules! ecs_multi_impl {
                         self.$event_name.read()
                     }
 
-                    pub fn [<drain_ $event_name>](&mut self) -> impl Iterator<Item = $event_type> + '_ {
-                        self.$event_name.drain()
+                    pub fn [<read_ $event_name _since>](&self, cursor: u64) -> &[$event_type] {
+                        self.$event_name.events_since(cursor)
+                    }
+
+                    pub fn [<sequence_ $event_name>](&self) -> u64 {
+                        self.$event_name.sequence()
+                    }
+
+                    pub fn [<trim_ $event_name>](&mut self, up_to_sequence: u64) {
+                        self.$event_name.trim(up_to_sequence);
                     }
 
                     pub fn [<clear_ $event_name>](&mut self) {
@@ -4696,6 +4738,75 @@ mod tests {
 
         let other = allocator.allocate();
         assert_ne!((other.id, other.generation), (reused.id, reused.generation));
+    }
+
+    #[test]
+    fn test_event_channel_cursor_consumers() {
+        let mut channel: EventChannel<u32> = EventChannel::new();
+        channel.send(1);
+        channel.send(2);
+
+        let mut cursor_a = 0;
+        let mut cursor_b = 0;
+
+        assert_eq!(channel.events_since(cursor_a), &[1, 2]);
+        cursor_a = channel.sequence();
+
+        channel.send(3);
+        assert_eq!(channel.events_since(cursor_a), &[3]);
+        cursor_a = channel.sequence();
+
+        assert_eq!(channel.events_since(cursor_b), &[1, 2, 3]);
+        cursor_b = channel.sequence();
+
+        assert!(channel.events_since(cursor_a).is_empty());
+        assert!(channel.events_since(cursor_b).is_empty());
+    }
+
+    #[test]
+    fn test_event_channel_two_frame_expiry() {
+        let mut channel: EventChannel<u32> = EventChannel::new();
+        channel.send(1);
+
+        channel.update();
+        assert_eq!(channel.len(), 1, "event survives its first frame boundary");
+
+        channel.send(2);
+        channel.update();
+        assert_eq!(
+            channel.events_since(0),
+            &[2],
+            "first event expired, second survives"
+        );
+
+        channel.update();
+        assert!(channel.is_empty());
+    }
+
+    #[test]
+    fn test_event_channel_trim_and_lagging_cursor() {
+        let mut channel: EventChannel<u32> = EventChannel::new();
+        for value in 0..10 {
+            channel.send(value);
+        }
+
+        channel.trim(4);
+        assert_eq!(channel.len(), 6);
+        assert_eq!(
+            channel.events_since(0),
+            &[4, 5, 6, 7, 8, 9],
+            "a lagging cursor sees everything still buffered"
+        );
+        assert_eq!(channel.events_since(7), &[7, 8, 9]);
+        assert_eq!(channel.sequence(), 10);
+
+        channel.clear();
+        assert!(channel.is_empty());
+        assert_eq!(
+            channel.sequence(),
+            10,
+            "clearing advances past events without reusing sequences"
+        );
     }
 
     #[test]
@@ -7089,6 +7200,28 @@ mod tests {
             let core_changes = ecs.core_world.structural_changes_since(0);
             assert_eq!(core_changes.len(), 2);
             assert_eq!(core_changes[1].kind, StructuralChangeKind::Despawned);
+        }
+
+        #[test]
+        fn test_multi_world_event_cursor() {
+            let mut ecs = GameEcs::default();
+            let entity = ecs.spawn();
+
+            ecs.send_collision(CollisionEvent {
+                entity_a: entity,
+                entity_b: entity,
+            });
+
+            let mut cursor = 0;
+            assert_eq!(ecs.read_collision_since(cursor).len(), 1);
+            cursor = ecs.sequence_collision();
+            assert!(ecs.read_collision_since(cursor).is_empty());
+
+            ecs.send_collision(CollisionEvent {
+                entity_a: entity,
+                entity_b: entity,
+            });
+            assert_eq!(ecs.read_collision_since(cursor).len(), 1);
         }
 
         #[test]

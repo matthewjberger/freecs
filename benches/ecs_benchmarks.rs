@@ -1196,7 +1196,7 @@ fn bench_events(c: &mut Criterion) {
         });
     });
 
-    group.bench_function("drain_events", |b| {
+    group.bench_function("read_events_since_cursor", |b| {
         b.iter(|| {
             let mut world = World::default();
             let entities = world.spawn_batch(HEALTH, 10000, |_table, _idx| {});
@@ -1208,8 +1208,10 @@ fn bench_events(c: &mut Criterion) {
                 });
             }
 
-            let events = world.drain_damage_event();
-            black_box(events.count());
+            let events = world.read_damage_event_since(0);
+            black_box(events.len());
+            let cursor = world.sequence_damage_event();
+            world.trim_damage_event(cursor);
         });
     });
 
