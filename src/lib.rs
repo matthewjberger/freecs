@@ -1400,6 +1400,11 @@ macro_rules! ecs_impl {
             )*
 
             pub fn spawn_entities(&mut self, mask: u64, count: usize) -> Vec<$crate::Entity> {
+                debug_assert_eq!(
+                    mask & ALL_TAGS_MASK,
+                    0,
+                    "spawn masks must not contain tag bits; add tags after spawning"
+                );
                 let mut entities = Vec::with_capacity(count);
                 let table_index = get_or_create_table(self, mask);
                 let start_index = self.tables[table_index].entity_indices.len();
@@ -1446,6 +1451,11 @@ macro_rules! ecs_impl {
             where
                 F: FnMut(&mut ComponentArrays, usize),
             {
+                debug_assert_eq!(
+                    mask & ALL_TAGS_MASK,
+                    0,
+                    "spawn masks must not contain tag bits; add tags after spawning"
+                );
                 let table_index = get_or_create_table(self, mask);
                 let start_index = self.tables[table_index].entity_indices.len();
 
@@ -1492,6 +1502,11 @@ macro_rules! ecs_impl {
             }
 
             pub fn query_entities(&self, mask: u64) -> EntityQueryIter<'_> {
+                debug_assert_eq!(
+                    mask & ALL_TAGS_MASK,
+                    0,
+                    "query_entities takes component masks only; use for_each or query_<tag> for tag filtering"
+                );
                 EntityQueryIter {
                     tables: &self.tables,
                     mask,
@@ -1505,6 +1520,11 @@ macro_rules! ecs_impl {
             }
 
             pub fn query_entities_changed_since(&self, mask: u64, since_tick: u32) -> ChangedEntityQueryIter<'_> {
+                debug_assert_eq!(
+                    mask & ALL_TAGS_MASK,
+                    0,
+                    "changed queries take component masks only; use for_each_mut_changed for tag filtering"
+                );
                 ChangedEntityQueryIter {
                     tables: &self.tables,
                     mask,
@@ -1515,6 +1535,11 @@ macro_rules! ecs_impl {
             }
 
             pub fn query_first_entity(&self, mask: u64) -> Option<$crate::Entity> {
+                debug_assert_eq!(
+                    mask & ALL_TAGS_MASK,
+                    0,
+                    "query_first_entity takes component masks only"
+                );
                 for table in &self.tables {
                     if table.mask & mask != mask {
                         continue;
@@ -1627,6 +1652,11 @@ macro_rules! ecs_impl {
             }
 
             pub fn add_components(&mut self, entity: $crate::Entity, mask: u64) -> bool {
+                debug_assert_eq!(
+                    mask & ALL_TAGS_MASK,
+                    0,
+                    "component masks must not contain tag bits; use add_<tag> for tags"
+                );
                 if let Some((table_index, array_index)) = get_location(&self.entity_locations, entity) {
                     self.add_components_at(entity, mask, table_index, array_index);
                     true
@@ -1636,6 +1666,11 @@ macro_rules! ecs_impl {
             }
 
             pub fn remove_components(&mut self, entity: $crate::Entity, mask: u64) -> bool {
+                debug_assert_eq!(
+                    mask & ALL_TAGS_MASK,
+                    0,
+                    "component masks must not contain tag bits; use remove_<tag> for tags"
+                );
                 if let Some((table_index, array_index)) = get_location(&self.entity_locations, entity) {
                     let current_mask = self.tables[table_index].mask;
                     if current_mask & mask == 0 {
@@ -1818,6 +1853,11 @@ macro_rules! ecs_impl {
             }
 
             pub fn queue_spawn_entities(&mut self, mask: u64, count: usize) {
+                debug_assert_eq!(
+                    mask & ALL_TAGS_MASK,
+                    0,
+                    "spawn masks must not contain tag bits; use queue_add_<tag> for tags"
+                );
                 self.command_buffer.push(Command::SpawnEntities { mask, count });
             }
 
@@ -1830,10 +1870,20 @@ macro_rules! ecs_impl {
             }
 
             pub fn queue_add_components(&mut self, entity: $crate::Entity, mask: u64) {
+                debug_assert_eq!(
+                    mask & ALL_TAGS_MASK,
+                    0,
+                    "component masks must not contain tag bits; use queue_add_<tag> for tags"
+                );
                 self.command_buffer.push(Command::AddComponents { entity, mask });
             }
 
             pub fn queue_remove_components(&mut self, entity: $crate::Entity, mask: u64) {
+                debug_assert_eq!(
+                    mask & ALL_TAGS_MASK,
+                    0,
+                    "component masks must not contain tag bits; use queue_remove_<tag> for tags"
+                );
                 self.command_buffer.push(Command::RemoveComponents { entity, mask });
             }
 
@@ -1908,17 +1958,31 @@ macro_rules! ecs_impl {
                     where
                         F: FnMut($crate::Entity, &mut $type),
                     {
-                        let table_indices: Vec<usize> = self.get_cached_tables(mask).to_vec();
+                        let component_include = (mask & !ALL_TAGS_MASK) | $mask;
+                        let tag_include = mask & ALL_TAGS_MASK;
+                        let current_tick = self.current_tick;
+                        let table_indices: Vec<usize> = self.get_cached_tables(component_include).to_vec();
 
                         for &table_index in &table_indices {
-                            let table = &mut self.tables[table_index];
-                            if table.mask & $mask == 0 {
-                                continue;
-                            }
-
-                            for idx in 0..table.entity_indices.len() {
-                                let entity = table.entity_indices[idx];
-                                f(entity, &mut table.$name[idx]);
+                            if tag_include == 0 {
+                                let table = &mut self.tables[table_index];
+                                for idx in 0..table.entity_indices.len() {
+                                    let entity = table.entity_indices[idx];
+                                    table.[<$name _changed>][idx] = current_tick;
+                                    table.[<$name _peak_changed>] = current_tick;
+                                    f(entity, &mut table.$name[idx]);
+                                }
+                            } else {
+                                for idx in 0..self.tables[table_index].entity_indices.len() {
+                                    let entity = self.tables[table_index].entity_indices[idx];
+                                    if !self.entity_matches_tags(entity, tag_include, 0) {
+                                        continue;
+                                    }
+                                    let table = &mut self.tables[table_index];
+                                    table.[<$name _changed>][idx] = current_tick;
+                                    table.[<$name _peak_changed>] = current_tick;
+                                    f(entity, &mut table.$name[idx]);
+                                }
                             }
                         }
                     }
@@ -2616,6 +2680,11 @@ macro_rules! ecs_impl {
         }
 
         fn get_or_create_table(world: &mut $world, mask: u64) -> usize {
+            debug_assert_eq!(
+                mask & ALL_TAGS_MASK,
+                0,
+                "archetype masks must not contain tag bits"
+            );
             if let Some(&index) = world.table_lookup.get(&mask) {
                 return index;
             }
@@ -5383,6 +5452,60 @@ mod tests {
         let e1 = world.spawn_entities(POSITION, 1)[0];
         let e2 = world.spawn_entities(POSITION, 1)[0];
         assert_ne!((e1.id, e1.generation), (e2.id, e2.generation));
+    }
+
+    #[test]
+    #[should_panic(expected = "spawn masks must not contain tag bits")]
+    fn test_spawn_with_tag_bits_panics_in_debug() {
+        let mut world = World::default();
+        world.spawn_entities(POSITION | PLAYER, 1);
+    }
+
+    #[test]
+    #[should_panic(expected = "component masks must not contain tag bits")]
+    fn test_add_components_with_tag_bits_panics_in_debug() {
+        let mut world = World::default();
+        let entity = world.spawn_entities(POSITION, 1)[0];
+        world.add_components(entity, VELOCITY | PLAYER);
+    }
+
+    #[test]
+    #[should_panic(expected = "component masks only")]
+    fn test_query_entities_with_tag_bits_panics_in_debug() {
+        let world = World::default();
+        let _ = world.query_entities(POSITION | PLAYER);
+    }
+
+    #[test]
+    fn test_query_component_mut_with_tag_filter() {
+        let mut world = World::default();
+        let e1 = world.spawn_entities(POSITION, 1)[0];
+        let e2 = world.spawn_entities(POSITION, 1)[0];
+        world.add_player(e1);
+
+        let mut visited = Vec::new();
+        world.query_position_mut(PLAYER, |entity, position| {
+            position.x = 42.0;
+            visited.push(entity);
+        });
+
+        assert_eq!(visited, vec![e1]);
+        assert_eq!(world.get_position(e1).unwrap().x, 42.0);
+        assert_eq!(world.get_position(e2).unwrap().x, 0.0);
+    }
+
+    #[test]
+    fn test_query_component_mut_marks_changed() {
+        let mut world = World::default();
+        let entity = world.spawn_entities(POSITION, 1)[0];
+        world.step();
+
+        world.query_position_mut(0, |_entity, position| {
+            position.x = 1.0;
+        });
+
+        let changed: Vec<Entity> = world.query_entities_changed(POSITION).collect();
+        assert_eq!(changed, vec![entity]);
     }
 
     #[test]
