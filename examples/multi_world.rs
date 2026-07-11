@@ -64,7 +64,7 @@ fn render_system(ecs: &GameEcs) {
     } = ecs;
 
     core_world.for_each(POSITION, 0, |entity, table, idx| {
-        let tag = if player.contains(&entity) {
+        let tag = if player.contains(entity) {
             " [PLAYER]"
         } else {
             ""
