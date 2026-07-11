@@ -2568,6 +2568,7 @@ macro_rules! ecs_impl {
         $crate::paste::paste! {
             pub enum Command {
                 SpawnEntities { mask: u64, count: usize },
+                DespawnEntity { entity: $crate::Entity },
                 DespawnEntities { entities: Vec<$crate::Entity> },
                 AddComponents { entity: $crate::Entity, mask: u64 },
                 RemoveComponents { entity: $crate::Entity, mask: u64 },
@@ -2972,7 +2973,7 @@ macro_rules! ecs_impl {
                 }
 
                 pub fn queue_despawn_entity(&mut self, entity: $crate::Entity) {
-                    self.command_buffer.push(Command::DespawnEntities { entities: vec![entity] });
+                    self.command_buffer.push(Command::DespawnEntity { entity });
                 }
 
                 pub fn queue_add_components(&mut self, entity: $crate::Entity, mask: u64) {
@@ -3017,6 +3018,9 @@ macro_rules! ecs_impl {
                         match command {
                             Command::SpawnEntities { mask, count } => {
                                 self.spawn_entities(mask, count);
+                            }
+                            Command::DespawnEntity { entity } => {
+                                self.despawn_entities(&[entity]);
                             }
                             Command::DespawnEntities { entities } => {
                                 self.despawn_entities(&entities);
@@ -3352,6 +3356,7 @@ macro_rules! ecs_multi_impl {
 
             pub enum Command {
                 Spawn { count: usize },
+                DespawnEntity { entity: $crate::Entity },
                 Despawn { entities: Vec<$crate::Entity> },
                 $($(
                     $(#[$comp_attr])*
@@ -3541,7 +3546,7 @@ macro_rules! ecs_multi_impl {
                 }
 
                 pub fn queue_despawn_entity(&mut self, entity: $crate::Entity) {
-                    self.command_buffer.push(Command::Despawn { entities: vec![entity] });
+                    self.command_buffer.push(Command::DespawnEntity { entity });
                 }
 
                 pub fn queue_despawn_entities(&mut self, entities: Vec<$crate::Entity>) {
@@ -3581,6 +3586,9 @@ macro_rules! ecs_multi_impl {
                         match command {
                             Command::Spawn { count } => {
                                 self.spawn_count(count);
+                            }
+                            Command::DespawnEntity { entity } => {
+                                self.despawn(entity);
                             }
                             Command::Despawn { entities } => {
                                 self.despawn_entities(&entities);
