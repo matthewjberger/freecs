@@ -3005,7 +3005,13 @@ macro_rules! ecs_world_impl {
                     None
                 }
 
+                /// Removes the entity's row if present and retires this handle
+                /// in this world by recording the next generation, so stale
+                /// writes can be refused even in worlds that never stored the
+                /// entity. Must only be called with a handle the shared
+                /// allocator confirmed live; `despawn` guarantees that.
                 pub fn remove_entity(&mut self, entity: $crate::Entity) -> bool {
+                    let mut removed = false;
                     if let Some(loc) = self.entity_locations.get_mut(entity.id) {
                         if loc.allocated && loc.generation == entity.generation {
                             let table_idx = loc.table_index as usize;
@@ -3046,10 +3052,22 @@ macro_rules! ecs_world_impl {
                                     table.entity_indices.swap_remove(array_idx);
                                 }
                             }
-                            return true;
+                            removed = true;
                         }
                     }
-                    false
+
+                    let next_generation = entity.generation.wrapping_add(1);
+                    let should_retire = match self.entity_locations.get(entity.id) {
+                        None => true,
+                        Some(loc) => {
+                            !loc.allocated && $crate::tick_is_newer(next_generation, loc.generation)
+                        }
+                    };
+                    if should_retire {
+                        self.entity_locations.ensure_slot(entity.id, next_generation);
+                    }
+
+                    removed
                 }
 
                 pub fn add_components(&mut self, entity: $crate::Entity, mask: u64) -> bool {
@@ -3076,7 +3094,7 @@ macro_rules! ecs_world_impl {
                         true
                     } else {
                         if let Some(loc) = self.entity_locations.get(entity.id) {
-                            if loc.allocated {
+                            if loc.allocated || loc.generation != entity.generation {
                                 return false;
                             }
                         }
@@ -7791,6 +7809,73 @@ mod tests {
                 (reused.id, reused.generation),
                 "stale despawn must not recycle a live handle"
             );
+        }
+
+        #[test]
+        fn test_multi_world_stale_handle_cannot_resurrect() {
+            let mut ecs = GameEcs::default();
+            let old = ecs.spawn();
+            ecs.core_world.set_position(old, Position::default());
+            assert!(ecs.despawn(old));
+
+            assert!(
+                !ecs.core_world.add_components(old, MW_POSITION),
+                "stale add must be refused in a world that stored the entity"
+            );
+            ecs.core_world
+                .set_position(old, Position { x: 9.0, y: 0.0 });
+            assert!(ecs.core_world.get_position(old).is_none());
+
+            assert!(
+                !ecs.render_world.add_components(old, MW_SPRITE),
+                "stale add must be refused in a world that never stored the entity"
+            );
+            ecs.render_world.set_sprite(old, Sprite { id: 3 });
+            assert!(ecs.render_world.get_sprite(old).is_none());
+
+            assert!(
+                ecs.core_world.structural_changes_since(0).len() <= 2,
+                "refused stale writes must not append structural log entries"
+            );
+        }
+
+        #[test]
+        fn test_multi_world_reused_id_still_gets_components() {
+            let mut ecs = GameEcs::default();
+            let old = ecs.spawn();
+            ecs.core_world.set_position(old, Position::default());
+            assert!(ecs.despawn(old));
+
+            let reused = ecs.spawn();
+            assert_eq!(reused.id, old.id);
+
+            ecs.core_world
+                .set_position(reused, Position { x: 4.0, y: 0.0 });
+            ecs.render_world.set_sprite(reused, Sprite { id: 5 });
+
+            assert_eq!(ecs.core_world.get_position(reused).unwrap().x, 4.0);
+            assert_eq!(ecs.render_world.get_sprite(reused).unwrap().id, 5);
+            assert!(ecs.core_world.get_position(old).is_none());
+        }
+
+        #[test]
+        fn test_multi_world_repeated_reuse_cycle_stays_consistent() {
+            let mut ecs = GameEcs::default();
+            let mut previous = ecs.spawn();
+            ecs.render_world.set_sprite(previous, Sprite { id: 0 });
+
+            for cycle in 1..5u32 {
+                assert!(ecs.despawn(previous));
+                let entity = ecs.spawn();
+                assert_eq!(entity.id, previous.id);
+                assert_eq!(entity.generation, cycle);
+
+                ecs.render_world.set_sprite(entity, Sprite { id: cycle });
+                assert_eq!(ecs.render_world.get_sprite(entity).unwrap().id, cycle);
+                assert!(ecs.render_world.get_sprite(previous).is_none());
+
+                previous = entity;
+            }
         }
     }
 }
