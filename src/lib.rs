@@ -7484,5 +7484,156 @@ mod tests {
             assert_eq!(ecs.core_world.get_position(e1).unwrap().x, 101.0);
             assert_eq!(ecs.core_world.get_position(e2).unwrap().x, 2.0);
         }
+
+        #[test]
+        fn test_multi_world_command_buffer_spawn_despawn() {
+            let mut ecs = GameEcs::default();
+            ecs.queue_spawn(3);
+            assert_eq!(ecs.command_count(), 1);
+            ecs.apply_commands();
+
+            let next = ecs.spawn();
+            assert_eq!(next.id, 3);
+
+            let entity = ecs.spawn();
+            ecs.core_world
+                .set_position(entity, Position { x: 1.0, y: 0.0 });
+            ecs.queue_despawn_entity(entity);
+            ecs.apply_commands();
+            assert!(ecs.core_world.get_position(entity).is_none());
+        }
+
+        #[test]
+        fn test_multi_world_command_buffer_component_add_remove() {
+            let mut ecs = GameEcs::default();
+            let entity = ecs.spawn();
+
+            ecs.queue_add_position(entity);
+            ecs.apply_commands();
+            assert!(ecs.core_world.get_position(entity).is_some());
+
+            ecs.queue_remove_position(entity);
+            ecs.apply_commands();
+            assert!(ecs.core_world.get_position(entity).is_none());
+        }
+
+        #[test]
+        fn test_multi_world_per_world_spawn_entities() {
+            let mut ecs = GameEcs::default();
+            let entities = {
+                let GameEcs {
+                    core_world,
+                    allocator,
+                    ..
+                } = &mut ecs;
+                core_world.spawn_entities(allocator, MW_POSITION | MW_VELOCITY, 3)
+            };
+            assert_eq!(entities.len(), 3);
+            for &entity in &entities {
+                assert!(ecs.core_world.get_position(entity).is_some());
+                assert!(ecs.core_world.get_velocity(entity).is_some());
+            }
+
+            let next = ecs.spawn();
+            assert_eq!(next.id, 3);
+        }
+
+        #[test]
+        fn test_multi_world_change_detection() {
+            let mut ecs = GameEcs::default();
+            let e1 = ecs.spawn();
+            let e2 = ecs.spawn();
+            ecs.core_world.set_position(e1, Position { x: 1.0, y: 0.0 });
+            ecs.core_world.set_position(e2, Position { x: 2.0, y: 0.0 });
+
+            ecs.step();
+
+            ecs.core_world.get_position_mut(e1).unwrap().x = 10.0;
+
+            let changed: Vec<Entity> = ecs.core_world.query_entities_changed(MW_POSITION).collect();
+            assert_eq!(changed, vec![e1]);
+
+            let mut visited = Vec::new();
+            ecs.core_world
+                .for_each_mut_changed(MW_POSITION, 0, |entity, _table, _idx| {
+                    visited.push(entity);
+                });
+            assert_eq!(visited, vec![e1]);
+        }
+
+        #[test]
+        fn test_multi_world_structural_log() {
+            let mut ecs = GameEcs::default();
+            let entity = ecs.spawn();
+            ecs.core_world
+                .set_position(entity, Position { x: 1.0, y: 0.0 });
+            ecs.render_world.set_sprite(entity, Sprite { id: 1 });
+
+            let core_changes = ecs.core_world.structural_changes_since(0);
+            assert_eq!(core_changes.len(), 1);
+            assert_eq!(core_changes[0].kind, StructuralChangeKind::Spawned);
+            assert_eq!(core_changes[0].mask, MW_POSITION);
+
+            let render_changes = ecs.render_world.structural_changes_since(0);
+            assert_eq!(render_changes.len(), 1);
+            assert_eq!(render_changes[0].mask, MW_SPRITE);
+
+            ecs.despawn(entity);
+
+            let core_changes = ecs.core_world.structural_changes_since(0);
+            assert_eq!(core_changes.len(), 2);
+            assert_eq!(core_changes[1].kind, StructuralChangeKind::Despawned);
+        }
+
+        #[test]
+        fn test_multi_world_event_lifecycle() {
+            let mut ecs = GameEcs::default();
+            let entity = ecs.spawn();
+
+            ecs.send_collision(CollisionEvent {
+                entity_a: entity,
+                entity_b: entity,
+            });
+            assert_eq!(ecs.len_collision(), 1);
+
+            ecs.step();
+            assert_eq!(ecs.len_collision(), 1);
+
+            ecs.step();
+            assert_eq!(ecs.len_collision(), 0);
+        }
+
+        #[test]
+        fn test_multi_world_despawn_entities_batch() {
+            let mut ecs = GameEcs::default();
+            let e1 = ecs.spawn();
+            let e2 = ecs.spawn();
+            let e3 = ecs.spawn();
+            for &entity in &[e1, e2, e3] {
+                ecs.core_world.set_position(entity, Position::default());
+            }
+
+            ecs.despawn_entities(&[e1, e3]);
+
+            assert!(ecs.core_world.get_position(e1).is_none());
+            assert!(ecs.core_world.get_position(e2).is_some());
+            assert!(ecs.core_world.get_position(e3).is_none());
+        }
+
+        #[test]
+        fn test_multi_world_entity_builder_single_world_components() {
+            let mut ecs = GameEcs::default();
+            let entities = EntityBuilder::new()
+                .with_color(Color {
+                    r: 1.0,
+                    g: 0.0,
+                    b: 0.0,
+                })
+                .spawn(&mut ecs, 1);
+
+            assert!(ecs.render_world.get_color(entities[0]).is_some());
+            assert!(ecs.core_world.get_position(entities[0]).is_none());
+            assert!(ecs.render_world.get_sprite(entities[0]).is_none());
+        }
     }
 }
