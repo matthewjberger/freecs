@@ -325,7 +325,7 @@ Each event type gets these generated methods:
 - `trim_<event>(up_to_sequence)` - Drop consumed events early (pass the minimum cursor across consumers)
 - `collect_<event>()` - Collect buffered events into a Vec
 - `peek_<event>()` - Reference to the oldest buffered event
-- `update_<event>()` - Expire events older than one frame (called by `step()`)
+- `update_<event>()` - Expire events older than one frame; `step()` already calls this per frame, so calling both halves event lifetime
 - `clear_<event>()` - Immediately drop all buffered events
 - `len_<event>()` / `is_empty_<event>()` - Buffered event count
 
@@ -825,7 +825,7 @@ core_world.for_each(POSITION, 0, |entity, table, idx| {
 ecs.despawn(entity);
 ```
 
-Despawning is safe against reuse: `despawn` refuses stale or already-despawned handles (returning `false`), and stale handles cannot re-add components in any world, including worlds that never stored the entity.
+Despawning is safe against reuse: `despawn` refuses stale or already-despawned handles (returning `false`), and stale handles cannot re-add components in any world, including worlds that never stored the entity. That guarantee is paid for in memory. Despawn broadcasts the retired generation into every world's location table, so each world's table grows to cover any despawned id, 16 bytes per id per world. The trust boundary is the shared allocator: a handle forged for an id it never issued can still insert a row, since worlds have no allocator access.
 
 Tags, events, resources, command buffers, and `Schedule` all work identically in multi-world mode. Structural history is split across two kinds of log, and consumers should pick one oracle per purpose. The ECS keeps a lifecycle log (`structural_changes_since` on the ECS) recording handle allocation and death (`Spawned`/`Despawned` with mask 0) plus tag flips. Each world keeps its own row-level log, where an entity is `Spawned` with a component mask when its first components arrive in that world and `Despawned` when its row leaves. An entity that gains components therefore appears as `Spawned` once in the ECS log and once per world it enters; sync world contents from world logs, and handle lifetime or tags from the ECS log, rather than merging both.
 
