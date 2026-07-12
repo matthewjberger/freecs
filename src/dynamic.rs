@@ -11,10 +11,8 @@
 //!
 //! Nothing here uses `unsafe`. Columns are erased as whole `Vec<T>` values
 //! behind `Box<dyn Any + Send + Sync>`, never as raw bytes, so `Drop` and
-//! thread-safety come from the vec itself. The boundary this buys is
-//! bring-your-own *Rust* types at runtime; component layouts described only
-//! by data (an editor or script schema with no Rust type behind it) are out
-//! of scope and would require byte-level erasure.
+//! thread-safety come from the vec itself, and a type must exist at the
+//! registration call site.
 //!
 //! # Quick start
 //!
@@ -2991,6 +2989,255 @@ mod tests {
     }
 
     #[test]
+    fn test_spawn_batch_initializes_rows() {
+        let mut world = DynWorld::new();
+        let position = world.register::<Position>();
+        let velocity = world.register::<Velocity>();
+
+        let entities = world.spawn_batch(position.mask | velocity.mask, 100, |table, index| {
+            table.column_mut(position)[index] = Position {
+                x: index as f32,
+                y: 0.0,
+            };
+        });
+
+        assert_eq!(entities.len(), 100);
+        for (offset, &entity) in entities.iter().enumerate() {
+            assert_eq!(world.get_keyed(position, entity).unwrap().x, offset as f32);
+            assert_eq!(world.get_keyed(velocity, entity).unwrap().x, 0.0);
+        }
+    }
+
+    #[test]
+    fn test_for_each_mut_changed_visits_only_stamped_slots() {
+        let mut world = DynWorld::new();
+        let position = world.register::<Position>();
+        let entities = world.spawn_entities(position.mask, 3);
+
+        world.step();
+        world.get_mut_keyed(position, entities[1]).unwrap().x = 5.0;
+
+        let mut visited = Vec::new();
+        world.for_each_mut_changed(position.mask, 0, |entity, _table, _index| {
+            visited.push(entity);
+        });
+        assert_eq!(visited, vec![entities[1]]);
+
+        world.step();
+        visited.clear();
+        world.for_each_mut_changed(position.mask, 0, |entity, _table, _index| {
+            visited.push(entity);
+        });
+        assert!(visited.is_empty(), "a step must expire the changed window");
+    }
+
+    #[test]
+    fn test_for_each_mut_changed_since_cursor() {
+        let mut world = DynWorld::new();
+        let position = world.register::<Position>();
+        let entity = world.spawn_entities(position.mask, 1)[0];
+
+        world.step();
+        let cursor = world.last_tick();
+        world.set_keyed(position, entity, Position { x: 1.0, y: 0.0 });
+        world.step();
+        world.step();
+
+        let mut visited = Vec::new();
+        world.for_each_mut_changed_since(position.mask, 0, cursor, |seen, _table, _index| {
+            visited.push(seen);
+        });
+        assert_eq!(visited, vec![entity]);
+
+        let cursor = world.current_tick();
+        visited.clear();
+        world.for_each_mut_changed_since(position.mask, 0, cursor, |seen, _table, _index| {
+            visited.push(seen);
+        });
+        assert!(visited.is_empty());
+    }
+
+    #[test]
+    fn test_changed_skips_untouched_tables() {
+        let mut world = DynWorld::new();
+        let position = world.register::<Position>();
+        let velocity = world.register::<Velocity>();
+
+        world.spawn_entities(position.mask, 3);
+        let moving = world.spawn_entities(position.mask | velocity.mask, 1)[0];
+
+        world.step();
+        world.get_mut_keyed(position, moving).unwrap().x = 1.0;
+
+        let changed: Vec<Entity> = world.query_entities_changed(position.mask).collect();
+        assert_eq!(changed, vec![moving]);
+
+        for table in &world.tables {
+            let column = &table.columns[0];
+            if table.mask == position.mask {
+                assert!(!tick_is_newer(column.peak_changed, world.last_tick));
+            }
+        }
+    }
+
+    #[test]
+    fn test_structural_log_capacity_backstop() {
+        let mut world = DynWorld::new();
+        let position = world.register::<Position>();
+        let entity = world.spawn_entities(position.mask, 1)[0];
+
+        for _ in 0..STRUCTURAL_LOG_CAPACITY {
+            world.record_structural(entity, StructuralChangeKind::ComponentsAdded, position.mask);
+        }
+
+        assert_eq!(world.structural_log.len(), 1);
+        assert_eq!(
+            world.structural_sequence(),
+            STRUCTURAL_LOG_CAPACITY as u64 + 1
+        );
+        let tail = world.structural_changes_since(0);
+        assert_eq!(tail.len(), 1);
+        assert_eq!(tail[0].sequence, world.structural_sequence());
+    }
+
+    #[test]
+    fn test_structural_log_trim_and_clear() {
+        let mut world = DynWorld::new();
+        let position = world.register::<Position>();
+        let entity = world.spawn_entities(position.mask, 1)[0];
+        world.add_components(entity, position.mask);
+        world.remove_components(entity, position.mask);
+
+        let cursor = world.structural_changes_since(0)[0].sequence;
+        world.trim_structural_log(cursor);
+        assert_eq!(world.structural_changes_since(0).len(), 1);
+
+        world.clear_structural_log();
+        assert!(world.structural_changes_since(0).is_empty());
+        assert_eq!(world.structural_sequence(), 2);
+    }
+
+    #[test]
+    fn test_commands_full_surface() {
+        let mut world = DynWorld::new();
+        let position = world.register::<Position>();
+        let velocity = world.register::<Velocity>();
+        let boss = world.register_tag();
+
+        let entity = world.spawn_entities(position.mask, 1)[0];
+
+        world.queue_spawn_entities(velocity.mask, 3);
+        world.queue_add_components(entity, velocity.mask);
+        world.queue_add_tag(boss, entity);
+        world.queue(move |world| {
+            world.set_keyed(position, entity, Position { x: 9.0, y: 0.0 });
+        });
+        assert_eq!(world.command_count(), 4);
+
+        world.apply_commands();
+
+        assert_eq!(world.entity_count(), 4);
+        assert!(world.get_keyed(velocity, entity).is_some());
+        assert!(world.has_tag(boss, entity));
+        assert_eq!(world.get_keyed(position, entity).unwrap().x, 9.0);
+
+        world.queue_remove_components(entity, velocity.mask);
+        world.queue_remove_tag(boss, entity);
+        world.apply_commands();
+        assert!(world.get_keyed(velocity, entity).is_none());
+        assert!(!world.has_tag(boss, entity));
+
+        world.queue_despawn_entity(entity);
+        world.clear_commands();
+        assert_eq!(world.command_count(), 0);
+        assert!(world.is_alive(entity), "cleared commands must not apply");
+    }
+
+    #[test]
+    fn test_events_trim_and_clear() {
+        let mut world = DynWorld::new();
+        for value in 0..6u32 {
+            world.send(PingEvent { value });
+        }
+
+        world.trim_events::<PingEvent>(2);
+        assert_eq!(world.read_events::<PingEvent>().len(), 4);
+        assert_eq!(world.read_events::<PingEvent>()[0].value, 2);
+        assert_eq!(world.event_sequence::<PingEvent>(), 6);
+
+        world.clear_events::<PingEvent>();
+        assert!(world.read_events::<PingEvent>().is_empty());
+        assert_eq!(world.event_sequence::<PingEvent>(), 6);
+    }
+
+    #[test]
+    fn test_query_mask_filters_and_empty_tag_fast_path() {
+        let mut world = DynWorld::new();
+        let velocity_key = world.register::<Velocity>();
+        let boss = world.register_tag();
+
+        let plain = world.spawn((Position { x: 1.0, y: 0.0 },));
+        let fast = world.spawn((Position { x: 2.0, y: 0.0 }, Velocity::default()));
+
+        let mut with_mask = Vec::new();
+        world
+            .query::<(&Position,)>()
+            .with_mask(velocity_key.mask)
+            .for_each(|entity, _| with_mask.push(entity));
+        assert_eq!(with_mask, vec![fast]);
+
+        let mut without_mask = Vec::new();
+        world
+            .query::<(&Position,)>()
+            .without_mask(velocity_key.mask)
+            .for_each(|entity, _| without_mask.push(entity));
+        assert_eq!(without_mask, vec![plain]);
+
+        let mut excluding_empty_tag = Vec::new();
+        world
+            .query::<(&Position,)>()
+            .without_tag(boss)
+            .for_each(|entity, _| excluding_empty_tag.push(entity));
+        assert_eq!(
+            excluding_empty_tag.len(),
+            2,
+            "excluding a tag nobody has excludes nothing"
+        );
+
+        let mut including_empty_tag = Vec::new();
+        world
+            .query::<(&Position,)>()
+            .with_tag(boss)
+            .for_each(|entity, _| including_empty_tag.push(entity));
+        assert!(
+            including_empty_tag.is_empty(),
+            "including a tag nobody has matches nothing"
+        );
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    #[test]
+    fn test_par_for_each_mut_with_tag_masks() {
+        let mut world = DynWorld::new();
+        let position = world.register::<Position>();
+        let boss = world.register_tag();
+
+        let entities = world.spawn_entities(position.mask, 10);
+        for &entity in &entities[..5] {
+            world.add_tag(boss, entity);
+        }
+
+        world.par_for_each_mut(position.mask | boss.mask, 0, |_entity, table, index| {
+            table.column_mut(position)[index].x = 7.0;
+        });
+
+        for (offset, &entity) in entities.iter().enumerate() {
+            let expected = if offset < 5 { 7.0 } else { 0.0 };
+            assert_eq!(world.get_keyed(position, entity).unwrap().x, expected);
+        }
+    }
+
+    #[test]
     fn test_dyn_ecs_group_shares_entities_across_worlds() {
         let mut ecs = DynEcs::new();
         let core = ecs.add_world(ComponentRegistry::new());
@@ -3373,6 +3620,190 @@ mod tests {
             }
             DiffResources {
                 _unused: f32,
+            }
+        }
+
+        mod group_differential {
+            use super::*;
+
+            crate::ecs! {
+                StaticEcs {
+                    StaticCore {
+                        core_position: Position => GROUP_POSITION,
+                        core_velocity: Velocity => GROUP_VELOCITY,
+                    }
+                    StaticRender {
+                        render_health: Health => GROUP_HEALTH,
+                    }
+                }
+                Tags {
+                    marked => GROUP_MARKED,
+                }
+                GroupResources {
+                    _unused: f32,
+                }
+            }
+
+            /// Drives the macro multi-world and a DynEcs group with one seeded op
+            /// stream and requires identical observable state, the grouped
+            /// counterpart of the single-world differential below.
+            #[test]
+            fn test_differential_dyn_ecs_matches_static_multi_world() {
+                for seed in [21u64, 2121, 212121] {
+                    let mut rng = Lcg(seed);
+
+                    let mut static_ecs = StaticEcs::default();
+                    let mut dyn_ecs = DynEcs::new();
+                    let core = dyn_ecs.add_world(ComponentRegistry::new());
+                    let render = dyn_ecs.add_world(ComponentRegistry::new());
+                    let position = dyn_ecs.worlds[core].register::<Position>();
+                    let velocity = dyn_ecs.worlds[core].register::<Velocity>();
+                    let health = dyn_ecs.worlds[render].register::<Health>();
+                    let marked = dyn_ecs.register_tag();
+
+                    assert_eq!(position.mask, GROUP_POSITION);
+                    assert_eq!(velocity.mask, GROUP_VELOCITY);
+                    assert_eq!(health.mask, GROUP_HEALTH);
+
+                    let mut handles: Vec<Entity> = Vec::new();
+                    let pick = |rng: &mut Lcg, handles: &[Entity]| {
+                        if handles.is_empty() {
+                            None
+                        } else {
+                            Some(handles[rng.next() as usize % handles.len()])
+                        }
+                    };
+
+                    static_ecs.step();
+                    dyn_ecs.step();
+
+                    for _ in 0..2500 {
+                        match rng.next() % 9 {
+                            0 | 1 => {
+                                let static_entity = static_ecs.spawn();
+                                let dyn_entity = dyn_ecs.spawn();
+                                assert_eq!(static_entity, dyn_entity);
+                                handles.push(static_entity);
+                            }
+                            2 => {
+                                if let Some(entity) = pick(&mut rng, &handles) {
+                                    assert_eq!(static_ecs.despawn(entity), dyn_ecs.despawn(entity));
+                                }
+                            }
+                            3 => {
+                                if let Some(entity) = pick(&mut rng, &handles) {
+                                    let value = (rng.next() % 1000) as f32;
+                                    static_ecs
+                                        .static_core
+                                        .set_core_position(entity, Position { x: value, y: 0.0 });
+                                    dyn_ecs.worlds[core].set_keyed(
+                                        position,
+                                        entity,
+                                        Position { x: value, y: 0.0 },
+                                    );
+                                }
+                            }
+                            4 => {
+                                if let Some(entity) = pick(&mut rng, &handles) {
+                                    let value = (rng.next() % 1000) as f32;
+                                    static_ecs
+                                        .static_render
+                                        .set_render_health(entity, Health { value });
+                                    dyn_ecs.worlds[render].set_keyed(
+                                        health,
+                                        entity,
+                                        Health { value },
+                                    );
+                                }
+                            }
+                            5 => {
+                                if let Some(entity) = pick(&mut rng, &handles) {
+                                    assert_eq!(
+                                        static_ecs
+                                            .static_core
+                                            .remove_components(entity, GROUP_POSITION),
+                                        dyn_ecs.worlds[core]
+                                            .remove_components(entity, position.mask)
+                                    );
+                                }
+                            }
+                            6 => {
+                                if let Some(entity) = pick(&mut rng, &handles) {
+                                    static_ecs.add_marked(entity);
+                                    dyn_ecs.add_tag(marked, entity);
+                                    assert_eq!(
+                                        static_ecs.has_marked(entity),
+                                        dyn_ecs.has_tag(marked, entity)
+                                    );
+                                }
+                            }
+                            7 => {
+                                if let Some(entity) = pick(&mut rng, &handles) {
+                                    assert_eq!(
+                                        static_ecs.remove_marked(entity),
+                                        dyn_ecs.remove_tag(marked, entity)
+                                    );
+                                }
+                            }
+                            _ => {
+                                let static_changed: std::collections::HashSet<Entity> = static_ecs
+                                    .static_core
+                                    .query_entities_changed(GROUP_POSITION)
+                                    .collect();
+                                let dyn_changed: std::collections::HashSet<Entity> = dyn_ecs.worlds
+                                    [core]
+                                    .query_entities_changed(position.mask)
+                                    .collect();
+                                assert_eq!(
+                                    static_changed, dyn_changed,
+                                    "core changed sets diverged with seed {seed}"
+                                );
+
+                                static_ecs.step();
+                                dyn_ecs.step();
+                            }
+                        }
+                    }
+
+                    assert_eq!(
+                        static_ecs.static_core.entity_count(),
+                        dyn_ecs.worlds[core].entity_count()
+                    );
+                    assert_eq!(
+                        static_ecs.static_render.entity_count(),
+                        dyn_ecs.worlds[render].entity_count()
+                    );
+                    for &handle in &handles {
+                        assert_eq!(static_ecs.is_alive(handle), dyn_ecs.is_alive(handle));
+                        assert_eq!(
+                            static_ecs.static_core.component_mask(handle),
+                            dyn_ecs.worlds[core].component_mask(handle)
+                        );
+                        assert_eq!(
+                            static_ecs.static_render.component_mask(handle),
+                            dyn_ecs.worlds[render].component_mask(handle)
+                        );
+                        assert_eq!(
+                            static_ecs.static_core.get_core_position(handle),
+                            dyn_ecs.worlds[core].get_keyed(position, handle)
+                        );
+                        assert_eq!(
+                            static_ecs
+                                .static_render
+                                .get_render_health(handle)
+                                .map(|h| h.value),
+                            dyn_ecs.worlds[render]
+                                .get_keyed(health, handle)
+                                .map(|h| h.value)
+                        );
+                        assert_eq!(
+                            static_ecs.has_marked(handle),
+                            dyn_ecs.has_tag(marked, handle)
+                        );
+                    }
+                    let expected_marked = static_ecs.query_marked().count();
+                    assert_eq!(dyn_ecs.query_tag(marked).count(), expected_marked);
+                }
             }
         }
 

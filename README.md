@@ -775,10 +775,10 @@ When a component or resource has a `#[cfg(...)]` attribute, all related generate
 
 The `dynamic` feature adds a second entry point for programs that cannot fix
 their component set at compile time, editors, plugin boundaries, data-driven
-prefab schemas. `DynWorld` registers Rust types at runtime and keeps the rest
-of the design: contiguous `Vec<T>` columns per archetype, `u64` masks, the
-same change detection, structural log, sparse-set tags, event channels, and
-liveness guarantees, and zero `unsafe`. Columns are erased as whole vecs
+prefab schemas. `DynWorld` registers component types at runtime and keeps the
+rest of the design: contiguous `Vec<T>` columns per archetype, `u64` masks,
+the same change detection, structural log, sparse-set tags, event channels,
+and liveness guarantees, and zero `unsafe`. Columns are erased as whole vecs
 behind `Box<dyn Any + Send + Sync>`, never as raw bytes, and structural
 changes dispatch through a per-type record of plain function pointers that is
 itself public data.
