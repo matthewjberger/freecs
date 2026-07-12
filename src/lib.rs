@@ -2651,6 +2651,23 @@ macro_rules! ecs_impl {
                 let _ = (entity, include_tags, exclude_tags);
                 true
             }
+
+            /// Returns None when an included tag has no members, since nothing
+            /// can match. Otherwise drops excluded tags whose sets are empty,
+            /// so queries like "not DEAD" stay on the unfiltered fast path
+            /// while no entity carries the tag.
+            fn reduce_tag_masks(&self, tag_include: u64, tag_exclude: u64) -> Option<(u64, u64)> {
+                let mut reduced_exclude = tag_exclude;
+                $(
+                    if tag_include & $tag_mask != 0 && self.$tag_name.is_empty() {
+                        return None;
+                    }
+                    if reduced_exclude & $tag_mask != 0 && self.$tag_name.is_empty() {
+                        reduced_exclude &= !$tag_mask;
+                    }
+                )*
+                Some((tag_include, reduced_exclude))
+            }
         }
 
         $crate::paste::paste! {
@@ -2663,8 +2680,11 @@ macro_rules! ecs_impl {
                 {
                     let component_include = include & !ALL_TAGS_MASK;
                     let component_exclude = exclude & !ALL_TAGS_MASK;
-                    let tag_include = include & ALL_TAGS_MASK;
-                    let tag_exclude = exclude & ALL_TAGS_MASK;
+                    let Some((tag_include, tag_exclude)) =
+                        self.reduce_tag_masks(include & ALL_TAGS_MASK, exclude & ALL_TAGS_MASK)
+                    else {
+                        return;
+                    };
 
                     if tag_include == 0 && tag_exclude == 0 {
                         [<tables_for_each_ $world:snake>](
@@ -2694,8 +2714,11 @@ macro_rules! ecs_impl {
                 {
                     let component_include = include & !ALL_TAGS_MASK;
                     let component_exclude = exclude & !ALL_TAGS_MASK;
-                    let tag_include = include & ALL_TAGS_MASK;
-                    let tag_exclude = exclude & ALL_TAGS_MASK;
+                    let Some((tag_include, tag_exclude)) =
+                        self.reduce_tag_masks(include & ALL_TAGS_MASK, exclude & ALL_TAGS_MASK)
+                    else {
+                        return;
+                    };
 
                     if tag_include == 0 && tag_exclude == 0 {
                         [<tables_for_each_mut_ $world:snake>](
@@ -2739,8 +2762,11 @@ macro_rules! ecs_impl {
                 {
                     let component_include = include & !ALL_TAGS_MASK;
                     let component_exclude = exclude & !ALL_TAGS_MASK;
-                    let tag_include = include & ALL_TAGS_MASK;
-                    let tag_exclude = exclude & ALL_TAGS_MASK;
+                    let Some((tag_include, tag_exclude)) =
+                        self.reduce_tag_masks(include & ALL_TAGS_MASK, exclude & ALL_TAGS_MASK)
+                    else {
+                        return;
+                    };
 
                     if tag_include == 0 && tag_exclude == 0 {
                         [<tables_par_for_each_mut_ $world:snake>](
@@ -2789,8 +2815,11 @@ macro_rules! ecs_impl {
                 {
                     let component_include = include & !ALL_TAGS_MASK;
                     let component_exclude = exclude & !ALL_TAGS_MASK;
-                    let tag_include = include & ALL_TAGS_MASK;
-                    let tag_exclude = exclude & ALL_TAGS_MASK;
+                    let Some((tag_include, tag_exclude)) =
+                        self.reduce_tag_masks(include & ALL_TAGS_MASK, exclude & ALL_TAGS_MASK)
+                    else {
+                        return;
+                    };
 
                     if tag_include == 0 && tag_exclude == 0 {
                         [<tables_for_each_mut_changed_ $world:snake>](
@@ -4864,6 +4893,28 @@ mod tests {
     fn test_query_entities_with_tag_bits_panics_in_debug() {
         let world = World::default();
         let _ = world.query_entities(POSITION | PLAYER);
+    }
+
+    #[test]
+    fn test_tag_masks_with_empty_sets() {
+        let mut world = World::default();
+        world.spawn_entities(POSITION, 3);
+
+        let mut count = 0;
+        world.for_each(POSITION, PLAYER, |_entity, _table, _idx| count += 1);
+        assert_eq!(count, 3, "excluding a tag nobody has excludes nothing");
+
+        count = 0;
+        world.for_each(POSITION | PLAYER, 0, |_entity, _table, _idx| count += 1);
+        assert_eq!(count, 0, "including a tag nobody has matches nothing");
+
+        count = 0;
+        world.for_each_mut(POSITION | PLAYER, 0, |_entity, _table, _idx| count += 1);
+        assert_eq!(count, 0);
+
+        count = 0;
+        world.for_each_mut(POSITION, PLAYER, |_entity, _table, _idx| count += 1);
+        assert_eq!(count, 3);
     }
 
     #[test]
