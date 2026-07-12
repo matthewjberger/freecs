@@ -471,6 +471,14 @@ impl std::fmt::Display for Entity {
     }
 }
 
+/// Liveness record for one entity id: the generation currently associated
+/// with the id and whether that handle is live.
+#[derive(Default, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct EntitySlot {
+    pub generation: u32,
+    pub alive: bool,
+}
+
 /// Allocates generational entity handles and tracks which handles are live.
 ///
 /// Liveness is authoritative here: `deallocate` refuses stale or already-freed
@@ -480,8 +488,7 @@ impl std::fmt::Display for Entity {
 pub struct EntityAllocator {
     pub next_id: u32,
     pub free_ids: Vec<(u32, u32)>,
-    pub generations: Vec<u32>,
-    pub alive: Vec<u64>,
+    pub slots: Vec<EntitySlot>,
 }
 
 impl EntityAllocator {
@@ -496,10 +503,24 @@ impl EntityAllocator {
             self.next_id += 1;
             Entity { id, generation: 0 }
         };
-        self.ensure_capacity(entity.id);
-        self.generations[entity.id as usize] = entity.generation;
-        self.alive[entity.id as usize / 64] |= 1 << (entity.id as usize % 64);
+        let index = entity.id as usize;
+        if index >= self.slots.len() {
+            self.slots.resize(index + 1, EntitySlot::default());
+        }
+        self.slots[index] = EntitySlot {
+            generation: entity.generation,
+            alive: true,
+        };
         entity
+    }
+
+    /// Pre-grows the liveness table for `count` upcoming allocations, so the
+    /// per-allocation growth check stays predictably false in batch spawns.
+    pub fn reserve(&mut self, count: usize) {
+        let worst_case = self.next_id as usize + count;
+        if worst_case > self.slots.len() {
+            self.slots.resize(worst_case, EntitySlot::default());
+        }
     }
 
     /// Frees the handle if it is currently live. Returns false for stale
@@ -508,27 +529,16 @@ impl EntityAllocator {
         if !self.is_alive(entity) {
             return false;
         }
-        self.alive[entity.id as usize / 64] &= !(1 << (entity.id as usize % 64));
+        self.slots[entity.id as usize].alive = false;
         self.free_ids
             .push((entity.id, entity.generation.wrapping_add(1)));
         true
     }
 
     pub fn is_alive(&self, entity: Entity) -> bool {
-        let index = entity.id as usize;
-        index / 64 < self.alive.len()
-            && self.alive[index / 64] & (1 << (index % 64)) != 0
-            && self.generations[index] == entity.generation
-    }
-
-    fn ensure_capacity(&mut self, id: u32) {
-        let index = id as usize;
-        if index >= self.generations.len() {
-            self.generations.resize(index + 1, 0);
-        }
-        if index / 64 >= self.alive.len() {
-            self.alive.resize(index / 64 + 1, 0);
-        }
+        self.slots
+            .get(entity.id as usize)
+            .is_some_and(|slot| slot.alive && slot.generation == entity.generation)
     }
 }
 
@@ -787,11 +797,16 @@ impl<T> EventChannel<T> {
     /// calls later or a cursor consumer trims past it.
     pub fn send(&mut self, event: T) {
         if self.events.len() >= EVENT_CHANNEL_CAPACITY {
-            let half = self.events.len() / 2;
-            self.events.drain(..half);
-            self.base_sequence += half as u64;
+            self.drop_oldest_half();
         }
         self.events.push(event);
+    }
+
+    #[cold]
+    fn drop_oldest_half(&mut self) {
+        let half = self.events.len() / 2;
+        self.events.drain(..half);
+        self.base_sequence += half as u64;
     }
 
     /// The sequence number of the most recently sent event. Record this as
@@ -2004,6 +2019,7 @@ macro_rules! ecs_kernel_impl {
                         0,
                         "spawn masks must not contain tag bits or unknown component bits"
                     );
+                    allocator.reserve(count);
                     let table_index = [<get_or_create_table_ $world:snake>](self, mask);
                     let start_index = self.tables[table_index].entity_indices.len();
 
@@ -2062,6 +2078,7 @@ macro_rules! ecs_kernel_impl {
                         0,
                         "spawn masks must not contain tag bits or unknown component bits"
                     );
+                    allocator.reserve(count);
                     let table_index = [<get_or_create_table_ $world:snake>](self, mask);
                     let start_index = self.tables[table_index].entity_indices.len();
 
