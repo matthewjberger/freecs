@@ -28,7 +28,7 @@ If you want to understand the data layout under the macro, there is a three-part
 
 - [Part 1, archetype storage](https://matthewberger.dev/articles/posts/build-your-own-ecs-archetype-storage). Generational entity handles, archetype tables in struct-of-arrays layout, spawn and despawn.
 - [Part 2, structural change and queries](https://matthewberger.dev/articles/posts/build-your-own-ecs-structural-change). Adding and removing components via archetype migration, walking tables for queries, the archetype graph and query cache.
-- [Part 3, change detection, events, tags, and commands](https://matthewberger.dev/articles/posts/build-your-own-ecs-events-changes-tags-commands). Watermark-based change detection, double-buffered events, sparse-set tags, deferred command buffers, a system schedule.
+- [Part 3, change detection, events, tags, and commands](https://matthewberger.dev/articles/posts/build-your-own-ecs-events-changes-tags-commands). Watermark-based change detection, sequence-numbered event channels with cursor consumption, sparse-set tags, deferred command buffers, a system schedule.
 
 freecs is what you get when you put a declarative macro on top of that kernel.
 
