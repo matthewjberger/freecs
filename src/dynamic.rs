@@ -136,6 +136,17 @@ impl<T> Clone for ComponentKey<T> {
     }
 }
 
+impl<T> std::fmt::Debug for ComponentKey<T> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ComponentKey")
+            .field("component_index", &self.component_index)
+            .field("mask", &self.mask)
+            .field("registry_id", &self.registry_id)
+            .finish()
+    }
+}
+
 impl<T> Copy for ComponentKey<T> {}
 
 /// A handle to a registered tag. Tag mask bits are assigned from the top of
@@ -175,7 +186,9 @@ impl ComponentRegistry {
     }
 
     /// Registers `T` if it is not already registered and returns its key.
-    /// Idempotent per type.
+    /// Idempotent per type. `Default` is required because archetype migration
+    /// moves values with `mem::take`, and `Send + Sync` because columns are
+    /// shared across threads by the parallel iteration paths.
     pub fn register<T: Send + Sync + Default + 'static>(&mut self) -> ComponentKey<T> {
         if let Some(&component_index) = self.components_by_type.get(&TypeId::of::<T>()) {
             return self.key_for(component_index);
@@ -266,14 +279,20 @@ pub fn column_position(table_mask: u64, component_mask: u64) -> usize {
 }
 
 impl DynComponentArrays {
+    /// Typed view of one column. Costs a popcount and a downcast per call,
+    /// so hoist it outside per-entity loops; inside a hot loop, resolve
+    /// columns once per table via [`columns_pair`](Self::columns_pair) or the
+    /// typed query tier instead.
+    #[inline]
     pub fn column<T: 'static>(&self, key: ComponentKey<T>) -> &[T] {
         let position = column_position(self.mask, key.mask);
         column_vec::<T>(self.columns[position].data.as_ref())
     }
 
-    /// Mutable raw column access. Does not stamp change ticks; stamp through
-    /// `changed_column_mut` or use the typed query tier when change detection
-    /// matters.
+    /// Mutable raw column access. Does not stamp change ticks, and costs a
+    /// popcount and a downcast per call, so hoist it outside per-entity
+    /// loops. Use the typed query tier when change detection matters.
+    #[inline]
     pub fn column_mut<T: 'static>(&mut self, key: ComponentKey<T>) -> &mut [T] {
         let position = column_position(self.mask, key.mask);
         column_vec_mut::<T>(self.columns[position].data.as_mut())
@@ -286,6 +305,7 @@ impl DynComponentArrays {
     /// Disjoint mutable and shared column slices in one call, for hoisting
     /// column access out of per-entity loops. Panics if the two components
     /// are the same or either is absent from this table.
+    #[inline]
     pub fn columns_pair<A: 'static, B: 'static>(
         &mut self,
         first: ComponentKey<A>,
@@ -300,6 +320,26 @@ impl DynComponentArrays {
         (
             column_vec_mut::<A>(first_slot.data.as_mut()).as_mut_slice(),
             column_vec::<B>(second_slot.data.as_ref()).as_slice(),
+        )
+    }
+
+    /// Two disjoint mutable column slices in one call, the mut-and-mut
+    /// counterpart of [`columns_pair`](Self::columns_pair).
+    #[inline]
+    pub fn columns_pair_mut<A: 'static, B: 'static>(
+        &mut self,
+        first: ComponentKey<A>,
+        second: ComponentKey<B>,
+    ) -> (&mut [A], &mut [B]) {
+        let first_position = column_position(self.mask, first.mask);
+        let second_position = column_position(self.mask, second.mask);
+        let [first_slot, second_slot] = self
+            .columns
+            .get_disjoint_mut([first_position, second_position])
+            .expect("columns_pair_mut components must be distinct");
+        (
+            column_vec_mut::<A>(first_slot.data.as_mut()).as_mut_slice(),
+            column_vec_mut::<B>(second_slot.data.as_mut()).as_mut_slice(),
         )
     }
 }
@@ -757,6 +797,7 @@ impl DynWorld {
         true
     }
 
+    #[inline]
     pub fn get_keyed<T: 'static>(&self, key: ComponentKey<T>, entity: Entity) -> Option<&T> {
         self.check_key(key.registry_id);
         let (table_index, array_index) = get_location(&self.entity_locations, entity)?;
@@ -768,6 +809,7 @@ impl DynWorld {
         Some(&column_vec::<T>(table.columns[position].data.as_ref())[array_index])
     }
 
+    #[inline]
     pub fn get_mut_keyed<T: 'static>(
         &mut self,
         key: ComponentKey<T>,
@@ -1026,6 +1068,11 @@ impl DynWorld {
         }
     }
 
+    /// Entity-granular iteration with tag filtering, mirroring the static
+    /// worlds' shape. Calling `column`/`column_mut` inside the closure pays a
+    /// downcast per entity; prefer the typed query tier, or
+    /// [`for_each_tables_mut`](Self::for_each_tables_mut) with columns
+    /// hoisted, for hot loops.
     pub fn for_each_mut<F>(&mut self, include: u64, exclude: u64, mut f: F)
     where
         F: FnMut(Entity, &mut DynComponentArrays, usize),
@@ -1544,7 +1591,6 @@ impl<T: Send + Sync + Default + 'static> QueryElement for &mut T {
 pub trait QueryTuple: sealed::SealedQueryTuple {
     type Fetch<'table>;
     type Item<'item>;
-    const ELEMENT_COUNT: usize;
     fn component_mask(world: &mut DynWorld) -> u64;
     fn element_masks(world: &mut DynWorld) -> [u64; 4];
     fn fetch<'table>(
@@ -1564,13 +1610,12 @@ pub trait QueryTuple: sealed::SealedQueryTuple {
 }
 
 macro_rules! impl_query_tuple {
-    ($count:expr, $(($element:ident, $position:tt)),+) => {
+    ($(($element:ident, $position:tt)),+) => {
         impl<$($element: QueryElement),+> sealed::SealedQueryTuple for ($($element,)+) {}
 
         impl<$($element: QueryElement),+> QueryTuple for ($($element,)+) {
             type Fetch<'table> = ($($element::Fetch<'table>,)+);
             type Item<'item> = ($($element::Item<'item>,)+);
-            const ELEMENT_COUNT: usize = $count;
 
             fn component_mask(world: &mut DynWorld) -> u64 {
                 let mut mask = 0;
@@ -1634,10 +1679,10 @@ macro_rules! impl_query_tuple {
     };
 }
 
-impl_query_tuple!(1, (A, 0));
-impl_query_tuple!(2, (A, 0), (B, 1));
-impl_query_tuple!(3, (A, 0), (B, 1), (C, 2));
-impl_query_tuple!(4, (A, 0), (B, 1), (C, 2), (D, 3));
+impl_query_tuple!((A, 0));
+impl_query_tuple!((A, 0), (B, 1));
+impl_query_tuple!((A, 0), (B, 1), (C, 2));
+impl_query_tuple!((A, 0), (B, 1), (C, 2), (D, 3));
 
 /// A typed query in progress. Filters compose before `for_each` runs it.
 pub struct DynQuery<'world, Q: QueryTuple> {

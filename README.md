@@ -828,6 +828,8 @@ column fills (16.5 µs versus 12.2 µs per 1k spawns), per-entity typed access
 pays the `TypeId` map (16.5 ns versus 6.8 ns keyed), and every column adds one
 `Box` indirection per table.
 
+Component types need `Send + Sync + Default + 'static`, the same effective bounds the macro path relies on (`Default` because migration moves values with `mem::take`, `Send + Sync` for parallel iteration).
+
 The trust boundary is the registry. Bits are assigned in registration order,
 so registration is schema: build one `ComponentRegistry`, clone it into every
 world that must agree on masks, and register deterministically if masks are
