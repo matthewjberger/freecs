@@ -732,6 +732,88 @@ impl SparseTagSet {
     }
 }
 
+/// Archetype graph edges for one table: which table an entity lands in when a
+/// single component bit is added or removed, plus memoized targets for
+/// multi-bit changes. Shared by the macro-generated worlds and the dynamic
+/// world, since none of it depends on component types.
+#[derive(Clone, Default)]
+pub struct ArchetypeEdges {
+    pub add_edges: Vec<Option<usize>>,
+    pub remove_edges: Vec<Option<usize>>,
+    pub multi_add_cache: std::collections::HashMap<u64, usize>,
+    pub multi_remove_cache: std::collections::HashMap<u64, usize>,
+}
+
+impl ArchetypeEdges {
+    pub fn new(component_count: usize) -> Self {
+        Self {
+            add_edges: vec![None; component_count],
+            remove_edges: vec![None; component_count],
+            multi_add_cache: std::collections::HashMap::default(),
+            multi_remove_cache: std::collections::HashMap::default(),
+        }
+    }
+}
+
+/// Registers a newly pushed table with the archetype routing structures:
+/// inserts the mask lookup, appends the table's edge record, extends every
+/// query-cache entry the new table satisfies, and wires single-component
+/// edges from existing tables toward the new one. `table_masks` must iterate
+/// every table including the new one, in index order.
+pub fn archetype_register_table<M>(
+    table_lookup: &mut std::collections::HashMap<u64, usize>,
+    table_edges: &mut Vec<ArchetypeEdges>,
+    query_cache: &mut std::collections::HashMap<u64, Vec<usize>>,
+    component_count: usize,
+    mask: u64,
+    table_index: usize,
+    table_masks: M,
+    component_bits: impl Iterator<Item = (u64, usize)>,
+) where
+    M: Iterator<Item = u64> + Clone,
+{
+    table_edges.push(ArchetypeEdges::new(component_count));
+    table_lookup.insert(mask, table_index);
+
+    for (query_mask, cached_tables) in query_cache.iter_mut() {
+        if mask & *query_mask == *query_mask {
+            cached_tables.push(table_index);
+        }
+    }
+
+    for (component_mask, component_index) in component_bits {
+        for (index, existing_mask) in table_masks.clone().enumerate() {
+            if existing_mask | component_mask == mask {
+                table_edges[index].add_edges[component_index] = Some(table_index);
+            }
+            if existing_mask & !component_mask == mask {
+                table_edges[index].remove_edges[component_index] = Some(table_index);
+            }
+        }
+    }
+}
+
+/// Returns the memoized list of table indices whose masks contain `mask`,
+/// computing and caching it on first use. Taking the cache and the table
+/// masks as separate parameters keeps the borrows disjoint, so callers can
+/// mutate tables while holding the returned slice.
+pub fn archetype_cached_tables<'cache, M>(
+    query_cache: &'cache mut std::collections::HashMap<u64, Vec<usize>>,
+    table_masks: M,
+    mask: u64,
+) -> &'cache [usize]
+where
+    M: Iterator<Item = u64>,
+{
+    query_cache.entry(mask).or_insert_with(|| {
+        table_masks
+            .enumerate()
+            .filter(|(_, table_mask)| table_mask & mask == mask)
+            .map(|(table_index, _)| table_index)
+            .collect()
+    })
+}
+
 /// Backstop for worlds whose structural log is never consumed. When the log
 /// reaches this length it is cleared wholesale, so a world with no consumer
 /// stays bounded instead of leaking. Consumers that drain every frame never
@@ -1341,25 +1423,6 @@ macro_rules! ecs_kernel_impl {
                 pub mask: u64,
             }
 
-            #[derive(Clone)]
-            pub struct [<$world TableEdges>] {
-                pub add_edges: [Option<usize>; [<$world:snake:upper _COMPONENT_COUNT>]],
-                pub remove_edges: [Option<usize>; [<$world:snake:upper _COMPONENT_COUNT>]],
-                pub multi_add_cache: std::collections::HashMap<u64, usize>,
-                pub multi_remove_cache: std::collections::HashMap<u64, usize>,
-            }
-
-            impl Default for [<$world TableEdges>] {
-                fn default() -> Self {
-                    Self {
-                        add_edges: [None; [<$world:snake:upper _COMPONENT_COUNT>]],
-                        remove_edges: [None; [<$world:snake:upper _COMPONENT_COUNT>]],
-                        multi_add_cache: std::collections::HashMap::default(),
-                        multi_remove_cache: std::collections::HashMap::default(),
-                    }
-                }
-            }
-
             #[allow(unused)]
             fn [<get_component_index_ $world:snake>](mask: u64) -> Option<usize> {
                 match mask {
@@ -1471,27 +1534,19 @@ macro_rules! ecs_kernel_impl {
                     mask,
                     ..Default::default()
                 });
-                world.table_edges.push([<$world TableEdges>]::default());
-                world.table_lookup.insert(mask, table_index);
-
-                for (query_mask, cached_tables) in world.query_cache.iter_mut() {
-                    if mask & *query_mask == *query_mask {
-                        cached_tables.push(table_index);
-                    }
-                }
-
-                for comp_mask in [$($(#[$comp_attr])* $mask,)*] {
-                    if let Some(comp_index) = [<get_component_index_ $world:snake>](comp_mask) {
-                        for (index, table) in world.tables.iter().enumerate() {
-                            if table.mask | comp_mask == mask {
-                                world.table_edges[index].add_edges[comp_index] = Some(table_index);
-                            }
-                            if table.mask & !comp_mask == mask {
-                                world.table_edges[index].remove_edges[comp_index] = Some(table_index);
-                            }
-                        }
-                    }
-                }
+                $crate::archetype_register_table(
+                    &mut world.table_lookup,
+                    &mut world.table_edges,
+                    &mut world.query_cache,
+                    [<$world:snake:upper _COMPONENT_COUNT>],
+                    mask,
+                    table_index,
+                    world.tables.iter().map(|table| table.mask),
+                    [$($(#[$comp_attr])* $mask,)*].into_iter().filter_map(|component_mask| {
+                        [<get_component_index_ $world:snake>](component_mask)
+                            .map(|component_index| (component_mask, component_index))
+                    }),
+                );
 
                 table_index
             }
@@ -1502,14 +1557,11 @@ macro_rules! ecs_kernel_impl {
                 tables: &[[<$world ComponentArrays>]],
                 mask: u64,
             ) -> &'cache [usize] {
-                query_cache.entry(mask).or_insert_with(|| {
-                    tables
-                        .iter()
-                        .enumerate()
-                        .filter(|(_, table)| table.mask & mask == mask)
-                        .map(|(table_index, _)| table_index)
-                        .collect()
-                })
+                $crate::archetype_cached_tables(
+                    query_cache,
+                    tables.iter().map(|table| table.mask),
+                    mask,
+                )
             }
 
             #[allow(unused)]
@@ -2677,7 +2729,7 @@ macro_rules! ecs_impl {
                 pub tables: Vec<ComponentArrays>,
                 pub allocator: $crate::EntityAllocator,
                 pub resources: $resources,
-                pub table_edges: Vec<[<$world TableEdges>]>,
+                pub table_edges: Vec<$crate::ArchetypeEdges>,
                 pub table_lookup: std::collections::HashMap<u64, usize>,
                 pub query_cache: std::collections::HashMap<u64, Vec<usize>>,
                 pub current_tick: u32,
@@ -3248,7 +3300,7 @@ macro_rules! ecs_multi_impl {
                 pub struct $world_name {
                     pub entity_locations: $crate::EntityLocations,
                     pub tables: Vec<[<$world_name ComponentArrays>]>,
-                    pub table_edges: Vec<[<$world_name TableEdges>]>,
+                    pub table_edges: Vec<$crate::ArchetypeEdges>,
                     pub table_lookup: std::collections::HashMap<u64, usize>,
                     pub query_cache: std::collections::HashMap<u64, Vec<usize>>,
                     pub current_tick: u32,
