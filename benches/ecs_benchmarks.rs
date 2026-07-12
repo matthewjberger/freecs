@@ -1173,11 +1173,11 @@ fn bench_events(c: &mut Criterion) {
                 }
 
                 b.iter(|| {
-                    let mut event_count = 0;
-                    for _event in world.read_damage_event() {
-                        event_count += 1;
+                    let mut total = 0.0;
+                    for event in world.read_damage_event() {
+                        total += black_box(event).amount;
                     }
-                    black_box(event_count);
+                    black_box(total);
                 });
             },
         );

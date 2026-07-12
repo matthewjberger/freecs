@@ -827,7 +827,7 @@ ecs.despawn(entity);
 
 Despawning is safe against reuse: `despawn` refuses stale or already-despawned handles (returning `false`), and stale handles cannot re-add components in any world, including worlds that never stored the entity.
 
-Tags, events, resources, command buffers, and `Schedule` all work identically in multi-world mode, and the ECS keeps its own lifecycle log (`structural_changes_since` on the ECS) covering spawns, despawns, and tag flips, while each world logs its own component-level changes.
+Tags, events, resources, command buffers, and `Schedule` all work identically in multi-world mode. Structural history is split across two kinds of log, and consumers should pick one oracle per purpose. The ECS keeps a lifecycle log (`structural_changes_since` on the ECS) recording handle allocation and death (`Spawned`/`Despawned` with mask 0) plus tag flips. Each world keeps its own row-level log, where an entity is `Spawned` with a component mask when its first components arrive in that world and `Despawned` when its row leaves. An entity that gains components therefore appears as `Spawned` once in the ECS log and once per world it enters; sync world contents from world logs, and handle lifetime or tags from the ECS log, rather than merging both.
 
 One asymmetry: per-world query masks contain only that world's component bits, so tags cannot appear in per-world masks (this is asserted in debug builds). Tag filtering in multi-world uses the tag-set variants with split borrows:
 

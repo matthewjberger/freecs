@@ -2176,7 +2176,12 @@ macro_rules! ecs_kernel_impl {
                 /// Removes the entity's row if present and records the next
                 /// generation for this id, so stale writes can be refused even
                 /// in worlds that never stored the entity. Must only be called
-                /// with a handle the allocator confirmed live.
+                /// with a handle the allocator confirmed live; in multi-world
+                /// mode this is the per-world eviction step that `despawn`
+                /// drives across every world. Calling it directly on a
+                /// single world leaks the handle: the row disappears while the
+                /// allocator still counts it live, so the id is never
+                /// recycled. Use `despawn_entities` there instead.
                 pub fn retire_entity(&mut self, entity: $crate::Entity) -> bool {
                     let mut removed = false;
                     if let Some(loc) = self.entity_locations.get_mut(entity.id) {
@@ -3521,6 +3526,13 @@ macro_rules! ecs_multi_impl {
                     self.structural_sequence
                 }
 
+                /// The ECS-level lifecycle log: handle allocation (`Spawned`
+                /// with mask 0), handle death (`Despawned` with mask 0), and
+                /// tag flips. Row-level history lives in each world's own log,
+                /// where an entity is `Spawned` with a component mask when its
+                /// first components arrive there. Sync world contents from the
+                /// world logs and handle lifetime or tags from this one; a
+                /// consumer merging both will see one entity spawn twice.
                 pub fn structural_changes_since(&self, cursor: u64) -> &[$crate::StructuralChange] {
                     let start = self.structural_log.partition_point(|change| change.sequence <= cursor);
                     &self.structural_log[start..]
