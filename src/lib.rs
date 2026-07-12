@@ -492,6 +492,7 @@ pub struct EntityAllocator {
 }
 
 impl EntityAllocator {
+    #[inline]
     pub fn allocate(&mut self) -> Entity {
         let entity = if let Some((id, next_generation)) = self.free_ids.pop() {
             Entity {
@@ -516,6 +517,7 @@ impl EntityAllocator {
 
     /// Pre-grows the liveness table for `count` upcoming allocations, so the
     /// per-allocation growth check stays predictably false in batch spawns.
+    #[inline]
     pub fn reserve(&mut self, count: usize) {
         let worst_case = self.next_id as usize + count;
         if worst_case > self.slots.len() {
@@ -525,6 +527,7 @@ impl EntityAllocator {
 
     /// Frees the handle if it is currently live. Returns false for stale
     /// generations and double frees, leaving the allocator untouched.
+    #[inline]
     pub fn deallocate(&mut self, entity: Entity) -> bool {
         if !self.is_alive(entity) {
             return false;
@@ -535,6 +538,7 @@ impl EntityAllocator {
         true
     }
 
+    #[inline]
     pub fn is_alive(&self, entity: Entity) -> bool {
         self.slots
             .get(entity.id as usize)
@@ -635,6 +639,7 @@ pub struct SparseTagSet {
 impl SparseTagSet {
     /// Adds the entity, replacing any stale entry for the same id. Returns
     /// false if this exact handle was already present.
+    #[inline]
     pub fn insert(&mut self, entity: Entity) -> bool {
         let index = entity.id as usize;
         if index >= self.sparse.len() {
@@ -654,6 +659,7 @@ impl SparseTagSet {
         true
     }
 
+    #[inline]
     pub fn remove(&mut self, entity: Entity) -> bool {
         let index = entity.id as usize;
         let Some(&slot) = self.sparse.get(index) else {
@@ -671,6 +677,7 @@ impl SparseTagSet {
         true
     }
 
+    #[inline]
     pub fn contains(&self, entity: Entity) -> bool {
         self.sparse
             .get(entity.id as usize)
@@ -795,6 +802,7 @@ impl<T> EventChannel<T> {
 
     /// Sends an event. It stays readable until it expires two `update()`
     /// calls later or a cursor consumer trims past it.
+    #[inline]
     pub fn send(&mut self, event: T) {
         if self.events.len() >= EVENT_CHANNEL_CAPACITY {
             self.drop_oldest_half();
@@ -811,12 +819,14 @@ impl<T> EventChannel<T> {
 
     /// The sequence number of the most recently sent event. Record this as
     /// your cursor after consuming `events_since`.
+    #[inline]
     pub fn sequence(&self) -> u64 {
         self.base_sequence + self.events.len() as u64
     }
 
     /// All buffered events sent after `cursor`, oldest first. A cursor older
     /// than the buffer yields everything still buffered.
+    #[inline]
     pub fn events_since(&self, cursor: u64) -> &[T] {
         let start = cursor
             .saturating_sub(self.base_sequence)
