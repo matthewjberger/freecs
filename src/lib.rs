@@ -1274,6 +1274,31 @@ macro_rules! ecs {
 /// for a live entity this world has never stored. Multi-world worlds need
 /// that (entities gain components per world lazily); a single world never
 /// does, because spawning always creates the row.
+///
+/// # Extending these macros
+///
+/// `macro_rules!` cannot nest repetitions from different capture groups: a
+/// `$($tag_name ...)*` inside a `$($name ...)*` fails with "meta-variable
+/// repeats N times, but ... repeats M times" because the expander tries to
+/// iterate the groups in lockstep. That single constraint shaped the tag
+/// architecture, and any new feature that needs component and tag captures
+/// in one body must use one of the three patterns already in this file:
+///
+/// - Generate the code at method level, outside any per-component
+///   repetition, where each group can repeat independently (the mode-level
+///   `for_each*` wrappers and their filter closures).
+/// - Route the shared body through a kernel free function that takes the
+///   tables and query cache as separate parameters, and pass tag state in
+///   as a closure built where tag names are in scope, destructuring `self`
+///   into disjoint fields when a `&mut` path needs it (`tables_for_each_*`).
+/// - Inside a per-component repetition, avoid capturing tag names at all
+///   and call a whole-`self` helper like `entity_matches_tags` between
+///   short-lived borrows (`query_<name>_mut`).
+///
+/// Generated items carry `#[allow(unused)]` because a user's declaration
+/// legitimately uses a fraction of the emitted surface. The cost is that
+/// genuinely dead generated code will not warn, so removals here need a
+/// manual search for remaining emit sites.
 #[doc(hidden)]
 #[macro_export]
 macro_rules! ecs_kernel_impl {
@@ -2225,6 +2250,13 @@ macro_rules! ecs_kernel_impl {
                     removed
                 }
 
+                /// Adds components, migrating the entity's row. In
+                /// multi-world mode a live handle this world has never stored
+                /// gets a row inserted directly; the generation check refuses
+                /// stale handles for any id this ECS has despawned, but a
+                /// handle forged for an id the allocator never issued cannot
+                /// be detected here because worlds hold no allocator access.
+                /// Only handles minted by the shared allocator are supported.
                 pub fn add_components(&mut self, entity: $crate::Entity, mask: u64) -> bool {
                     debug_assert_eq!(
                         mask & ![<$world:snake:upper _ALL_COMPONENTS>],
@@ -2913,6 +2945,12 @@ macro_rules! ecs_impl {
 
                 $(
                     $(#[$comp_attr])*
+                    /// Visits the component mutably for every entity matching
+                    /// `mask` (components and tags), stamping change ticks.
+                    /// Scans tables by mask rather than the query cache: the
+                    /// per-entity tag checks here live inside a per-component
+                    /// macro repetition, which rules out the borrow shapes the
+                    /// cached paths use (see the note on `ecs_kernel_impl`).
                     pub fn [<query_ $name _mut>]<F>(&mut self, mask: u64, mut f: F)
                     where
                         F: FnMut($crate::Entity, &mut $type),
@@ -3006,6 +3044,11 @@ macro_rules! ecs_impl {
                         self.$event_name.clear();
                     }
 
+                    /// Expires this channel's events after their two-frame
+                    /// window. `step()` already calls this once per frame for
+                    /// every channel; calling both halves event lifetime, so
+                    /// use this directly only when managing frame boundaries
+                    /// yourself.
                     pub fn [<update_ $event_name>](&mut self) {
                         self.$event_name.update();
                     }
@@ -3492,7 +3535,11 @@ macro_rules! ecs_multi_impl {
 
                 /// Despawns the entity across every world, dropping its tags.
                 /// Returns false for stale or already-despawned handles, which
-                /// are left untouched.
+                /// are left untouched. The per-world retirement broadcast
+                /// grows each world's location table to cover the despawned
+                /// id, 16 bytes per id per world even in worlds that never
+                /// stored the entity; that footprint is what makes stale
+                /// writes refusable everywhere.
                 pub fn despawn(&mut self, entity: $crate::Entity) -> bool {
                     if !self.allocator.deallocate(entity) {
                         return false;
@@ -3596,6 +3643,11 @@ macro_rules! ecs_multi_impl {
                         self.$event_name.clear();
                     }
 
+                    /// Expires this channel's events after their two-frame
+                    /// window. `step()` already calls this once per frame for
+                    /// every channel; calling both halves event lifetime, so
+                    /// use this directly only when managing frame boundaries
+                    /// yourself.
                     pub fn [<update_ $event_name>](&mut self) {
                         self.$event_name.update();
                     }
@@ -4838,6 +4890,260 @@ mod tests {
 
         let other = allocator.allocate();
         assert_ne!((other.id, other.generation), (reused.id, reused.generation));
+    }
+
+    struct Lcg(u64);
+
+    impl Lcg {
+        fn next(&mut self) -> u64 {
+            self.0 = self
+                .0
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            self.0 >> 16
+        }
+    }
+
+    #[test]
+    fn test_event_channel_capacity_backstop() {
+        let mut channel: EventChannel<u32> = EventChannel::new();
+        let total = EVENT_CHANNEL_CAPACITY as u32 + 10;
+        for value in 0..total {
+            channel.send(value);
+        }
+
+        assert_eq!(
+            channel.len(),
+            EVENT_CHANNEL_CAPACITY / 2 + 10,
+            "crossing capacity must drop the oldest half exactly once"
+        );
+        assert_eq!(
+            channel.sequence(),
+            u64::from(total),
+            "sequences must keep counting across the backstop"
+        );
+        assert_eq!(
+            channel.peek(),
+            Some(&(EVENT_CHANNEL_CAPACITY as u32 / 2)),
+            "the survivor at the front is the first event after the dropped half"
+        );
+        assert_eq!(channel.events_since(u64::from(total) - 5).len(), 5);
+
+        channel.update();
+        assert_eq!(
+            channel.len(),
+            EVENT_CHANNEL_CAPACITY / 2 + 10,
+            "a stale previous-update watermark behind the base must not over-trim"
+        );
+
+        channel.update();
+        assert!(channel.is_empty());
+        assert_eq!(channel.sequence(), u64::from(total));
+    }
+
+    #[test]
+    fn test_structural_log_capacity_backstop() {
+        let mut world = World::default();
+        let entity = world.spawn_entities(POSITION, 1)[0];
+
+        for _ in 0..STRUCTURAL_LOG_CAPACITY {
+            world.record_structural(entity, StructuralChangeKind::ComponentsAdded, POSITION);
+        }
+
+        assert_eq!(
+            world.structural_log.len(),
+            1,
+            "the record that found the log full must clear it wholesale first"
+        );
+        assert_eq!(
+            world.structural_sequence(),
+            STRUCTURAL_LOG_CAPACITY as u64 + 1,
+            "sequences must stay monotone across the wholesale clear"
+        );
+
+        let tail = world.structural_changes_since(0);
+        assert_eq!(tail.len(), 1);
+        assert_eq!(tail[0].sequence, world.structural_sequence());
+        assert!(
+            world
+                .structural_changes_since(world.structural_sequence())
+                .is_empty()
+        );
+    }
+
+    #[derive(Default, Clone)]
+    struct ModelEntity {
+        mask: u64,
+        player: bool,
+        enemy: bool,
+    }
+
+    #[test]
+    fn test_property_single_world_matches_model() {
+        let component_masks = [POSITION, VELOCITY, HEALTH];
+
+        for seed in [1u64, 42, 4242, 987654321] {
+            let mut rng = Lcg(seed);
+            let mut world = World::default();
+            let mut model: std::collections::HashMap<Entity, ModelEntity> =
+                std::collections::HashMap::new();
+            let mut handles: Vec<Entity> = Vec::new();
+
+            let random_mask = |rng: &mut Lcg| {
+                let mut mask = 0;
+                for &component in &component_masks {
+                    if rng.next().is_multiple_of(2) {
+                        mask |= component;
+                    }
+                }
+                mask
+            };
+            let pick = |rng: &mut Lcg, handles: &[Entity]| {
+                if handles.is_empty() {
+                    None
+                } else {
+                    Some(handles[rng.next() as usize % handles.len()])
+                }
+            };
+
+            for _ in 0..4000 {
+                match rng.next() % 9 {
+                    0 | 1 => {
+                        let mask = random_mask(&mut rng);
+                        let entity = world.spawn_entities(mask, 1)[0];
+                        model.insert(
+                            entity,
+                            ModelEntity {
+                                mask,
+                                ..Default::default()
+                            },
+                        );
+                        handles.push(entity);
+                    }
+                    2 => {
+                        if let Some(entity) = pick(&mut rng, &handles) {
+                            let despawned = world.despawn_entities(&[entity]);
+                            let was_live = model.remove(&entity).is_some();
+                            assert_eq!(
+                                despawned.len() == 1,
+                                was_live,
+                                "despawn must succeed exactly for model-live handles"
+                            );
+                        }
+                    }
+                    3 => {
+                        if let Some(entity) = pick(&mut rng, &handles) {
+                            let mask = random_mask(&mut rng);
+                            let accepted = world.add_components(entity, mask);
+                            match model.get_mut(&entity) {
+                                Some(model_entity) => {
+                                    assert!(accepted);
+                                    model_entity.mask |= mask;
+                                }
+                                None => assert!(!accepted, "stale add must be refused"),
+                            }
+                        }
+                    }
+                    4 => {
+                        if let Some(entity) = pick(&mut rng, &handles) {
+                            let mask = random_mask(&mut rng);
+                            let accepted = world.remove_components(entity, mask);
+                            match model.get_mut(&entity) {
+                                Some(model_entity) => {
+                                    assert!(accepted);
+                                    model_entity.mask &= !mask;
+                                }
+                                None => assert!(!accepted, "stale remove must be refused"),
+                            }
+                        }
+                    }
+                    5 => {
+                        if let Some(entity) = pick(&mut rng, &handles) {
+                            world.add_player(entity);
+                            if let Some(model_entity) = model.get_mut(&entity) {
+                                model_entity.player = true;
+                            }
+                            assert_eq!(
+                                world.has_player(entity),
+                                model.get(&entity).map(|m| m.player).unwrap_or(false)
+                            );
+                        }
+                    }
+                    6 => {
+                        if let Some(entity) = pick(&mut rng, &handles) {
+                            let removed = world.remove_player(entity);
+                            let expected = match model.get_mut(&entity) {
+                                Some(model_entity) => {
+                                    let had = model_entity.player;
+                                    model_entity.player = false;
+                                    had
+                                }
+                                None => false,
+                            };
+                            assert_eq!(removed, expected);
+                        }
+                    }
+                    7 => {
+                        if let Some(entity) = pick(&mut rng, &handles) {
+                            let value = (rng.next() % 1000) as f32;
+                            world.set_position(entity, Position { x: value, y: 0.0 });
+                            match model.get_mut(&entity) {
+                                Some(model_entity) => {
+                                    model_entity.mask |= POSITION;
+                                    assert_eq!(world.get_position(entity).unwrap().x, value);
+                                }
+                                None => assert!(
+                                    world.get_position(entity).is_none(),
+                                    "stale set must not resurrect a component"
+                                ),
+                            }
+                        }
+                    }
+                    _ => {
+                        world.step();
+                    }
+                }
+            }
+
+            assert_eq!(world.entity_count(), model.len());
+
+            for (&entity, model_entity) in &model {
+                assert_eq!(world.component_mask(entity), Some(model_entity.mask));
+                assert_eq!(world.has_player(entity), model_entity.player);
+                assert_eq!(world.has_enemy(entity), model_entity.enemy);
+                assert!(world.is_alive(entity));
+            }
+
+            for &handle in &handles {
+                if !model.contains_key(&handle) {
+                    assert_eq!(world.component_mask(handle), None);
+                    assert!(!world.has_player(handle));
+                    assert!(world.get_position(handle).is_none());
+                    assert!(!world.is_alive(handle));
+                }
+            }
+
+            for mask in [
+                POSITION,
+                VELOCITY,
+                HEALTH,
+                POSITION | VELOCITY,
+                POSITION | HEALTH,
+            ] {
+                let expected = model
+                    .values()
+                    .filter(|model_entity| model_entity.mask & mask == mask)
+                    .count();
+                assert_eq!(
+                    world.query_entities(mask).count(),
+                    expected,
+                    "query count diverged from model for mask {mask:b} with seed {seed}"
+                );
+            }
+
+            let expected_players = model.values().filter(|m| m.player).count();
+            assert_eq!(world.query_player().count(), expected_players);
+        }
     }
 
     #[test]
@@ -7539,6 +7845,195 @@ mod tests {
             assert_eq!(ecs.core_world.get_position(reused).unwrap().x, 4.0);
             assert_eq!(ecs.render_world.get_sprite(reused).unwrap().id, 5);
             assert!(ecs.core_world.get_position(old).is_none());
+        }
+
+        #[test]
+        #[cfg(not(target_family = "wasm"))]
+        fn test_multi_world_par_for_each_mut_with_tags() {
+            let mut ecs = GameEcs::default();
+            let e1 = ecs.spawn();
+            let e2 = ecs.spawn();
+
+            ecs.core_world.set_position(e1, Position { x: 1.0, y: 0.0 });
+            ecs.core_world.set_position(e2, Position { x: 2.0, y: 0.0 });
+            ecs.add_player(e1);
+
+            let player_set = ecs.player.clone();
+            ecs.core_world.par_for_each_mut_with_tags(
+                MW_POSITION,
+                0,
+                &[&player_set],
+                &[],
+                |_entity, table, index| {
+                    table.position[index].x += 100.0;
+                },
+            );
+
+            assert_eq!(ecs.core_world.get_position(e1).unwrap().x, 101.0);
+            assert_eq!(ecs.core_world.get_position(e2).unwrap().x, 2.0);
+
+            ecs.core_world.par_for_each_mut_with_tags(
+                MW_POSITION,
+                0,
+                &[],
+                &[&player_set],
+                |_entity, table, index| {
+                    table.position[index].y = 7.0;
+                },
+            );
+
+            assert_eq!(ecs.core_world.get_position(e1).unwrap().y, 0.0);
+            assert_eq!(ecs.core_world.get_position(e2).unwrap().y, 7.0);
+        }
+
+        #[derive(Default, Clone)]
+        struct MultiModelEntity {
+            core_mask: Option<u64>,
+            render_mask: Option<u64>,
+            player: bool,
+        }
+
+        #[test]
+        fn test_property_multi_world_matches_model() {
+            for seed in [7u64, 1337, 24601] {
+                let mut rng = Lcg(seed);
+                let mut ecs = GameEcs::default();
+                let mut model: std::collections::HashMap<Entity, MultiModelEntity> =
+                    std::collections::HashMap::new();
+                let mut handles: Vec<Entity> = Vec::new();
+
+                let pick = |rng: &mut Lcg, handles: &[Entity]| {
+                    if handles.is_empty() {
+                        None
+                    } else {
+                        Some(handles[rng.next() as usize % handles.len()])
+                    }
+                };
+
+                for _ in 0..3000 {
+                    match rng.next() % 8 {
+                        0 | 1 => {
+                            let entity = ecs.spawn();
+                            model.insert(entity, MultiModelEntity::default());
+                            handles.push(entity);
+                        }
+                        2 => {
+                            if let Some(entity) = pick(&mut rng, &handles) {
+                                let accepted = ecs.despawn(entity);
+                                let was_live = model.remove(&entity).is_some();
+                                assert_eq!(
+                                    accepted, was_live,
+                                    "despawn must succeed exactly for model-live handles"
+                                );
+                            }
+                        }
+                        3 => {
+                            if let Some(entity) = pick(&mut rng, &handles) {
+                                let value = (rng.next() % 1000) as f32;
+                                ecs.core_world
+                                    .set_position(entity, Position { x: value, y: 0.0 });
+                                match model.get_mut(&entity) {
+                                    Some(model_entity) => {
+                                        let mask = model_entity.core_mask.get_or_insert(0);
+                                        *mask |= MW_POSITION;
+                                        assert_eq!(
+                                            ecs.core_world.get_position(entity).unwrap().x,
+                                            value
+                                        );
+                                    }
+                                    None => assert!(
+                                        ecs.core_world.get_position(entity).is_none(),
+                                        "stale cross-world set must not resurrect"
+                                    ),
+                                }
+                            }
+                        }
+                        4 => {
+                            if let Some(entity) = pick(&mut rng, &handles) {
+                                let id = rng.next() as u32 % 1000;
+                                ecs.render_world.set_sprite(entity, Sprite { id });
+                                match model.get_mut(&entity) {
+                                    Some(model_entity) => {
+                                        let mask = model_entity.render_mask.get_or_insert(0);
+                                        *mask |= MW_SPRITE;
+                                        assert_eq!(
+                                            ecs.render_world.get_sprite(entity).unwrap().id,
+                                            id
+                                        );
+                                    }
+                                    None => assert!(ecs.render_world.get_sprite(entity).is_none()),
+                                }
+                            }
+                        }
+                        5 => {
+                            if let Some(entity) = pick(&mut rng, &handles) {
+                                let accepted =
+                                    ecs.core_world.remove_components(entity, MW_POSITION);
+                                match model.get_mut(&entity) {
+                                    Some(model_entity) => {
+                                        if let Some(mask) = model_entity.core_mask.as_mut() {
+                                            assert!(accepted);
+                                            *mask &= !MW_POSITION;
+                                        } else {
+                                            assert!(
+                                                !accepted,
+                                                "remove without a row must report false"
+                                            );
+                                        }
+                                    }
+                                    None => assert!(!accepted),
+                                }
+                            }
+                        }
+                        6 => {
+                            if let Some(entity) = pick(&mut rng, &handles) {
+                                ecs.add_player(entity);
+                                if let Some(model_entity) = model.get_mut(&entity) {
+                                    model_entity.player = true;
+                                }
+                                assert_eq!(
+                                    ecs.has_player(entity),
+                                    model.get(&entity).map(|m| m.player).unwrap_or(false)
+                                );
+                            }
+                        }
+                        _ => {
+                            ecs.step();
+                        }
+                    }
+                }
+
+                for (&entity, model_entity) in &model {
+                    assert!(ecs.is_alive(entity));
+                    assert_eq!(
+                        ecs.core_world.component_mask(entity),
+                        model_entity.core_mask,
+                        "core mask diverged with seed {seed}"
+                    );
+                    assert_eq!(
+                        ecs.render_world.component_mask(entity),
+                        model_entity.render_mask,
+                        "render mask diverged with seed {seed}"
+                    );
+                    assert_eq!(ecs.has_player(entity), model_entity.player);
+                }
+
+                for &handle in &handles {
+                    if !model.contains_key(&handle) {
+                        assert!(!ecs.is_alive(handle));
+                        assert_eq!(ecs.core_world.component_mask(handle), None);
+                        assert_eq!(ecs.render_world.component_mask(handle), None);
+                        assert!(!ecs.has_player(handle));
+                        assert!(!ecs.despawn(handle), "double despawn must stay refused");
+                    }
+                }
+
+                let expected_core_rows = model.values().filter(|m| m.core_mask.is_some()).count();
+                assert_eq!(ecs.core_world.entity_count(), expected_core_rows);
+
+                let expected_players = model.values().filter(|m| m.player).count();
+                assert_eq!(ecs.query_player().count(), expected_players);
+            }
         }
 
         #[test]
