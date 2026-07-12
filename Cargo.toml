@@ -15,6 +15,7 @@ rust-version = "1.90"
 [features]
 default = ["serde"]
 serde = ["dep:serde"]
+dynamic = []
 audio = []
 
 [dependencies]

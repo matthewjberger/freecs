@@ -454,6 +454,9 @@
 
 pub use paste;
 
+#[cfg(feature = "dynamic")]
+pub mod dynamic;
+
 #[cfg(not(target_family = "wasm"))]
 pub use rayon;
 
