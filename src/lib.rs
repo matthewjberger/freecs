@@ -3799,9 +3799,17 @@ mod tests {
             enemy => ENEMY,
             active => ACTIVE,
         }
+        Events {
+            ping: PingEvent,
+        }
         Resources {
             _delta_time: f32,
         }
+    }
+
+    #[derive(Debug, Clone)]
+    pub struct PingEvent {
+        pub value: u32,
     }
 
     use components::*;
@@ -4974,8 +4982,137 @@ mod tests {
     #[derive(Default, Clone)]
     struct ModelEntity {
         mask: u64,
+        position: Option<f32>,
+        position_changed: bool,
         player: bool,
         enemy: bool,
+    }
+
+    enum ModelCommand {
+        Spawn(u64),
+        Despawn(Entity),
+        AddComponents(Entity, u64),
+        RemoveComponents(Entity, u64),
+        SetPosition(Entity, f32),
+        AddPlayer(Entity),
+        RemovePlayer(Entity),
+    }
+
+    fn model_add_components(model_entity: &mut ModelEntity, mask: u64) {
+        let migrated = mask & !model_entity.mask != 0;
+        if mask & POSITION != 0 && model_entity.mask & POSITION == 0 {
+            model_entity.position = Some(0.0);
+        }
+        model_entity.mask |= mask;
+        if migrated && model_entity.mask & POSITION != 0 {
+            model_entity.position_changed = true;
+        }
+    }
+
+    fn model_remove_components(model_entity: &mut ModelEntity, mask: u64) {
+        let migrated = mask & model_entity.mask != 0;
+        if mask & POSITION != 0 {
+            model_entity.position = None;
+        }
+        model_entity.mask &= !mask;
+        if migrated && model_entity.mask & POSITION != 0 {
+            model_entity.position_changed = true;
+        }
+    }
+
+    fn model_set_position(model_entity: &mut ModelEntity, value: f32) {
+        model_entity.mask |= POSITION;
+        model_entity.position = Some(value);
+        model_entity.position_changed = true;
+    }
+
+    fn model_spawn(mask: u64) -> ModelEntity {
+        ModelEntity {
+            mask,
+            position: (mask & POSITION != 0).then_some(0.0),
+            position_changed: mask & POSITION != 0,
+            ..Default::default()
+        }
+    }
+
+    fn apply_and_replay(
+        world: &mut World,
+        model: &mut std::collections::HashMap<Entity, ModelEntity>,
+        queued: &mut Vec<ModelCommand>,
+        handles: &mut Vec<Entity>,
+    ) {
+        assert_eq!(
+            world.command_count(),
+            queued.len(),
+            "world and model must queue in lockstep"
+        );
+        world.apply_commands();
+
+        let mut spawned_masks: Vec<u64> = Vec::new();
+        for command in queued.drain(..) {
+            match command {
+                ModelCommand::Spawn(mask) => spawned_masks.push(mask),
+                ModelCommand::Despawn(entity) => {
+                    model.remove(&entity);
+                }
+                ModelCommand::AddComponents(entity, mask) => {
+                    if let Some(model_entity) = model.get_mut(&entity) {
+                        model_add_components(model_entity, mask);
+                    }
+                }
+                ModelCommand::RemoveComponents(entity, mask) => {
+                    if let Some(model_entity) = model.get_mut(&entity) {
+                        model_remove_components(model_entity, mask);
+                    }
+                }
+                ModelCommand::SetPosition(entity, value) => {
+                    if let Some(model_entity) = model.get_mut(&entity) {
+                        model_set_position(model_entity, value);
+                    }
+                }
+                ModelCommand::AddPlayer(entity) => {
+                    if let Some(model_entity) = model.get_mut(&entity) {
+                        model_entity.player = true;
+                    }
+                }
+                ModelCommand::RemovePlayer(entity) => {
+                    if let Some(model_entity) = model.get_mut(&entity) {
+                        model_entity.player = false;
+                    }
+                }
+            }
+        }
+
+        if !spawned_masks.is_empty() {
+            let known: std::collections::HashSet<Entity> = model.keys().copied().collect();
+            let new_entities: Vec<Entity> = world
+                .get_all_entities()
+                .into_iter()
+                .filter(|entity| !known.contains(entity))
+                .collect();
+            assert_eq!(
+                new_entities.len(),
+                spawned_masks.len(),
+                "queued spawns must materialize exactly"
+            );
+
+            let mut actual_masks: Vec<u64> = new_entities
+                .iter()
+                .map(|&entity| world.component_mask(entity).unwrap())
+                .collect();
+            actual_masks.sort_unstable();
+            spawned_masks.sort_unstable();
+            assert_eq!(
+                actual_masks, spawned_masks,
+                "queued spawn masks must match the materialized archetypes"
+            );
+
+            for &entity in &new_entities {
+                let mask = world.component_mask(entity).unwrap();
+                model.insert(entity, model_spawn(mask));
+                handles.push(entity);
+            }
+        }
     }
 
     #[test]
@@ -4988,6 +5125,11 @@ mod tests {
             let mut model: std::collections::HashMap<Entity, ModelEntity> =
                 std::collections::HashMap::new();
             let mut handles: Vec<Entity> = Vec::new();
+            let mut queued: Vec<ModelCommand> = Vec::new();
+            let mut pending_pings: usize = 0;
+            let mut total_pings: u64 = 0;
+
+            world.step();
 
             let random_mask = |rng: &mut Lcg| {
                 let mut mask = 0;
@@ -5007,17 +5149,11 @@ mod tests {
             };
 
             for _ in 0..4000 {
-                match rng.next() % 9 {
+                match rng.next() % 16 {
                     0 | 1 => {
                         let mask = random_mask(&mut rng);
                         let entity = world.spawn_entities(mask, 1)[0];
-                        model.insert(
-                            entity,
-                            ModelEntity {
-                                mask,
-                                ..Default::default()
-                            },
-                        );
+                        model.insert(entity, model_spawn(mask));
                         handles.push(entity);
                     }
                     2 => {
@@ -5038,7 +5174,7 @@ mod tests {
                             match model.get_mut(&entity) {
                                 Some(model_entity) => {
                                     assert!(accepted);
-                                    model_entity.mask |= mask;
+                                    model_add_components(model_entity, mask);
                                 }
                                 None => assert!(!accepted, "stale add must be refused"),
                             }
@@ -5051,7 +5187,7 @@ mod tests {
                             match model.get_mut(&entity) {
                                 Some(model_entity) => {
                                     assert!(accepted);
-                                    model_entity.mask &= !mask;
+                                    model_remove_components(model_entity, mask);
                                 }
                                 None => assert!(!accepted, "stale remove must be refused"),
                             }
@@ -5089,7 +5225,7 @@ mod tests {
                             world.set_position(entity, Position { x: value, y: 0.0 });
                             match model.get_mut(&entity) {
                                 Some(model_entity) => {
-                                    model_entity.mask |= POSITION;
+                                    model_set_position(model_entity, value);
                                     assert_eq!(world.get_position(entity).unwrap().x, value);
                                 }
                                 None => assert!(
@@ -5099,16 +5235,99 @@ mod tests {
                             }
                         }
                     }
+                    8 => {
+                        if let Some(entity) = pick(&mut rng, &handles) {
+                            world.queue_despawn_entity(entity);
+                            queued.push(ModelCommand::Despawn(entity));
+                        }
+                    }
+                    9 => {
+                        if let Some(entity) = pick(&mut rng, &handles) {
+                            let mask = random_mask(&mut rng);
+                            world.queue_add_components(entity, mask);
+                            queued.push(ModelCommand::AddComponents(entity, mask));
+                        }
+                    }
+                    10 => {
+                        if let Some(entity) = pick(&mut rng, &handles) {
+                            let mask = random_mask(&mut rng);
+                            world.queue_remove_components(entity, mask);
+                            queued.push(ModelCommand::RemoveComponents(entity, mask));
+                        }
+                    }
+                    11 => {
+                        if let Some(entity) = pick(&mut rng, &handles) {
+                            let value = (rng.next() % 1000) as f32;
+                            world.queue_set_position(entity, Position { x: value, y: 0.0 });
+                            queued.push(ModelCommand::SetPosition(entity, value));
+                        }
+                    }
+                    12 => {
+                        if let Some(entity) = pick(&mut rng, &handles) {
+                            if rng.next().is_multiple_of(2) {
+                                world.queue_add_player(entity);
+                                queued.push(ModelCommand::AddPlayer(entity));
+                            } else {
+                                world.queue_remove_player(entity);
+                                queued.push(ModelCommand::RemovePlayer(entity));
+                            }
+                        }
+                    }
+                    13 => {
+                        let mask = random_mask(&mut rng);
+                        world.queue_spawn_entities(mask, 1);
+                        queued.push(ModelCommand::Spawn(mask));
+                    }
+                    14 => {
+                        let value = rng.next() as u32;
+                        world.send_ping(PingEvent { value });
+                        pending_pings += 1;
+                        total_pings += 1;
+                    }
                     _ => {
+                        apply_and_replay(&mut world, &mut model, &mut queued, &mut handles);
+
+                        let changed: std::collections::HashSet<Entity> =
+                            world.query_entities_changed(POSITION).collect();
+                        let expected: std::collections::HashSet<Entity> = model
+                            .iter()
+                            .filter(|(_, model_entity)| {
+                                model_entity.mask & POSITION != 0 && model_entity.position_changed
+                            })
+                            .map(|(&entity, _)| entity)
+                            .collect();
+                        assert_eq!(
+                            changed, expected,
+                            "changed-query set diverged from model with seed {seed}"
+                        );
+
                         world.step();
+                        for model_entity in model.values_mut() {
+                            model_entity.position_changed = false;
+                        }
+
+                        assert_eq!(
+                            world.len_ping(),
+                            pending_pings,
+                            "post-step event buffer must hold exactly the just-ended frame"
+                        );
+                        assert_eq!(world.sequence_ping(), total_pings);
+                        pending_pings = 0;
                     }
                 }
             }
+
+            apply_and_replay(&mut world, &mut model, &mut queued, &mut handles);
 
             assert_eq!(world.entity_count(), model.len());
 
             for (&entity, model_entity) in &model {
                 assert_eq!(world.component_mask(entity), Some(model_entity.mask));
+                assert_eq!(
+                    world.get_position(entity).map(|position| position.x),
+                    model_entity.position,
+                    "position value diverged from model with seed {seed}"
+                );
                 assert_eq!(world.has_player(entity), model_entity.player);
                 assert_eq!(world.has_enemy(entity), model_entity.enemy);
                 assert!(world.is_alive(entity));
