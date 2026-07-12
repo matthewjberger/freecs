@@ -810,11 +810,38 @@ world
     });
 
 assert_eq!(world.get::<Position>(entity).unwrap().x, 1.0);
+
+// Optional elements visit every match and yield None where the component
+// is missing; tuples take up to eight elements.
+world
+    .query::<(&mut Position, Option<&Velocity>)>()
+    .for_each(|_entity, (position, velocity)| {
+        if let Some(velocity) = velocity {
+            position.x += velocity.x;
+        }
+    });
+
+// On a shared borrow, read-only tuples run as a real Iterator whose items
+// borrow the world, so results collect and compose with adapters.
+let fastest = world
+    .query_ref::<(&Position, Option<&Velocity>)>()
+    .iter()
+    .filter_map(|(_entity, (_position, velocity))| velocity)
+    .map(|velocity| velocity.x)
+    .fold(0.0_f32, f32::max);
+assert_eq!(fastest, 1.0);
+
+// resource_scope takes a resource out of the world for one closure, so a
+// system can mutate the resource and the world without borrow juggling.
+world.insert_resource(0u32);
+world.resource_scope(|world, kills: &mut u32| {
+    *kills += world.query_ref::<(&Position,)>().iter().count() as u32;
+});
 ```
 
 Three access tiers, from ergonomic to explicit:
 
-- **Typed**: `spawn(bundle)`, `get::<T>` / `set` / `remove`, `query::<(&mut A, &B)>()`, `send(event)` / `read_events_since::<T>(cursor)`, `insert_resource` / `resource::<T>()`. `TypeId` lookups happen at registration and per typed call, never inside iteration loops.
+- **Typed**: `spawn(bundle)`, `get::<T>` / `set` / `remove`, `query::<(&mut A, &B)>()` with `Option<&T>` elements and up to eight per tuple, `query_ref` iterators on `&world`, `resource_scope`, `send(event)` / `read_events_since::<T>(cursor)`, `insert_resource` / `resource::<T>()`. `TypeId` lookups happen at registration and per typed call, never inside iteration loops.
 - **Keyed**: `register::<T>()` returns a copyable `ComponentKey<T>` carrying the component's mask bit; `get_keyed` / `set_keyed` and mask-based `for_each` / `for_each_mut` skip the hash entirely.
 - **Raw tables**: `for_each_tables_mut(mask, 0, |table| ...)` with `table.columns_pair(a, b)` hoists concrete slices once per table for the tightest loops, no change stamping, same covenant as the static path.
 

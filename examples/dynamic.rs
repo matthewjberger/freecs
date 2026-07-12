@@ -116,6 +116,43 @@ fn main() {
             println!("static scenery: {entity}");
         });
 
+    println!("\n=== Optional elements and read-only iterators ===");
+    world
+        .query::<(&Position, Option<&Health>)>()
+        .for_each(|entity, (_position, health)| match health {
+            Some(health) => println!("{entity} has {:.0} health", health.value),
+            None => println!("{entity} is indestructible"),
+        });
+
+    let names: Vec<String> = world
+        .query_ref::<(&Position, Option<&Velocity>)>()
+        .iter()
+        .map(|(entity, (position, velocity))| {
+            let motion = if velocity.is_some() {
+                "moving"
+            } else {
+                "still"
+            };
+            format!(
+                "{entity} {motion} at ({:.1}, {:.1})",
+                position.x, position.y
+            )
+        })
+        .collect();
+    println!("{}", names.join("\n"));
+
+    println!("\n=== Resource scope ===");
+    world.resource_scope(|world, delta_time: &mut f32| {
+        *delta_time = 0.5;
+        world
+            .query::<(&mut Position, &Velocity)>()
+            .for_each(|_entity, (position, velocity)| {
+                position.x += velocity.x * *delta_time;
+                position.y += velocity.y * *delta_time;
+            });
+    });
+    println!("player: {:?}", world.get::<Position>(player));
+
     println!("\n=== Deferred commands ===");
     world.queue_despawn_entity(enemy);
     world.queue_set(player, Health { value: 250.0 });

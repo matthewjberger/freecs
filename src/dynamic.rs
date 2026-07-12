@@ -43,6 +43,29 @@
 //! assert_eq!(world.get::<Position>(entity), Some(&Position { x: 1.0, y: 2.0 }));
 //! ```
 //!
+//! Query tuples take up to eight elements of `&T`, `&mut T`, `Option<&T>`,
+//! or `Option<&mut T>`; optional elements yield `None` instead of narrowing
+//! the match. On a shared borrow, [`DynWorld::query_ref`] runs read-only
+//! tuples as a real [`Iterator`]:
+//!
+//! ```rust
+//! # use freecs::dynamic::DynWorld;
+//! # #[derive(Default, Clone, Debug, PartialEq)]
+//! # struct Position { x: f32, y: f32 }
+//! # #[derive(Default, Clone, Debug)]
+//! # struct Velocity { x: f32, y: f32 }
+//! # let mut world = DynWorld::new();
+//! # world.spawn((Position { x: 1.0, y: 2.0 }, Velocity { x: 1.0, y: 2.0 }));
+//! let total: f32 = world
+//!     .query_ref::<(&Position, Option<&Velocity>)>()
+//!     .iter()
+//!     .map(|(_entity, (position, velocity))| {
+//!         position.x + velocity.map_or(0.0, |velocity| velocity.x)
+//!     })
+//!     .sum();
+//! # assert_eq!(total, 2.0);
+//! ```
+//!
 //! Registration is a schema: mask bits are assigned in registration order, so
 //! anything serializing masks should register components deterministically,
 //! or build one [`ComponentRegistry`] up front and construct worlds from it.
@@ -1467,6 +1490,24 @@ impl DynWorld {
             .map(|value| *value)
     }
 
+    /// Takes `R` out of the world, runs the closure with the world and the
+    /// resource as independent borrows, then puts the resource back. This is
+    /// the take/put pattern for systems that mutate both a resource and the
+    /// world in one pass; the resource is absent from the world inside the
+    /// closure, and a panic in the closure drops it. Panics if `R` is not
+    /// present.
+    pub fn resource_scope<R: Send + Sync + 'static, T>(
+        &mut self,
+        f: impl FnOnce(&mut DynWorld, &mut R) -> T,
+    ) -> T {
+        let mut resource = self
+            .remove_resource::<R>()
+            .expect("resource_scope requires the resource to be present");
+        let result = f(self, &mut resource);
+        self.insert_resource(resource);
+        result
+    }
+
     pub fn queue_spawn_entities(&mut self, mask: u64, count: usize) {
         self.command_buffer
             .push(DynCommand::SpawnEntities { mask, count });
@@ -1560,10 +1601,16 @@ impl DynWorld {
         self.registry.register::<T>()
     }
 
+    /// Resolves `T`'s key without registering. Returns `None` for types this
+    /// world has never seen.
+    pub fn lookup_key<T: Send + Sync + Default + 'static>(&self) -> Option<ComponentKey<T>> {
+        let &component_index = self.registry.components_by_type.get(&TypeId::of::<T>())?;
+        Some(self.registry.key_for::<T>(component_index))
+    }
+
     /// Typed read. Unregistered types read as absent.
     pub fn get<T: Send + Sync + Default + 'static>(&self, entity: Entity) -> Option<&T> {
-        let &component_index = self.registry.components_by_type.get(&TypeId::of::<T>())?;
-        let key = self.registry.key_for::<T>(component_index);
+        let key = self.lookup_key::<T>()?;
         self.get_keyed(key, entity)
     }
 
@@ -1599,8 +1646,9 @@ impl DynWorld {
     }
 
     /// Starts a typed query. Component types in the tuple register lazily,
-    /// borrow mutability comes from the tuple (`&T` or `&mut T`), and
-    /// mutable elements stamp change ticks per visited entity.
+    /// borrow mutability comes from the tuple (`&T`, `&mut T`, and their
+    /// `Option` forms), and mutable elements stamp change ticks per visited
+    /// entity.
     pub fn query<Q: QueryTuple>(&mut self) -> DynQuery<'_, Q> {
         let include = Q::component_mask(self);
         DynQuery {
@@ -1610,6 +1658,25 @@ impl DynWorld {
             changed_mask: 0,
             include_tag_sets: [None; 4],
             exclude_tag_sets: [None; 4],
+            marker: PhantomData,
+        }
+    }
+
+    /// Starts a read-only typed query on a shared world borrow. Tuples take
+    /// `&T` and `Option<&T>` elements only, nothing registers, and a
+    /// component type this world has never seen matches no entities. Unlike
+    /// [`query`](Self::query), the result is a real [`Iterator`], so it
+    /// composes with adapters and its items can be collected and outlive the
+    /// iteration.
+    pub fn query_ref<Q: ReadQueryTuple>(&self) -> DynQueryRef<'_, Q> {
+        DynQueryRef {
+            world: self,
+            include: 0,
+            exclude: 0,
+            changed_mask: 0,
+            include_tag_sets: [None; 4],
+            exclude_tag_sets: [None; 4],
+            dead: false,
             marker: PhantomData,
         }
     }
@@ -2061,12 +2128,18 @@ mod sealed {
     pub trait SealedBundle {}
 }
 
-/// One element of a typed query tuple, `&T` or `&mut T`.
+/// One element of a typed query tuple: `&T`, `&mut T`, `Option<&T>`, or
+/// `Option<&mut T>`. Optional elements do not constrain which entities the
+/// query visits; they yield `None` on entities missing the component.
 pub trait QueryElement: sealed::SealedElement {
     type Fetch<'table>;
     type Item<'item>;
+    const REQUIRED: bool;
     fn component_mask(world: &mut DynWorld) -> u64;
-    fn fetch<'table>(slot: &'table mut ColumnSlot, current_tick: u32) -> Self::Fetch<'table>;
+    fn fetch<'table>(
+        slot: Option<&'table mut ColumnSlot>,
+        current_tick: u32,
+    ) -> Self::Fetch<'table>;
     fn changed_newer(fetch: &Self::Fetch<'_>, index: usize, since_tick: u32) -> bool;
     fn item<'fetch>(fetch: &'fetch mut Self::Fetch<'_>, index: usize) -> Self::Item<'fetch>;
 }
@@ -2076,12 +2149,17 @@ impl<T: Send + Sync + Default + 'static> sealed::SealedElement for &T {}
 impl<T: Send + Sync + Default + 'static> QueryElement for &T {
     type Fetch<'table> = (&'table [T], &'table [u32]);
     type Item<'item> = &'item T;
+    const REQUIRED: bool = true;
 
     fn component_mask(world: &mut DynWorld) -> u64 {
         world.component_key::<T>().mask
     }
 
-    fn fetch<'table>(slot: &'table mut ColumnSlot, _current_tick: u32) -> Self::Fetch<'table> {
+    fn fetch<'table>(
+        slot: Option<&'table mut ColumnSlot>,
+        _current_tick: u32,
+    ) -> Self::Fetch<'table> {
+        let slot = slot.expect("required query element column missing");
         (
             column_vec::<T>(slot.data.as_ref()).as_slice(),
             slot.changed.as_slice(),
@@ -2102,12 +2180,17 @@ impl<T: Send + Sync + Default + 'static> sealed::SealedElement for &mut T {}
 impl<T: Send + Sync + Default + 'static> QueryElement for &mut T {
     type Fetch<'table> = (&'table mut [T], &'table mut [u32], u32);
     type Item<'item> = &'item mut T;
+    const REQUIRED: bool = true;
 
     fn component_mask(world: &mut DynWorld) -> u64 {
         world.component_key::<T>().mask
     }
 
-    fn fetch<'table>(slot: &'table mut ColumnSlot, current_tick: u32) -> Self::Fetch<'table> {
+    fn fetch<'table>(
+        slot: Option<&'table mut ColumnSlot>,
+        current_tick: u32,
+    ) -> Self::Fetch<'table> {
+        let slot = slot.expect("required query element column missing");
         slot.peak_changed = current_tick;
         (
             column_vec_mut::<T>(slot.data.as_mut()).as_mut_slice(),
@@ -2126,27 +2209,228 @@ impl<T: Send + Sync + Default + 'static> QueryElement for &mut T {
     }
 }
 
-/// A tuple of query elements. Implemented for tuples of `&T` and `&mut T`
-/// up to four elements; all component types in one tuple must be distinct.
+impl<T: Send + Sync + Default + 'static> sealed::SealedElement for Option<&T> {}
+
+impl<T: Send + Sync + Default + 'static> QueryElement for Option<&T> {
+    type Fetch<'table> = Option<(&'table [T], &'table [u32])>;
+    type Item<'item> = Option<&'item T>;
+    const REQUIRED: bool = false;
+
+    fn component_mask(world: &mut DynWorld) -> u64 {
+        world.component_key::<T>().mask
+    }
+
+    fn fetch<'table>(
+        slot: Option<&'table mut ColumnSlot>,
+        current_tick: u32,
+    ) -> Self::Fetch<'table> {
+        slot.map(|slot| <&T as QueryElement>::fetch(Some(slot), current_tick))
+    }
+
+    fn changed_newer(fetch: &Self::Fetch<'_>, index: usize, since_tick: u32) -> bool {
+        fetch
+            .as_ref()
+            .is_some_and(|fetch| tick_is_newer(fetch.1[index], since_tick))
+    }
+
+    fn item<'fetch>(fetch: &'fetch mut Self::Fetch<'_>, index: usize) -> Self::Item<'fetch> {
+        fetch.as_ref().map(|fetch| &fetch.0[index])
+    }
+}
+
+impl<T: Send + Sync + Default + 'static> sealed::SealedElement for Option<&mut T> {}
+
+impl<T: Send + Sync + Default + 'static> QueryElement for Option<&mut T> {
+    type Fetch<'table> = Option<(&'table mut [T], &'table mut [u32], u32)>;
+    type Item<'item> = Option<&'item mut T>;
+    const REQUIRED: bool = false;
+
+    fn component_mask(world: &mut DynWorld) -> u64 {
+        world.component_key::<T>().mask
+    }
+
+    fn fetch<'table>(
+        slot: Option<&'table mut ColumnSlot>,
+        current_tick: u32,
+    ) -> Self::Fetch<'table> {
+        slot.map(|slot| <&mut T as QueryElement>::fetch(Some(slot), current_tick))
+    }
+
+    fn changed_newer(fetch: &Self::Fetch<'_>, index: usize, since_tick: u32) -> bool {
+        fetch
+            .as_ref()
+            .is_some_and(|fetch| tick_is_newer(fetch.1[index], since_tick))
+    }
+
+    fn item<'fetch>(fetch: &'fetch mut Self::Fetch<'_>, index: usize) -> Self::Item<'fetch> {
+        fetch.as_mut().map(|fetch| {
+            fetch.1[index] = fetch.2;
+            &mut fetch.0[index]
+        })
+    }
+}
+
+/// The read-only half of [`QueryElement`], `&T` or `Option<&T>` only. Shared
+/// fetches are `Copy` and items borrow the world rather than the fetch, which
+/// is what lets [`DynQueryRef::iter`] hand out a real `Iterator`.
+pub trait ReadQueryElement: QueryElement {
+    type ReadFetch<'table>: Copy;
+    fn lookup_mask(world: &DynWorld) -> Option<u64>;
+    fn read_fetch<'table>(slot: Option<&'table ColumnSlot>) -> Self::ReadFetch<'table>;
+    fn read_changed_newer(fetch: Self::ReadFetch<'_>, index: usize, since_tick: u32) -> bool;
+    fn read_item<'table>(fetch: Self::ReadFetch<'table>, index: usize) -> Self::Item<'table>;
+}
+
+impl<T: Send + Sync + Default + 'static> ReadQueryElement for &T {
+    type ReadFetch<'table> = (&'table [T], &'table [u32]);
+
+    fn lookup_mask(world: &DynWorld) -> Option<u64> {
+        world.lookup_key::<T>().map(|key| key.mask)
+    }
+
+    fn read_fetch<'table>(slot: Option<&'table ColumnSlot>) -> Self::ReadFetch<'table> {
+        let slot = slot.expect("required query element column missing");
+        (
+            column_vec::<T>(slot.data.as_ref()).as_slice(),
+            slot.changed.as_slice(),
+        )
+    }
+
+    fn read_changed_newer(fetch: Self::ReadFetch<'_>, index: usize, since_tick: u32) -> bool {
+        tick_is_newer(fetch.1[index], since_tick)
+    }
+
+    fn read_item<'table>(fetch: Self::ReadFetch<'table>, index: usize) -> Self::Item<'table> {
+        &fetch.0[index]
+    }
+}
+
+impl<T: Send + Sync + Default + 'static> ReadQueryElement for Option<&T> {
+    type ReadFetch<'table> = Option<(&'table [T], &'table [u32])>;
+
+    fn lookup_mask(world: &DynWorld) -> Option<u64> {
+        world.lookup_key::<T>().map(|key| key.mask)
+    }
+
+    fn read_fetch<'table>(slot: Option<&'table ColumnSlot>) -> Self::ReadFetch<'table> {
+        slot.map(|slot| <&T as ReadQueryElement>::read_fetch(Some(slot)))
+    }
+
+    fn read_changed_newer(fetch: Self::ReadFetch<'_>, index: usize, since_tick: u32) -> bool {
+        fetch.is_some_and(|fetch| tick_is_newer(fetch.1[index], since_tick))
+    }
+
+    fn read_item<'table>(fetch: Self::ReadFetch<'table>, index: usize) -> Self::Item<'table> {
+        fetch.map(|fetch| &fetch.0[index])
+    }
+}
+
+/// A tuple of query elements. Implemented for tuples of `&T`, `&mut T`,
+/// `Option<&T>`, and `Option<&mut T>` up to eight elements; all component
+/// types in one tuple must be distinct. Only the non-optional elements
+/// constrain which entities the query visits.
 pub trait QueryTuple: sealed::SealedQueryTuple {
     type Fetch<'table>;
     type Item<'item>;
     fn component_mask(world: &mut DynWorld) -> u64;
-    fn element_masks(world: &mut DynWorld) -> [u64; 4];
+    fn element_masks(world: &mut DynWorld) -> [u64; 8];
     fn fetch<'table>(
         table_mask: u64,
         columns: &'table mut [ColumnSlot],
-        element_masks: &[u64; 4],
+        element_masks: &[u64; 8],
         current_tick: u32,
     ) -> Self::Fetch<'table>;
     fn changed_newer(
         fetch: &Self::Fetch<'_>,
         index: usize,
-        element_masks: &[u64; 4],
+        element_masks: &[u64; 8],
         changed_mask: u64,
         since_tick: u32,
     ) -> bool;
     fn item<'fetch>(fetch: &'fetch mut Self::Fetch<'_>, index: usize) -> Self::Item<'fetch>;
+}
+
+/// The read-only half of [`QueryTuple`], tuples of `&T` and `Option<&T>`
+/// only. Resolves masks without registering, fetches through shared borrows,
+/// and hands out items that borrow the world, so results can outlive the
+/// iteration.
+pub trait ReadQueryTuple: QueryTuple {
+    type ReadFetch<'table>: Copy;
+    fn lookup_masks(world: &DynWorld) -> Option<([u64; 8], u64)>;
+    fn read_fetch<'table>(
+        table_mask: u64,
+        columns: &'table [ColumnSlot],
+        element_masks: &[u64; 8],
+    ) -> Self::ReadFetch<'table>;
+    fn read_changed_newer(
+        fetch: Self::ReadFetch<'_>,
+        index: usize,
+        element_masks: &[u64; 8],
+        changed_mask: u64,
+        since_tick: u32,
+    ) -> bool;
+    fn read_item<'table>(fetch: Self::ReadFetch<'table>, index: usize) -> Self::Item<'table>;
+}
+
+fn required_mask(elements: &[(u64, bool)]) -> u64 {
+    let mut seen = 0;
+    let mut required = 0;
+    for &(mask, is_required) in elements {
+        assert_eq!(
+            seen & mask,
+            0,
+            "query tuples must not repeat a component type"
+        );
+        seen |= mask;
+        if is_required {
+            required |= mask;
+        }
+    }
+    required
+}
+
+fn lookup_masks_from(elements: &[(Option<u64>, bool)]) -> Option<([u64; 8], u64)> {
+    let mut masks = [0u64; 8];
+    let mut seen = 0;
+    let mut required = 0;
+    for (position, &(mask, is_required)) in elements.iter().enumerate() {
+        match mask {
+            Some(mask) => {
+                assert_eq!(
+                    seen & mask,
+                    0,
+                    "query tuples must not repeat a component type"
+                );
+                seen |= mask;
+                if is_required {
+                    required |= mask;
+                }
+                masks[position] = mask;
+            }
+            None => {
+                if is_required {
+                    return None;
+                }
+            }
+        }
+    }
+    Some((masks, required))
+}
+
+fn distribute_slots<const COUNT: usize>(
+    columns: &mut [ColumnSlot],
+    positions: [Option<usize>; COUNT],
+) -> [Option<&mut ColumnSlot>; COUNT] {
+    let mut slots = [const { None }; COUNT];
+    for (column_index, slot) in columns.iter_mut().enumerate() {
+        if let Some(element_index) = positions
+            .iter()
+            .position(|position| *position == Some(column_index))
+        {
+            slots[element_index] = Some(slot);
+        }
+    }
+    slots
 }
 
 macro_rules! impl_query_tuple {
@@ -2158,21 +2442,12 @@ macro_rules! impl_query_tuple {
             type Item<'item> = ($($element::Item<'item>,)+);
 
             fn component_mask(world: &mut DynWorld) -> u64 {
-                let mut mask = 0;
-                $(
-                    let element_mask = $element::component_mask(world);
-                    assert_eq!(
-                        mask & element_mask,
-                        0,
-                        "query tuples must not repeat a component type"
-                    );
-                    mask |= element_mask;
-                )+
-                mask
+                let elements = [$(($element::component_mask(world), $element::REQUIRED),)+];
+                required_mask(&elements)
             }
 
-            fn element_masks(world: &mut DynWorld) -> [u64; 4] {
-                let mut masks = [0u64; 4];
+            fn element_masks(world: &mut DynWorld) -> [u64; 8] {
+                let mut masks = [0u64; 8];
                 $(
                     masks[$position] = $element::component_mask(world);
                 )+
@@ -2183,21 +2458,24 @@ macro_rules! impl_query_tuple {
             fn fetch<'table>(
                 table_mask: u64,
                 columns: &'table mut [ColumnSlot],
-                element_masks: &[u64; 4],
+                element_masks: &[u64; 8],
                 current_tick: u32,
             ) -> Self::Fetch<'table> {
-                let positions = [$(column_position(table_mask, element_masks[$position]),)+];
-                let slots = columns
-                    .get_disjoint_mut(positions)
-                    .expect("query tuple columns must be distinct");
-                let [$($element,)+] = slots;
+                let positions = [$(
+                    if table_mask & element_masks[$position] != 0 {
+                        Some(column_position(table_mask, element_masks[$position]))
+                    } else {
+                        None
+                    },
+                )+];
+                let [$($element,)+] = distribute_slots(columns, positions);
                 ($($element::fetch($element, current_tick),)+)
             }
 
             fn changed_newer(
                 fetch: &Self::Fetch<'_>,
                 index: usize,
-                element_masks: &[u64; 4],
+                element_masks: &[u64; 8],
                 changed_mask: u64,
                 since_tick: u32,
             ) -> bool {
@@ -2223,6 +2501,91 @@ impl_query_tuple!((A, 0));
 impl_query_tuple!((A, 0), (B, 1));
 impl_query_tuple!((A, 0), (B, 1), (C, 2));
 impl_query_tuple!((A, 0), (B, 1), (C, 2), (D, 3));
+impl_query_tuple!((A, 0), (B, 1), (C, 2), (D, 3), (E, 4));
+impl_query_tuple!((A, 0), (B, 1), (C, 2), (D, 3), (E, 4), (F, 5));
+impl_query_tuple!((A, 0), (B, 1), (C, 2), (D, 3), (E, 4), (F, 5), (G, 6));
+impl_query_tuple!(
+    (A, 0),
+    (B, 1),
+    (C, 2),
+    (D, 3),
+    (E, 4),
+    (F, 5),
+    (G, 6),
+    (H, 7)
+);
+
+macro_rules! impl_read_query_tuple {
+    ($(($element:ident, $position:tt)),+) => {
+        impl<$($element: ReadQueryElement),+> ReadQueryTuple for ($($element,)+) {
+            type ReadFetch<'table> = ($($element::ReadFetch<'table>,)+);
+
+            fn lookup_masks(world: &DynWorld) -> Option<([u64; 8], u64)> {
+                let elements = [$(($element::lookup_mask(world), $element::REQUIRED),)+];
+                lookup_masks_from(&elements)
+            }
+
+            fn read_fetch<'table>(
+                table_mask: u64,
+                columns: &'table [ColumnSlot],
+                element_masks: &[u64; 8],
+            ) -> Self::ReadFetch<'table> {
+                ($(
+                    $element::read_fetch(
+                        if table_mask & element_masks[$position] != 0 {
+                            Some(&columns[column_position(table_mask, element_masks[$position])])
+                        } else {
+                            None
+                        },
+                    ),
+                )+)
+            }
+
+            fn read_changed_newer(
+                fetch: Self::ReadFetch<'_>,
+                index: usize,
+                element_masks: &[u64; 8],
+                changed_mask: u64,
+                since_tick: u32,
+            ) -> bool {
+                let mut newer = false;
+                $(
+                    if changed_mask & element_masks[$position] != 0
+                        && $element::read_changed_newer(fetch.$position, index, since_tick)
+                    {
+                        newer = true;
+                    }
+                )+
+                newer
+            }
+
+            fn read_item<'table>(
+                fetch: Self::ReadFetch<'table>,
+                index: usize,
+            ) -> Self::Item<'table> {
+                ($($element::read_item(fetch.$position, index),)+)
+            }
+        }
+    };
+}
+
+impl_read_query_tuple!((A, 0));
+impl_read_query_tuple!((A, 0), (B, 1));
+impl_read_query_tuple!((A, 0), (B, 1), (C, 2));
+impl_read_query_tuple!((A, 0), (B, 1), (C, 2), (D, 3));
+impl_read_query_tuple!((A, 0), (B, 1), (C, 2), (D, 3), (E, 4));
+impl_read_query_tuple!((A, 0), (B, 1), (C, 2), (D, 3), (E, 4), (F, 5));
+impl_read_query_tuple!((A, 0), (B, 1), (C, 2), (D, 3), (E, 4), (F, 5), (G, 6));
+impl_read_query_tuple!(
+    (A, 0),
+    (B, 1),
+    (C, 2),
+    (D, 3),
+    (E, 4),
+    (F, 5),
+    (G, 6),
+    (H, 7)
+);
 
 /// A typed query in progress. Filters compose before `for_each` runs it.
 pub struct DynQuery<'world, Q: QueryTuple> {
@@ -2370,6 +2733,209 @@ impl<'world, Q: QueryTuple> DynQuery<'world, Q> {
                     continue;
                 }
                 f(entity, Q::item(&mut fetch, index));
+            }
+        }
+    }
+}
+
+/// A read-only typed query in progress, from [`DynWorld::query_ref`].
+/// Filters compose before [`iter`](Self::iter) runs it.
+pub struct DynQueryRef<'world, Q: ReadQueryTuple> {
+    world: &'world DynWorld,
+    include: u64,
+    exclude: u64,
+    changed_mask: u64,
+    include_tag_sets: [Option<&'world SparseTagSet>; 4],
+    exclude_tag_sets: [Option<&'world SparseTagSet>; 4],
+    dead: bool,
+    marker: PhantomData<Q>,
+}
+
+impl<'world, Q: ReadQueryTuple> DynQueryRef<'world, Q> {
+    pub fn with<T: Send + Sync + Default + 'static>(mut self) -> Self {
+        match self.world.lookup_key::<T>() {
+            Some(key) => self.include |= key.mask,
+            None => self.dead = true,
+        }
+        self
+    }
+
+    pub fn without<T: Send + Sync + Default + 'static>(mut self) -> Self {
+        if let Some(key) = self.world.lookup_key::<T>() {
+            self.exclude |= key.mask;
+        }
+        self
+    }
+
+    pub fn with_mask(mut self, mask: u64) -> Self {
+        self.include |= mask;
+        self
+    }
+
+    pub fn without_mask(mut self, mask: u64) -> Self {
+        self.exclude |= mask;
+        self
+    }
+
+    pub fn with_tag(mut self, key: TagKey) -> Self {
+        self.include |= key.mask;
+        self
+    }
+
+    pub fn without_tag(mut self, key: TagKey) -> Self {
+        self.exclude |= key.mask;
+        self
+    }
+
+    pub fn with_tag_set(mut self, tag_set: &'world SparseTagSet) -> Self {
+        push_tag_set(&mut self.include_tag_sets, tag_set);
+        self
+    }
+
+    pub fn without_tag_set(mut self, tag_set: &'world SparseTagSet) -> Self {
+        push_tag_set(&mut self.exclude_tag_sets, tag_set);
+        self
+    }
+
+    /// Only visit entities whose `T` changed since the last step. `T` must be
+    /// one of the tuple's components.
+    pub fn changed<T: Send + Sync + Default + 'static>(mut self) -> Self {
+        match self.world.lookup_key::<T>() {
+            Some(key) => self.changed_mask |= key.mask,
+            None => self.dead = true,
+        }
+        self
+    }
+
+    /// Runs the query as an iterator of `(Entity, items)`. Items borrow the
+    /// world, not the iterator, so they survive collection.
+    pub fn iter(self) -> DynQueryRefIter<'world, Q> {
+        let mut done = self.dead;
+        let mut element_masks = [0u64; 8];
+        let mut include = self.include;
+        match Q::lookup_masks(self.world) {
+            Some((masks, required)) => {
+                element_masks = masks;
+                include |= required;
+            }
+            None => done = true,
+        }
+
+        if !done {
+            let tuple_mask = element_masks.iter().fold(0, |mask, element| mask | element);
+            assert_eq!(
+                self.changed_mask & !tuple_mask,
+                0,
+                "changed filters must name components present in the query tuple"
+            );
+        }
+
+        let mut component_include = 0;
+        let mut component_exclude = 0;
+        let mut tag_include = 0;
+        let mut tag_exclude = 0;
+        match self.world.split_masks(include, self.exclude) {
+            Some((components_in, components_out, tags_in, tags_out)) => {
+                component_include = components_in;
+                component_exclude = components_out;
+                tag_include = tags_in;
+                tag_exclude = tags_out;
+            }
+            None => done = true,
+        }
+
+        DynQueryRefIter {
+            world: self.world,
+            element_masks,
+            include: component_include,
+            exclude: component_exclude,
+            tag_include,
+            tag_exclude,
+            include_tag_sets: self.include_tag_sets,
+            exclude_tag_sets: self.exclude_tag_sets,
+            changed_mask: self.changed_mask,
+            since_tick: self.world.last_tick,
+            table_index: 0,
+            row_index: 0,
+            current: None,
+            done,
+        }
+    }
+}
+
+/// The iterator behind [`DynQueryRef::iter`]. Walks matching tables in
+/// order, resolving columns once per table.
+pub struct DynQueryRefIter<'world, Q: ReadQueryTuple> {
+    world: &'world DynWorld,
+    element_masks: [u64; 8],
+    include: u64,
+    exclude: u64,
+    tag_include: u64,
+    tag_exclude: u64,
+    include_tag_sets: [Option<&'world SparseTagSet>; 4],
+    exclude_tag_sets: [Option<&'world SparseTagSet>; 4],
+    changed_mask: u64,
+    since_tick: u32,
+    table_index: usize,
+    row_index: usize,
+    current: Option<(&'world [Entity], Q::ReadFetch<'world>)>,
+    done: bool,
+}
+
+impl<'world, Q: ReadQueryTuple> Iterator for DynQueryRefIter<'world, Q> {
+    type Item = (Entity, Q::Item<'world>);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.done {
+            return None;
+        }
+        loop {
+            if let Some((entities, fetch)) = self.current {
+                while self.row_index < entities.len() {
+                    let index = self.row_index;
+                    self.row_index += 1;
+                    let entity = entities[index];
+                    if (self.tag_include != 0 || self.tag_exclude != 0)
+                        && !tags_match(&self.world.tags, entity, self.tag_include, self.tag_exclude)
+                    {
+                        continue;
+                    }
+                    if !tag_sets_match(&self.include_tag_sets, &self.exclude_tag_sets, entity) {
+                        continue;
+                    }
+                    if self.changed_mask != 0
+                        && !Q::read_changed_newer(
+                            fetch,
+                            index,
+                            &self.element_masks,
+                            self.changed_mask,
+                            self.since_tick,
+                        )
+                    {
+                        continue;
+                    }
+                    return Some((entity, Q::read_item(fetch, index)));
+                }
+                self.current = None;
+            }
+
+            loop {
+                let Some(table) = self.world.tables.get(self.table_index) else {
+                    self.done = true;
+                    return None;
+                };
+                self.table_index += 1;
+                if table.mask & self.include == self.include
+                    && table.mask & self.exclude == 0
+                    && !table.entity_indices.is_empty()
+                {
+                    self.row_index = 0;
+                    self.current = Some((
+                        table.entity_indices.as_slice(),
+                        Q::read_fetch(table.mask, &table.columns, &self.element_masks),
+                    ));
+                    break;
+                }
             }
         }
     }
@@ -2667,6 +3233,270 @@ mod tests {
         world
             .query::<(&mut Position, &Position)>()
             .for_each(|_, _| {});
+    }
+
+    #[test]
+    #[should_panic(expected = "must not repeat a component type")]
+    fn test_typed_query_rejects_optional_repeat_of_component() {
+        let mut world = DynWorld::new();
+        world.spawn((Position::default(),));
+        world
+            .query::<(&mut Position, Option<&Position>)>()
+            .for_each(|_, _| {});
+    }
+
+    #[test]
+    fn test_optional_element_yields_none_on_missing_component() {
+        let mut world = DynWorld::new();
+        let plain = world.spawn((Position { x: 1.0, y: 0.0 },));
+        let moving = world.spawn((Position { x: 2.0, y: 0.0 }, Velocity { x: 5.0, y: 0.0 }));
+
+        let mut visited = Vec::new();
+        world
+            .query::<(&Position, Option<&Velocity>)>()
+            .for_each(|entity, (position, velocity)| {
+                visited.push((entity, position.x, velocity.map(|velocity| velocity.x)));
+            });
+
+        visited.sort_by(|left, right| left.1.total_cmp(&right.1));
+        assert_eq!(visited, vec![(plain, 1.0, None), (moving, 2.0, Some(5.0))]);
+    }
+
+    #[test]
+    fn test_optional_mut_element_stamps_only_present_rows() {
+        let mut world = DynWorld::new();
+        let velocity_key = world.register::<Velocity>();
+        let plain = world.spawn((Position::default(),));
+        let moving = world.spawn((Position::default(), Velocity::default()));
+
+        world.step();
+        world
+            .query::<(&Position, Option<&mut Velocity>)>()
+            .for_each(|_entity, (_position, velocity)| {
+                if let Some(velocity) = velocity {
+                    velocity.x += 1.0;
+                }
+            });
+
+        assert_eq!(world.get::<Velocity>(moving).unwrap().x, 1.0);
+        let changed: Vec<Entity> = world.query_entities_changed(velocity_key.mask).collect();
+        assert_eq!(changed, vec![moving]);
+        let _ = plain;
+    }
+
+    #[test]
+    fn test_optional_only_tuple_visits_every_entity() {
+        let mut world = DynWorld::new();
+        world.spawn((Position::default(),));
+        world.spawn((Velocity::default(),));
+        world.spawn((Health::default(),));
+
+        let mut count = 0;
+        world
+            .query::<(Option<&Position>, Option<&Velocity>)>()
+            .for_each(|_entity, _items| count += 1);
+        assert_eq!(count, 3);
+    }
+
+    #[test]
+    fn test_changed_filter_on_optional_element() {
+        let mut world = DynWorld::new();
+        let still = world.spawn((Position::default(), Velocity::default()));
+        let moving = world.spawn((Position::default(), Velocity::default()));
+        let bare = world.spawn((Position::default(),));
+
+        world.step();
+        world.get_mut::<Velocity>(moving).unwrap().x = 3.0;
+
+        let mut visited = Vec::new();
+        world
+            .query::<(&Position, Option<&Velocity>)>()
+            .changed::<Velocity>()
+            .for_each(|entity, _| visited.push(entity));
+
+        assert_eq!(visited, vec![moving]);
+        let _ = (still, bare);
+    }
+
+    #[test]
+    fn test_query_tuple_arity_eight() {
+        #[derive(Default, Clone, Debug, PartialEq)]
+        struct C1(f32);
+        #[derive(Default, Clone, Debug, PartialEq)]
+        struct C2(f32);
+        #[derive(Default, Clone, Debug, PartialEq)]
+        struct C3(f32);
+        #[derive(Default, Clone, Debug, PartialEq)]
+        struct C4(f32);
+        #[derive(Default, Clone, Debug, PartialEq)]
+        struct C5(f32);
+        #[derive(Default, Clone, Debug, PartialEq)]
+        struct C6(f32);
+        #[derive(Default, Clone, Debug, PartialEq)]
+        struct C7(f32);
+        #[derive(Default, Clone, Debug, PartialEq)]
+        struct C8(f32);
+
+        let mut world = DynWorld::new();
+        let entity = world.spawn((
+            C1(1.0),
+            C2(2.0),
+            C3(3.0),
+            C4(4.0),
+            C5(5.0),
+            C6(6.0),
+            C7(7.0),
+            C8(8.0),
+        ));
+
+        let mut total = 0.0;
+        world
+            .query::<(&C1, &C2, &C3, &mut C4, &C5, &C6, &C7, &mut C8)>()
+            .for_each(|seen, (c1, c2, c3, c4, c5, c6, c7, c8)| {
+                assert_eq!(seen, entity);
+                c4.0 += 10.0;
+                c8.0 += 10.0;
+                total = c1.0 + c2.0 + c3.0 + c4.0 + c5.0 + c6.0 + c7.0 + c8.0;
+            });
+
+        assert_eq!(total, 56.0);
+        assert_eq!(world.get::<C4>(entity).unwrap().0, 14.0);
+        assert_eq!(world.get::<C8>(entity).unwrap().0, 18.0);
+    }
+
+    #[test]
+    fn test_query_ref_iterates_and_collects_borrows() {
+        let mut world = DynWorld::new();
+        let plain = world.spawn((Position { x: 1.0, y: 0.0 },));
+        let moving = world.spawn((Position { x: 2.0, y: 0.0 }, Velocity { x: 5.0, y: 0.0 }));
+
+        let mut collected: Vec<(Entity, &Position, Option<&Velocity>)> = world
+            .query_ref::<(&Position, Option<&Velocity>)>()
+            .iter()
+            .map(|(entity, (position, velocity))| (entity, position, velocity))
+            .collect();
+        collected.sort_by(|left, right| left.1.x.total_cmp(&right.1.x));
+
+        assert_eq!(collected.len(), 2);
+        assert_eq!(collected[0], (plain, &Position { x: 1.0, y: 0.0 }, None));
+        assert_eq!(
+            collected[1],
+            (
+                moving,
+                &Position { x: 2.0, y: 0.0 },
+                Some(&Velocity { x: 5.0, y: 0.0 })
+            )
+        );
+
+        let total: f32 = world
+            .query_ref::<(&Position,)>()
+            .iter()
+            .map(|(_entity, (position,))| position.x)
+            .sum();
+        assert_eq!(total, 3.0);
+    }
+
+    #[test]
+    fn test_query_ref_filters_match_for_each() {
+        let mut world = DynWorld::new();
+        let boss = world.register_tag();
+        let tagged = world.spawn((Position { x: 1.0, y: 0.0 }, Velocity::default()));
+        let untagged = world.spawn((Position { x: 2.0, y: 0.0 }, Velocity::default()));
+        let frozen = world.spawn((Position { x: 3.0, y: 0.0 },));
+        world.add_tag(boss, tagged);
+
+        let with_velocity: Vec<Entity> = world
+            .query_ref::<(&Position,)>()
+            .with::<Velocity>()
+            .iter()
+            .map(|(entity, _)| entity)
+            .collect();
+        assert_eq!(with_velocity, vec![tagged, untagged]);
+
+        let without_velocity: Vec<Entity> = world
+            .query_ref::<(&Position,)>()
+            .without::<Velocity>()
+            .iter()
+            .map(|(entity, _)| entity)
+            .collect();
+        assert_eq!(without_velocity, vec![frozen]);
+
+        let tagged_only: Vec<Entity> = world
+            .query_ref::<(&Position,)>()
+            .with_tag(boss)
+            .iter()
+            .map(|(entity, _)| entity)
+            .collect();
+        assert_eq!(tagged_only, vec![tagged]);
+
+        world.step();
+        world.get_mut::<Position>(untagged).unwrap().x = 9.0;
+        let changed: Vec<Entity> = world
+            .query_ref::<(&Position,)>()
+            .changed::<Position>()
+            .iter()
+            .map(|(entity, _)| entity)
+            .collect();
+        assert_eq!(changed, vec![untagged]);
+    }
+
+    #[test]
+    fn test_query_ref_unregistered_types_match_nothing_and_do_not_register() {
+        #[derive(Default, Clone, Debug)]
+        struct Unseen;
+
+        let mut world = DynWorld::new();
+        world.spawn((Position::default(),));
+        let registered = world.registry.components.len();
+
+        assert_eq!(world.query_ref::<(&Unseen,)>().iter().count(), 0);
+        assert_eq!(
+            world
+                .query_ref::<(&Position, Option<&Unseen>)>()
+                .iter()
+                .map(|(_entity, (_position, unseen))| {
+                    assert!(unseen.is_none());
+                })
+                .count(),
+            1
+        );
+        assert_eq!(
+            world
+                .query_ref::<(&Position,)>()
+                .with::<Unseen>()
+                .iter()
+                .count(),
+            0
+        );
+        assert_eq!(world.registry.components.len(), registered);
+    }
+
+    #[test]
+    fn test_resource_scope_takes_and_restores() {
+        struct Score {
+            value: u32,
+        }
+
+        let mut world = DynWorld::new();
+        world.insert_resource(Score { value: 1 });
+
+        let spawned = world.resource_scope(|world, score: &mut Score| {
+            assert!(world.resource::<Score>().is_none());
+            score.value += 1;
+            world.spawn((Position { x: 7.0, y: 0.0 },))
+        });
+
+        assert_eq!(world.resource::<Score>().unwrap().value, 2);
+        assert_eq!(world.get::<Position>(spawned).unwrap().x, 7.0);
+    }
+
+    #[test]
+    #[should_panic(expected = "resource_scope requires the resource to be present")]
+    fn test_resource_scope_panics_on_missing_resource() {
+        struct Missing;
+
+        let mut world = DynWorld::new();
+        world.resource_scope(|_world, _missing: &mut Missing| {});
     }
 
     #[test]

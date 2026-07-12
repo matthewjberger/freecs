@@ -94,6 +94,23 @@ fn bench_dynamic_iteration(c: &mut Criterion) {
                 });
             },
         );
+
+        group.bench_with_input(
+            BenchmarkId::new("query_ref_iterator_read", count),
+            &count,
+            |bencher, _| {
+                bencher.iter(|| {
+                    let mut sum = 0.0;
+                    for (_entity, (position_value, velocity_value)) in
+                        world.query_ref::<(&Position, &Velocity)>().iter()
+                    {
+                        sum += position_value.x + position_value.y + position_value.z;
+                        sum += velocity_value.x;
+                    }
+                    black_box(sum);
+                });
+            },
+        );
     }
     group.finish();
 }
