@@ -8109,7 +8109,132 @@ mod tests {
         struct MultiModelEntity {
             core_mask: Option<u64>,
             render_mask: Option<u64>,
+            position: Option<f32>,
+            position_changed: bool,
+            sprite: Option<u32>,
             player: bool,
+        }
+
+        enum MultiModelCommand {
+            Spawn,
+            Despawn(Entity),
+            SetPosition(Entity, f32),
+            AddPosition(Entity),
+            RemovePosition(Entity),
+            SetSprite(Entity, u32),
+            AddPlayer(Entity),
+            RemovePlayer(Entity),
+        }
+
+        fn multi_model_set_position(model_entity: &mut MultiModelEntity, value: f32) {
+            let mask = model_entity.core_mask.get_or_insert(0);
+            *mask |= MW_POSITION;
+            model_entity.position = Some(value);
+            model_entity.position_changed = true;
+        }
+
+        fn multi_model_add_position(model_entity: &mut MultiModelEntity) {
+            let mask = model_entity.core_mask.get_or_insert(0);
+            if *mask & MW_POSITION == 0 {
+                *mask |= MW_POSITION;
+                model_entity.position = Some(0.0);
+                model_entity.position_changed = true;
+            }
+        }
+
+        fn multi_model_add_velocity(model_entity: &mut MultiModelEntity) {
+            let mask = model_entity.core_mask.get_or_insert(0);
+            let migrated = *mask & MW_VELOCITY == 0;
+            *mask |= MW_VELOCITY;
+            if migrated && *mask & MW_POSITION != 0 {
+                model_entity.position_changed = true;
+            }
+        }
+
+        fn multi_model_remove_position(model_entity: &mut MultiModelEntity) {
+            if let Some(mask) = model_entity.core_mask.as_mut() {
+                *mask &= !MW_POSITION;
+                model_entity.position = None;
+            }
+        }
+
+        fn multi_model_set_sprite(model_entity: &mut MultiModelEntity, id: u32) {
+            let mask = model_entity.render_mask.get_or_insert(0);
+            *mask |= MW_SPRITE;
+            model_entity.sprite = Some(id);
+        }
+
+        fn multi_apply_and_replay(
+            ecs: &mut GameEcs,
+            model: &mut std::collections::HashMap<Entity, MultiModelEntity>,
+            queued: &mut Vec<MultiModelCommand>,
+            handles: &mut Vec<Entity>,
+        ) {
+            assert_eq!(
+                ecs.command_count(),
+                queued.len(),
+                "ecs and model must queue in lockstep"
+            );
+
+            let cursor = ecs.structural_sequence();
+            ecs.apply_commands();
+
+            let mut queued_spawn_count = 0usize;
+            for command in queued.drain(..) {
+                match command {
+                    MultiModelCommand::Spawn => queued_spawn_count += 1,
+                    MultiModelCommand::Despawn(entity) => {
+                        model.remove(&entity);
+                    }
+                    MultiModelCommand::SetPosition(entity, value) => {
+                        if let Some(model_entity) = model.get_mut(&entity) {
+                            multi_model_set_position(model_entity, value);
+                        }
+                    }
+                    MultiModelCommand::AddPosition(entity) => {
+                        if let Some(model_entity) = model.get_mut(&entity) {
+                            multi_model_add_position(model_entity);
+                        }
+                    }
+                    MultiModelCommand::RemovePosition(entity) => {
+                        if let Some(model_entity) = model.get_mut(&entity) {
+                            multi_model_remove_position(model_entity);
+                        }
+                    }
+                    MultiModelCommand::SetSprite(entity, id) => {
+                        if let Some(model_entity) = model.get_mut(&entity) {
+                            multi_model_set_sprite(model_entity, id);
+                        }
+                    }
+                    MultiModelCommand::AddPlayer(entity) => {
+                        if let Some(model_entity) = model.get_mut(&entity) {
+                            model_entity.player = true;
+                        }
+                    }
+                    MultiModelCommand::RemovePlayer(entity) => {
+                        if let Some(model_entity) = model.get_mut(&entity) {
+                            model_entity.player = false;
+                        }
+                    }
+                }
+            }
+
+            let spawned: Vec<Entity> = ecs
+                .structural_changes_since(cursor)
+                .iter()
+                .filter(|change| change.kind == StructuralChangeKind::Spawned)
+                .map(|change| change.entity)
+                .collect();
+            assert_eq!(
+                spawned.len(),
+                queued_spawn_count,
+                "the ecs lifecycle log must record exactly the queued spawns"
+            );
+            for entity in spawned {
+                assert!(ecs.is_alive(entity));
+                model.insert(entity, MultiModelEntity::default());
+                handles.push(entity);
+            }
         }
 
         #[test]
@@ -8120,6 +8245,11 @@ mod tests {
                 let mut model: std::collections::HashMap<Entity, MultiModelEntity> =
                     std::collections::HashMap::new();
                 let mut handles: Vec<Entity> = Vec::new();
+                let mut queued: Vec<MultiModelCommand> = Vec::new();
+                let mut pending_collisions: Vec<(u32, u32)> = Vec::new();
+                let mut total_collisions: u64 = 0;
+
+                ecs.step();
 
                 let pick = |rng: &mut Lcg, handles: &[Entity]| {
                     if handles.is_empty() {
@@ -8130,7 +8260,7 @@ mod tests {
                 };
 
                 for _ in 0..3000 {
-                    match rng.next() % 8 {
+                    match rng.next() % 16 {
                         0 | 1 => {
                             let entity = ecs.spawn();
                             model.insert(entity, MultiModelEntity::default());
@@ -8153,8 +8283,7 @@ mod tests {
                                     .set_position(entity, Position { x: value, y: 0.0 });
                                 match model.get_mut(&entity) {
                                     Some(model_entity) => {
-                                        let mask = model_entity.core_mask.get_or_insert(0);
-                                        *mask |= MW_POSITION;
+                                        multi_model_set_position(model_entity, value);
                                         assert_eq!(
                                             ecs.core_world.get_position(entity).unwrap().x,
                                             value
@@ -8173,26 +8302,39 @@ mod tests {
                                 ecs.render_world.set_sprite(entity, Sprite { id });
                                 match model.get_mut(&entity) {
                                     Some(model_entity) => {
-                                        let mask = model_entity.render_mask.get_or_insert(0);
-                                        *mask |= MW_SPRITE;
+                                        multi_model_set_sprite(model_entity, id);
                                         assert_eq!(
                                             ecs.render_world.get_sprite(entity).unwrap().id,
                                             id
                                         );
                                     }
-                                    None => assert!(ecs.render_world.get_sprite(entity).is_none()),
+                                    None => {
+                                        assert!(ecs.render_world.get_sprite(entity).is_none())
+                                    }
                                 }
                             }
                         }
                         5 => {
                             if let Some(entity) = pick(&mut rng, &handles) {
+                                let accepted = ecs.core_world.add_components(entity, MW_VELOCITY);
+                                match model.get_mut(&entity) {
+                                    Some(model_entity) => {
+                                        assert!(accepted);
+                                        multi_model_add_velocity(model_entity);
+                                    }
+                                    None => assert!(!accepted, "stale add must be refused"),
+                                }
+                            }
+                        }
+                        6 => {
+                            if let Some(entity) = pick(&mut rng, &handles) {
                                 let accepted =
                                     ecs.core_world.remove_components(entity, MW_POSITION);
                                 match model.get_mut(&entity) {
                                     Some(model_entity) => {
-                                        if let Some(mask) = model_entity.core_mask.as_mut() {
+                                        if model_entity.core_mask.is_some() {
                                             assert!(accepted);
-                                            *mask &= !MW_POSITION;
+                                            multi_model_remove_position(model_entity);
                                         } else {
                                             assert!(
                                                 !accepted,
@@ -8204,7 +8346,7 @@ mod tests {
                                 }
                             }
                         }
-                        6 => {
+                        7 => {
                             if let Some(entity) = pick(&mut rng, &handles) {
                                 ecs.add_player(entity);
                                 if let Some(model_entity) = model.get_mut(&entity) {
@@ -8216,11 +8358,102 @@ mod tests {
                                 );
                             }
                         }
+                        8 => {
+                            if let Some(entity) = pick(&mut rng, &handles) {
+                                ecs.queue_despawn_entity(entity);
+                                queued.push(MultiModelCommand::Despawn(entity));
+                            }
+                        }
+                        9 => {
+                            if let Some(entity) = pick(&mut rng, &handles) {
+                                let value = (rng.next() % 1000) as f32;
+                                ecs.queue_set_position(entity, Position { x: value, y: 0.0 });
+                                queued.push(MultiModelCommand::SetPosition(entity, value));
+                            }
+                        }
+                        10 => {
+                            if let Some(entity) = pick(&mut rng, &handles) {
+                                ecs.queue_add_position(entity);
+                                queued.push(MultiModelCommand::AddPosition(entity));
+                            }
+                        }
+                        11 => {
+                            if let Some(entity) = pick(&mut rng, &handles) {
+                                ecs.queue_remove_position(entity);
+                                queued.push(MultiModelCommand::RemovePosition(entity));
+                            }
+                        }
+                        12 => {
+                            if let Some(entity) = pick(&mut rng, &handles) {
+                                let id = rng.next() as u32 % 1000;
+                                ecs.queue_set_sprite(entity, Sprite { id });
+                                queued.push(MultiModelCommand::SetSprite(entity, id));
+                            }
+                        }
+                        13 => {
+                            if let Some(entity) = pick(&mut rng, &handles) {
+                                if rng.next().is_multiple_of(2) {
+                                    ecs.queue_add_player(entity);
+                                    queued.push(MultiModelCommand::AddPlayer(entity));
+                                } else {
+                                    ecs.queue_remove_player(entity);
+                                    queued.push(MultiModelCommand::RemovePlayer(entity));
+                                }
+                            } else {
+                                ecs.queue_spawn(1);
+                                queued.push(MultiModelCommand::Spawn);
+                            }
+                        }
+                        14 => {
+                            let entity_a = pick(&mut rng, &handles).unwrap_or(Entity {
+                                id: 0,
+                                generation: 0,
+                            });
+                            let entity_b = pick(&mut rng, &handles).unwrap_or(entity_a);
+                            ecs.send_collision(CollisionEvent { entity_a, entity_b });
+                            pending_collisions.push((entity_a.id, entity_b.id));
+                            total_collisions += 1;
+                        }
                         _ => {
+                            multi_apply_and_replay(&mut ecs, &mut model, &mut queued, &mut handles);
+
+                            let changed: std::collections::HashSet<Entity> =
+                                ecs.core_world.query_entities_changed(MW_POSITION).collect();
+                            let expected: std::collections::HashSet<Entity> = model
+                                .iter()
+                                .filter(|(_, model_entity)| {
+                                    model_entity
+                                        .core_mask
+                                        .is_some_and(|mask| mask & MW_POSITION != 0)
+                                        && model_entity.position_changed
+                                })
+                                .map(|(&entity, _)| entity)
+                                .collect();
+                            assert_eq!(
+                                changed, expected,
+                                "core changed-query set diverged from model with seed {seed}"
+                            );
+
                             ecs.step();
+                            for model_entity in model.values_mut() {
+                                model_entity.position_changed = false;
+                            }
+
+                            let buffered: Vec<(u32, u32)> = ecs
+                                .read_collision()
+                                .map(|event| (event.entity_a.id, event.entity_b.id))
+                                .collect();
+                            assert_eq!(
+                                buffered, pending_collisions,
+                                "post-step event buffer must hold exactly the just-ended frame"
+                            );
+                            assert_eq!(ecs.sequence_collision(), total_collisions);
+                            pending_collisions.clear();
                         }
                     }
                 }
+
+                multi_apply_and_replay(&mut ecs, &mut model, &mut queued, &mut handles);
 
                 for (&entity, model_entity) in &model {
                     assert!(ecs.is_alive(entity));
@@ -8233,6 +8466,18 @@ mod tests {
                         ecs.render_world.component_mask(entity),
                         model_entity.render_mask,
                         "render mask diverged with seed {seed}"
+                    );
+                    assert_eq!(
+                        ecs.core_world
+                            .get_position(entity)
+                            .map(|position| position.x),
+                        model_entity.position,
+                        "position value diverged with seed {seed}"
+                    );
+                    assert_eq!(
+                        ecs.render_world.get_sprite(entity).map(|sprite| sprite.id),
+                        model_entity.sprite,
+                        "sprite value diverged with seed {seed}"
                     );
                     assert_eq!(ecs.has_player(entity), model_entity.player);
                 }
@@ -8249,6 +8494,10 @@ mod tests {
 
                 let expected_core_rows = model.values().filter(|m| m.core_mask.is_some()).count();
                 assert_eq!(ecs.core_world.entity_count(), expected_core_rows);
+
+                let expected_render_rows =
+                    model.values().filter(|m| m.render_mask.is_some()).count();
+                assert_eq!(ecs.render_world.entity_count(), expected_render_rows);
 
                 let expected_players = model.values().filter(|m| m.player).count();
                 assert_eq!(ecs.query_player().count(), expected_players);
