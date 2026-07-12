@@ -5126,7 +5126,7 @@ mod tests {
                 std::collections::HashMap::new();
             let mut handles: Vec<Entity> = Vec::new();
             let mut queued: Vec<ModelCommand> = Vec::new();
-            let mut pending_pings: usize = 0;
+            let mut pending_ping_values: Vec<u32> = Vec::new();
             let mut total_pings: u64 = 0;
 
             world.step();
@@ -5281,7 +5281,7 @@ mod tests {
                     14 => {
                         let value = rng.next() as u32;
                         world.send_ping(PingEvent { value });
-                        pending_pings += 1;
+                        pending_ping_values.push(value);
                         total_pings += 1;
                     }
                     _ => {
@@ -5306,13 +5306,13 @@ mod tests {
                             model_entity.position_changed = false;
                         }
 
+                        let buffered: Vec<u32> = world.read_ping().map(|ping| ping.value).collect();
                         assert_eq!(
-                            world.len_ping(),
-                            pending_pings,
-                            "post-step event buffer must hold exactly the just-ended frame"
+                            buffered, pending_ping_values,
+                            "post-step event buffer must hold exactly the just-ended frame, in order"
                         );
                         assert_eq!(world.sequence_ping(), total_pings);
-                        pending_pings = 0;
+                        pending_ping_values.clear();
                     }
                 }
             }
