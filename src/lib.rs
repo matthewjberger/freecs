@@ -14,6 +14,8 @@
 //! - **Events**: Sequence-numbered channels with exactly-once cursor consumption
 //! - **Structural Change Log**: Cursor-based log of spawns, despawns, component moves, and tag flips
 //! - **Multi-World**: Split components across multiple worlds for >64 component types
+//! - **Dynamic Worlds** (optional `dynamic` feature): register component types at
+//!   runtime with bevy-style bundles and typed queries, same storage underneath
 //!
 //! The `ecs!` macro generates the entire ECS at compile time using only plain data structures, functions, and zero unsafe code.
 //!

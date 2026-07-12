@@ -18,6 +18,7 @@ A high-performance, archetype-based Entity Component System (ECS) for Rust
 - Sequence-numbered event channels with exactly-once cursor consumption
 - Structural change log covering spawns, despawns, component moves, and tag flips
 - Multi-world support for >64 component types with shared entity allocator
+- Optional dynamic worlds (`dynamic` feature): register component types at runtime with bundle spawns and typed queries, same storage underneath, still zero unsafe
 - Plain public data all the way down: tables, allocator, tag sets, and logs are inspectable structs and vecs
 
 The `ecs!` macro generates the entire ECS at compile time using only plain data structures, functions, and zero unsafe code.
@@ -767,6 +768,76 @@ When a component or resource has a `#[cfg(...)]` attribute, all related generate
 ## Cargo Features
 
 - `serde` (default): derives `Serialize`/`Deserialize` on `Entity`. Disable with `default-features = false` if you don't need it.
+- `dynamic` (off by default): the runtime-registered [dynamic world](#dynamic-worlds) entry point. Costs the default build nothing.
+
+## Dynamic Worlds
+
+The `dynamic` feature adds a second entry point for programs that cannot fix
+their component set at compile time, editors, plugin boundaries, data-driven
+prefab schemas. `DynWorld` registers Rust types at runtime and keeps the rest
+of the design: contiguous `Vec<T>` columns per archetype, `u64` masks, the
+same change detection, structural log, sparse-set tags, event channels, and
+liveness guarantees, and zero `unsafe`. Columns are erased as whole vecs
+behind `Box<dyn Any + Send + Sync>`, never as raw bytes, and structural
+changes dispatch through a per-type record of plain function pointers that is
+itself public data.
+
+```rust
+use freecs::dynamic::DynWorld;
+
+#[derive(Default, Clone, Debug)]
+struct Position { x: f32, y: f32 }
+
+#[derive(Default, Clone, Debug)]
+struct Velocity { x: f32, y: f32 }
+
+let mut world = DynWorld::new();
+
+// Types register lazily on first use; tuples spawn as bundles.
+let entity = world.spawn((
+    Position { x: 0.0, y: 0.0 },
+    Velocity { x: 1.0, y: 2.0 },
+));
+
+// Typed queries take mutability from the tuple and support
+// with/without/changed and tag filters. Mutable elements stamp change ticks.
+world
+    .query::<(&mut Position, &Velocity)>()
+    .for_each(|_entity, (position, velocity)| {
+        position.x += velocity.x;
+        position.y += velocity.y;
+    });
+
+assert_eq!(world.get::<Position>(entity).unwrap().x, 1.0);
+```
+
+Three access tiers, from ergonomic to explicit:
+
+- **Typed**: `spawn(bundle)`, `get::<T>` / `set` / `remove`, `query::<(&mut A, &B)>()`, `send(event)` / `read_events_since::<T>(cursor)`, `insert_resource` / `resource::<T>()`. `TypeId` lookups happen at registration and per typed call, never inside iteration loops.
+- **Keyed**: `register::<T>()` returns a copyable `ComponentKey<T>` carrying the component's mask bit; `get_keyed` / `set_keyed` and mask-based `for_each` / `for_each_mut` skip the hash entirely.
+- **Raw tables**: `for_each_tables_mut(mask, 0, |table| ...)` with `table.columns_pair(a, b)` hoists concrete slices once per table for the tightest loops, no change stamping, same covenant as the static path.
+
+Measured against the macro world on the same two-component mutation workload
+(three `f32` writes per entity), the typed query runs 0.83 µs per 1k entities
+versus 1.12 µs for the static `for_each_mut` closure form, and 75 µs versus
+116 µs per 100k; the hoisted table form does 7.3 µs per 10k versus 11.6 µs.
+The slice-zip loop shapes vectorize better than per-entity index closures, so
+the dynamic fast paths are not merely competitive, at scale they are ahead.
+The costs live elsewhere and are bounded: batch spawning pays function-pointer
+column fills (16.5 µs versus 12.2 µs per 1k spawns), per-entity typed access
+pays the `TypeId` map (16.5 ns versus 6.8 ns keyed), and every column adds one
+`Box` indirection per table.
+
+The trust boundary is the registry. Bits are assigned in registration order,
+so registration is schema: build one `ComponentRegistry`, clone it into every
+world that must agree on masks, and register deterministically if masks are
+ever serialized. Keys carry their registry id and are debug-checked against
+the world using them. Query tuples must not repeat a component type, and a
+wrong-type column swapped in by hand panics on the next typed access rather
+than misbehaving. The correctness story is the same suite the macro worlds
+earned: unit coverage, the three-oracle property tests, and a differential
+oracle that drives a macro world and a `DynWorld` with one seeded op stream
+and requires identical observable state at every step.
 
 ## Multi-World ECS
 

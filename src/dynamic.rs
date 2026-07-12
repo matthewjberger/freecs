@@ -282,6 +282,26 @@ impl DynComponentArrays {
     pub fn has_component(&self, mask: u64) -> bool {
         self.mask & mask != 0
     }
+
+    /// Disjoint mutable and shared column slices in one call, for hoisting
+    /// column access out of per-entity loops. Panics if the two components
+    /// are the same or either is absent from this table.
+    pub fn columns_pair<A: 'static, B: 'static>(
+        &mut self,
+        first: ComponentKey<A>,
+        second: ComponentKey<B>,
+    ) -> (&mut [A], &[B]) {
+        let first_position = column_position(self.mask, first.mask);
+        let second_position = column_position(self.mask, second.mask);
+        let [first_slot, second_slot] = self
+            .columns
+            .get_disjoint_mut([first_position, second_position])
+            .expect("columns_pair components must be distinct");
+        (
+            column_vec_mut::<A>(first_slot.data.as_mut()).as_mut_slice(),
+            column_vec::<B>(second_slot.data.as_ref()).as_slice(),
+        )
+    }
 }
 
 enum DynCommand {
@@ -927,6 +947,53 @@ impl DynWorld {
             tag_include,
             tag_exclude,
         ))
+    }
+
+    /// Table-granular iteration, the raw fast path: resolve columns once per
+    /// table, then loop entities over concrete slices. Component masks only.
+    /// Does not stamp change ticks.
+    pub fn for_each_tables_mut<F>(&mut self, include: u64, exclude: u64, mut f: F)
+    where
+        F: FnMut(&mut DynComponentArrays),
+    {
+        debug_assert_eq!(
+            include & !self.registry.all_components_mask(),
+            0,
+            "table-granular iteration takes component masks only"
+        );
+        let table_indices = archetype_cached_tables(
+            &mut self.query_cache,
+            self.tables.iter().map(|table| table.mask),
+            include,
+        );
+        let tables = &mut self.tables;
+        for &table_index in table_indices {
+            let table = &mut tables[table_index];
+            if table.mask & exclude != 0 || table.entity_indices.is_empty() {
+                continue;
+            }
+            f(table);
+        }
+    }
+
+    pub fn for_each_tables<F>(&self, include: u64, exclude: u64, mut f: F)
+    where
+        F: FnMut(&DynComponentArrays),
+    {
+        debug_assert_eq!(
+            include & !self.registry.all_components_mask(),
+            0,
+            "table-granular iteration takes component masks only"
+        );
+        for table in &self.tables {
+            if table.mask & include != include
+                || table.mask & exclude != 0
+                || table.entity_indices.is_empty()
+            {
+                continue;
+            }
+            f(table);
+        }
     }
 
     pub fn for_each<F>(&self, include: u64, exclude: u64, mut f: F)
