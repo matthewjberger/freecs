@@ -515,13 +515,43 @@ impl EntityAllocator {
         entity
     }
 
-    /// Pre-grows the liveness table for `count` upcoming allocations, so the
-    /// per-allocation growth check stays predictably false in batch spawns.
-    #[inline]
-    pub fn reserve(&mut self, count: usize) {
-        let worst_case = self.next_id as usize + count;
-        if worst_case > self.slots.len() {
-            self.slots.resize(worst_case, EntitySlot::default());
+    /// Allocates `count` handles into `entities`, recycling freed ids first.
+    /// Fresh ids are contiguous, so their liveness slots are written with one
+    /// bulk fill instead of a store per entity.
+    pub fn allocate_batch(&mut self, count: usize, entities: &mut Vec<Entity>) {
+        entities.reserve(count);
+        let recycled = count.min(self.free_ids.len());
+        for _ in 0..recycled {
+            let Some((id, generation)) = self.free_ids.pop() else {
+                break;
+            };
+            let index = id as usize;
+            if index >= self.slots.len() {
+                self.slots.resize(index + 1, EntitySlot::default());
+            }
+            self.slots[index] = EntitySlot {
+                generation,
+                alive: true,
+            };
+            entities.push(Entity { id, generation });
+        }
+
+        let fresh = count - recycled;
+        if fresh > 0 {
+            let start = self.next_id;
+            self.next_id += fresh as u32;
+            let start_index = start as usize;
+            let end_index = start_index + fresh;
+            if end_index > self.slots.len() {
+                self.slots.resize(end_index, EntitySlot::default());
+            }
+            self.slots[start_index..end_index].fill(EntitySlot {
+                generation: 0,
+                alive: true,
+            });
+            for id in start..self.next_id {
+                entities.push(Entity { id, generation: 0 });
+            }
         }
     }
 
@@ -2029,7 +2059,6 @@ macro_rules! ecs_kernel_impl {
                         0,
                         "spawn masks must not contain tag bits or unknown component bits"
                     );
-                    allocator.reserve(count);
                     let table_index = [<get_or_create_table_ $world:snake>](self, mask);
                     let start_index = self.tables[table_index].entity_indices.len();
 
@@ -2045,12 +2074,9 @@ macro_rules! ecs_kernel_impl {
                         }
                     )*
 
-                    let mut entities = Vec::with_capacity(count);
-                    for offset in 0..count {
-                        let entity = allocator.allocate();
-                        self.entity_locations.ensure_slot(entity.id, entity.generation);
-                        entities.push(entity);
-
+                    let mut entities = Vec::new();
+                    allocator.allocate_batch(count, &mut entities);
+                    for (offset, &entity) in entities.iter().enumerate() {
                         self.tables[table_index].entity_indices.push(entity);
                         $(
                             $(#[$comp_attr])*
@@ -2088,7 +2114,6 @@ macro_rules! ecs_kernel_impl {
                         0,
                         "spawn masks must not contain tag bits or unknown component bits"
                     );
-                    allocator.reserve(count);
                     let table_index = [<get_or_create_table_ $world:snake>](self, mask);
                     let start_index = self.tables[table_index].entity_indices.len();
 
@@ -2104,12 +2129,9 @@ macro_rules! ecs_kernel_impl {
                         }
                     )*
 
-                    let mut entities = Vec::with_capacity(count);
-                    for offset in 0..count {
-                        let entity = allocator.allocate();
-                        self.entity_locations.ensure_slot(entity.id, entity.generation);
-                        entities.push(entity);
-
+                    let mut entities = Vec::new();
+                    allocator.allocate_batch(count, &mut entities);
+                    for (offset, &entity) in entities.iter().enumerate() {
                         self.tables[table_index].entity_indices.push(entity);
                         $(
                             $(#[$comp_attr])*
@@ -3450,9 +3472,11 @@ macro_rules! ecs_multi_impl {
                 }
 
                 pub fn spawn_count(&mut self, count: usize) -> Vec<$crate::Entity> {
-                    let mut entities = Vec::with_capacity(count);
-                    for _ in 0..count {
-                        entities.push(self.spawn());
+                    let mut entities = Vec::new();
+                    self.allocator.allocate_batch(count, &mut entities);
+                    for index in 0..entities.len() {
+                        let entity = entities[index];
+                        self.record_structural(entity, $crate::StructuralChangeKind::Spawned, 0);
                     }
                     entities
                 }
@@ -4802,6 +4826,40 @@ mod tests {
 
         let other = allocator.allocate();
         assert_ne!((other.id, other.generation), (reused.id, reused.generation));
+    }
+
+    #[test]
+    fn test_allocator_batch_mixes_recycled_and_fresh() {
+        let mut allocator = EntityAllocator::default();
+
+        let first = allocator.allocate();
+        let second = allocator.allocate();
+        assert!(allocator.deallocate(first));
+        assert!(allocator.deallocate(second));
+
+        let mut entities = Vec::new();
+        allocator.allocate_batch(4, &mut entities);
+        assert_eq!(entities.len(), 4);
+
+        let recycled_count = entities
+            .iter()
+            .filter(|entity| entity.generation > 0)
+            .count();
+        assert_eq!(recycled_count, 2, "both freed ids must be recycled first");
+
+        for &entity in &entities {
+            assert!(allocator.is_alive(entity));
+        }
+        assert!(!allocator.is_alive(first));
+        assert!(!allocator.is_alive(second));
+
+        let mut seen: Vec<_> = entities
+            .iter()
+            .map(|entity| (entity.id, entity.generation))
+            .collect();
+        seen.sort_unstable();
+        seen.dedup();
+        assert_eq!(seen.len(), 4, "batch handles must be distinct");
     }
 
     #[test]

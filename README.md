@@ -656,7 +656,7 @@ assert_eq!(world.get_position(entities[1]).unwrap().y, 2.0);
 
 Entity handles are generational, and the allocator is the single source of truth for liveness. Double despawns and despawns through stale handles are refused rather than corrupting the free list, so two live entities can never share an id and generation. `world.is_alive(entity)` answers liveness directly, and `despawn_entities` returns the subset of handles that were actually despawned.
 
-Liveness costs one slot record write per spawn, about 2-3ns per entity in batch spawns, and makes despawning meaningfully faster than 2.x since freeing is a single generation-checked slot update.
+Liveness costs one slot record write per singleton spawn. Batch spawns write the slot table with one bulk fill for the contiguous fresh ids, so batch spawning and despawning are both faster than 2.x despite the added guarantee.
 
 ## Advanced Features
 
