@@ -36,6 +36,10 @@ criterion = { version = "0.7.0", features = ["html_reports"] }
 name = "dynamic"
 required-features = ["dynamic"]
 
+[[example]]
+name = "tower-defense-dynamic"
+required-features = ["dynamic"]
+
 [[bench]]
 name = "ecs_benchmarks"
 harness = false
