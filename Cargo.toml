@@ -18,7 +18,7 @@ serde = ["dep:serde"]
 audio = []
 
 [dependencies]
-paste = "1.0.15"
+paste = { package = "pastey", version = "0.2" }
 serde = { version = "1.0", features = ["derive"], optional = true }
 
 [target.'cfg(not(target_family = "wasm"))'.dependencies]
