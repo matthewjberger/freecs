@@ -1,4 +1,4 @@
-use freecs::dynamic::{ComponentKey, DynWorld, TagKey};
+use freecs::dynamic::DynWorld;
 use freecs::{Entity, Schedule};
 use macroquad::prelude::*;
 use std::collections::HashMap;
@@ -344,33 +344,17 @@ pub struct WaveStartedEvent {
     pub enemy_count: usize,
 }
 
-#[derive(Clone, Copy)]
-struct GameKeys {
-    position: ComponentKey<Position>,
-    tower: ComponentKey<Tower>,
-    enemy: ComponentKey<Enemy>,
-    projectile: ComponentKey<Projectile>,
-    grid_cell: ComponentKey<GridCell>,
-    grid_position: ComponentKey<GridPosition>,
-    visual_effect: ComponentKey<VisualEffect>,
-    range_indicator: ComponentKey<RangeIndicator>,
-    money_popup: ComponentKey<MoneyPopup>,
-}
-
-#[derive(Clone, Copy)]
-struct GameTags {
-    basic_enemy: TagKey,
-    tank_enemy: TagKey,
-    fast_enemy: TagKey,
-    flying_enemy: TagKey,
-    healer_enemy: TagKey,
-    basic_tower: TagKey,
-    frost_tower: TagKey,
-    cannon_tower: TagKey,
-    sniper_tower: TagKey,
-    poison_tower: TagKey,
-    path_cell: TagKey,
-}
+struct BasicEnemy;
+struct TankEnemy;
+struct FastEnemy;
+struct FlyingEnemy;
+struct HealerEnemy;
+struct BasicTower;
+struct FrostTower;
+struct CannonTower;
+struct SniperTower;
+struct PoisonTower;
+struct PathCell;
 
 struct GameResources {
     money: u32,
@@ -386,8 +370,6 @@ struct GameResources {
     game_speed: f32,
     current_hp: u32,
     max_hp: u32,
-    keys: GameKeys,
-    tags: GameTags,
 }
 
 fn with_game<R>(world: &mut DynWorld, f: impl FnOnce(&mut DynWorld, &mut GameResources) -> R) -> R {
@@ -528,22 +510,21 @@ fn create_path(world: &mut DynWorld, game: &mut GameResources) {
         }
     }
 
-    let grid_entities: Vec<Entity> = world.query_entities(game.keys.grid_cell.mask).collect();
-    for entity in grid_entities {
-        let mut marked = false;
-        if let Some(cell) = world.get_mut::<GridCell>(entity) {
+    let mut path_cells = Vec::new();
+    world
+        .query::<(&mut GridCell,)>()
+        .for_each(|entity, (cell,)| {
             for &(grid_x, grid_y) in &cells_to_mark {
                 if cell.x == grid_x && cell.y == grid_y {
                     cell.is_path = true;
                     cell.occupied = true;
-                    marked = true;
+                    path_cells.push(entity);
                     break;
                 }
             }
-        }
-        if marked {
-            world.add_tag(game.tags.path_cell, entity);
-        }
+        });
+    for entity in path_cells {
+        world.add_tag_type::<PathCell>(entity);
     }
 }
 
@@ -573,11 +554,11 @@ fn spawn_tower(
     ));
 
     match tower_type {
-        TowerType::Basic => world.add_tag(game.tags.basic_tower, entity),
-        TowerType::Frost => world.add_tag(game.tags.frost_tower, entity),
-        TowerType::Cannon => world.add_tag(game.tags.cannon_tower, entity),
-        TowerType::Sniper => world.add_tag(game.tags.sniper_tower, entity),
-        TowerType::Poison => world.add_tag(game.tags.poison_tower, entity),
+        TowerType::Basic => world.add_tag_type::<BasicTower>(entity),
+        TowerType::Frost => world.add_tag_type::<FrostTower>(entity),
+        TowerType::Cannon => world.add_tag_type::<CannonTower>(entity),
+        TowerType::Sniper => world.add_tag_type::<SniperTower>(entity),
+        TowerType::Poison => world.add_tag_type::<PoisonTower>(entity),
     }
 
     let cost = tower_type.cost();
@@ -640,12 +621,12 @@ fn spawn_enemy(
     );
 
     match enemy_type {
-        EnemyType::Normal => world.add_tag(game.tags.basic_enemy, entity),
-        EnemyType::Tank => world.add_tag(game.tags.tank_enemy, entity),
-        EnemyType::Fast => world.add_tag(game.tags.fast_enemy, entity),
-        EnemyType::Flying => world.add_tag(game.tags.flying_enemy, entity),
-        EnemyType::Healer => world.add_tag(game.tags.healer_enemy, entity),
-        _ => world.add_tag(game.tags.basic_enemy, entity),
+        EnemyType::Normal => world.add_tag_type::<BasicEnemy>(entity),
+        EnemyType::Tank => world.add_tag_type::<TankEnemy>(entity),
+        EnemyType::Fast => world.add_tag_type::<FastEnemy>(entity),
+        EnemyType::Flying => world.add_tag_type::<FlyingEnemy>(entity),
+        EnemyType::Healer => world.add_tag_type::<HealerEnemy>(entity),
+        _ => world.add_tag_type::<BasicEnemy>(entity),
     }
 
     world.send(EnemySpawnedEvent { entity, enemy_type });
@@ -709,29 +690,30 @@ fn spawn_money_popup(world: &mut DynWorld, position: Vec2, amount: i32) {
     ));
 }
 
-fn can_place_tower_at(world: &DynWorld, keys: &GameKeys, x: i32, y: i32) -> bool {
-    let mut has_tower = false;
-    world.for_each_tables(keys.tower.mask | keys.grid_position.mask, 0, |table| {
-        for grid_position in table.column(keys.grid_position) {
-            if grid_position.x == x && grid_position.y == y {
-                has_tower = true;
-            }
-        }
-    });
+fn can_place_tower_at(world: &DynWorld, x: i32, y: i32) -> bool {
+    let has_tower = world
+        .query_ref::<(&GridPosition,)>()
+        .with::<Tower>()
+        .iter()
+        .any(|(_entity, (grid_position,))| grid_position.x == x && grid_position.y == y);
 
     if has_tower {
         return false;
     }
 
-    let mut can_place = false;
-    world.for_each_tables(keys.grid_cell.mask, 0, |table| {
-        for cell in table.column(keys.grid_cell) {
-            if cell.x == x && cell.y == y && !cell.occupied {
-                can_place = true;
-            }
-        }
-    });
-    can_place
+    world
+        .query_ref::<(&GridCell,)>()
+        .iter()
+        .any(|(_entity, (cell,))| cell.x == x && cell.y == y && !cell.occupied)
+}
+
+fn tower_at(world: &DynWorld, x: i32, y: i32) -> Option<freecs::Entity> {
+    world
+        .query_ref::<(&GridPosition,)>()
+        .with::<Tower>()
+        .iter()
+        .find(|(_entity, (grid_position,))| grid_position.x == x && grid_position.y == y)
+        .map(|(entity, _)| entity)
 }
 
 fn mark_cell_occupied(world: &mut DynWorld, x: i32, y: i32) {
@@ -845,7 +827,7 @@ fn input_system(world: &mut DynWorld) {
 
         if left_clicked
             && let Some((grid_x, grid_y)) = game.mouse_grid_pos
-            && can_place_tower_at(world, &game.keys, grid_x, grid_y)
+            && can_place_tower_at(world, grid_x, grid_y)
         {
             let tower_type = game.selected_tower_type;
             if game.money >= tower_type.cost() {
@@ -857,36 +839,18 @@ fn input_system(world: &mut DynWorld) {
             }
         }
 
-        if right_clicked && let Some((grid_x, grid_y)) = game.mouse_grid_pos {
-            let mut tower_entity = None;
-            world.query::<(&GridPosition,)>().with::<Tower>().for_each(
-                |entity, (grid_position,)| {
-                    if grid_position.x == grid_x && grid_position.y == grid_y {
-                        tower_entity = Some(entity);
-                    }
-                },
-            );
-
-            if let Some(tower_entity) = tower_entity {
-                sell_tower(world, game, tower_entity, grid_x, grid_y);
-            }
+        if right_clicked
+            && let Some((grid_x, grid_y)) = game.mouse_grid_pos
+            && let Some(tower_entity) = tower_at(world, grid_x, grid_y)
+        {
+            sell_tower(world, game, tower_entity, grid_x, grid_y);
         }
 
         if (is_key_pressed(KeyCode::U) || is_mouse_button_pressed(MouseButton::Middle))
             && let Some((grid_x, grid_y)) = game.mouse_grid_pos
+            && let Some(tower_entity) = tower_at(world, grid_x, grid_y)
         {
-            let mut tower_entity = None;
-            world.query::<(&GridPosition,)>().with::<Tower>().for_each(
-                |entity, (grid_position,)| {
-                    if grid_position.x == grid_x && grid_position.y == grid_y {
-                        tower_entity = Some(entity);
-                    }
-                },
-            );
-
-            if let Some(tower_entity) = tower_entity {
-                upgrade_tower(world, game, tower_entity, grid_x, grid_y);
-            }
+            upgrade_tower(world, game, tower_entity, grid_x, grid_y);
         }
 
         if is_key_pressed(KeyCode::Key1) {
@@ -949,7 +913,7 @@ fn wave_spawning_system(world: &mut DynWorld, game: &mut GameResources, delta_ti
         game.enemies_to_spawn.remove(index);
     }
 
-    let enemy_count = world.query_entities(game.keys.enemy.mask).count();
+    let enemy_count = world.query_ref::<(&Enemy,)>().iter().count();
 
     if game.enemies_to_spawn.is_empty() && enemy_count == 0 {
         world.send(WaveCompletedEvent { wave: game.wave });
@@ -990,7 +954,9 @@ fn enemy_movement_system(world: &mut DynWorld, game: &mut GameResources, delta_t
     }
 
     let enemy_entities: Vec<Entity> = world
-        .query_entities(game.keys.enemy.mask | game.keys.position.mask)
+        .query_ref::<(&Enemy, &Position)>()
+        .iter()
+        .map(|(entity, _)| entity)
         .collect();
     for entity in enemy_entities {
         let enemy = world.get::<Enemy>(entity).unwrap();
@@ -1080,8 +1046,6 @@ fn enemy_movement_system(world: &mut DynWorld, game: &mut GameResources, delta_t
 }
 
 fn tower_targeting_system(world: &mut DynWorld) {
-    let keys = world.resource::<GameResources>().unwrap().keys;
-
     let mut enemy_data = Vec::new();
     world
         .query::<(&Position, &Enemy)>()
@@ -1090,7 +1054,9 @@ fn tower_targeting_system(world: &mut DynWorld) {
         });
 
     let tower_entities: Vec<Entity> = world
-        .query_entities(keys.tower.mask | keys.position.mask)
+        .query_ref::<(&Tower, &Position)>()
+        .iter()
+        .map(|(entity, _)| entity)
         .collect();
     for tower_entity in tower_entities {
         let tower_data = world.get::<Tower>(tower_entity).unwrap();
@@ -1121,11 +1087,12 @@ fn tower_targeting_system(world: &mut DynWorld) {
 }
 
 fn tower_shooting_system(world: &mut DynWorld, delta_time: f32) {
-    let keys = world.resource::<GameResources>().unwrap().keys;
     let mut projectiles_to_spawn = Vec::new();
 
     let tower_entities: Vec<Entity> = world
-        .query_entities(keys.tower.mask | keys.position.mask)
+        .query_ref::<(&Tower, &Position)>()
+        .iter()
+        .map(|(entity, _)| entity)
         .collect();
     for entity in tower_entities {
         let tower_pos = world.get::<Position>(entity).unwrap().0;
@@ -1169,20 +1136,20 @@ fn tower_shooting_system(world: &mut DynWorld, delta_time: f32) {
 }
 
 fn projectile_movement_system(world: &mut DynWorld, delta_time: f32) {
-    let keys = world.resource::<GameResources>().unwrap().keys;
     let mut projectiles_to_remove = Vec::new();
     let mut hits = Vec::new();
 
-    let mut enemy_positions = HashMap::new();
-    world
-        .query::<(&Position,)>()
+    let enemy_positions: HashMap<Entity, Vec2> = world
+        .query_ref::<(&Position,)>()
         .with::<Enemy>()
-        .for_each(|entity, (position,)| {
-            enemy_positions.insert(entity, position.0);
-        });
+        .iter()
+        .map(|(entity, (position,))| (entity, position.0))
+        .collect();
 
     let projectile_entities: Vec<Entity> = world
-        .query_entities(keys.projectile.mask | keys.position.mask)
+        .query_ref::<(&Projectile, &Position)>()
+        .iter()
+        .map(|(entity, _)| entity)
         .collect();
     for projectile_entity in projectile_entities {
         let mut projectile_data = *world.get::<Projectile>(projectile_entity).unwrap();
@@ -1444,13 +1411,10 @@ fn sell_tower(
             });
 
         let range_indicators_to_remove: Vec<Entity> = world
-            .query_entities(game.keys.range_indicator.mask)
-            .filter_map(|range_entity| {
-                world
-                    .get::<RangeIndicator>(range_entity)
-                    .filter(|indicator| indicator.tower_entity == tower_entity)
-                    .map(|_| range_entity)
-            })
+            .query_ref::<(&RangeIndicator,)>()
+            .iter()
+            .filter(|(_entity, (indicator,))| indicator.tower_entity == tower_entity)
+            .map(|(entity, _)| entity)
             .collect();
 
         for range_entity in range_indicators_to_remove {
@@ -1463,42 +1427,14 @@ fn sell_tower(
 }
 
 fn restart_game(world: &mut DynWorld, game: &mut GameResources) {
-    let towers_to_remove: Vec<Entity> = world.query_entities(game.keys.tower.mask).collect();
-    for entity in towers_to_remove {
-        world.queue_despawn_entity(entity);
-    }
-
-    let enemies_to_remove: Vec<Entity> = world.query_entities(game.keys.enemy.mask).collect();
-    for entity in enemies_to_remove {
-        world.queue_despawn_entity(entity);
-    }
-
-    let projectiles_to_remove: Vec<Entity> =
-        world.query_entities(game.keys.projectile.mask).collect();
-    for entity in projectiles_to_remove {
-        world.queue_despawn_entity(entity);
-    }
-
-    let effects_to_remove: Vec<Entity> =
-        world.query_entities(game.keys.visual_effect.mask).collect();
-    for entity in effects_to_remove {
-        world.queue_despawn_entity(entity);
-    }
-
-    let money_popups_to_remove: Vec<Entity> =
-        world.query_entities(game.keys.money_popup.mask).collect();
-    for entity in money_popups_to_remove {
-        world.queue_despawn_entity(entity);
-    }
-
-    let range_indicators_to_remove: Vec<Entity> = world
-        .query_entities(game.keys.range_indicator.mask)
-        .collect();
-    for entity in range_indicators_to_remove {
-        world.queue_despawn_entity(entity);
-    }
-
-    world.apply_commands();
+    world.despawn_with_any::<(
+        Tower,
+        Enemy,
+        Projectile,
+        VisualEffect,
+        MoneyPopup,
+        RangeIndicator,
+    )>();
 
     game.money = 200;
     game.lives = 1;
@@ -1514,49 +1450,46 @@ fn restart_game(world: &mut DynWorld, game: &mut GameResources) {
 
 fn render_grid(world: &DynWorld) {
     let game = world.resource::<GameResources>().unwrap();
-    let keys = game.keys;
     let scale = get_scale();
     let offset = get_offset();
 
-    world.for_each_tables(keys.grid_cell.mask, 0, |table| {
-        for cell in table.column(keys.grid_cell) {
-            let base_pos = grid_to_base(cell.x, cell.y);
-            let pos = Vec2::new(offset.x + base_pos.x * scale, offset.y + base_pos.y * scale);
+    for (_entity, (cell,)) in world.query_ref::<(&GridCell,)>().iter() {
+        let base_pos = grid_to_base(cell.x, cell.y);
+        let pos = Vec2::new(offset.x + base_pos.x * scale, offset.y + base_pos.y * scale);
 
-            let path_start = Vec2::new(
-                offset.x + game.path[0].x * scale,
-                offset.y + game.path[0].y * scale,
-            );
-            let path_end = Vec2::new(
-                offset.x + game.path.last().unwrap().x * scale,
-                offset.y + game.path.last().unwrap().y * scale,
-            );
+        let path_start = Vec2::new(
+            offset.x + game.path[0].x * scale,
+            offset.y + game.path[0].y * scale,
+        );
+        let path_end = Vec2::new(
+            offset.x + game.path.last().unwrap().x * scale,
+            offset.y + game.path.last().unwrap().y * scale,
+        );
 
-            let is_start = (pos - path_start).length() < TILE_SIZE * scale / 2.0;
-            let is_end = (pos - path_end).length() < TILE_SIZE * scale / 2.0;
+        let is_start = (pos - path_start).length() < TILE_SIZE * scale / 2.0;
+        let is_end = (pos - path_end).length() < TILE_SIZE * scale / 2.0;
 
-            let color = if is_start {
-                ORANGE
-            } else if is_end {
-                BLUE
-            } else if cell.is_path {
-                Color::new(0.5, 0.3, 0.1, 1.0)
-            } else {
-                Color::new(0.1, 0.3, 0.1, 1.0)
-            };
+        let color = if is_start {
+            ORANGE
+        } else if is_end {
+            BLUE
+        } else if cell.is_path {
+            Color::new(0.5, 0.3, 0.1, 1.0)
+        } else {
+            Color::new(0.1, 0.3, 0.1, 1.0)
+        };
 
-            draw_rectangle(
-                pos.x - TILE_SIZE * scale / 2.0 + scale,
-                pos.y - TILE_SIZE * scale / 2.0 + scale,
-                (TILE_SIZE - 2.0) * scale,
-                (TILE_SIZE - 2.0) * scale,
-                color,
-            );
-        }
-    });
+        draw_rectangle(
+            pos.x - TILE_SIZE * scale / 2.0 + scale,
+            pos.y - TILE_SIZE * scale / 2.0 + scale,
+            (TILE_SIZE - 2.0) * scale,
+            (TILE_SIZE - 2.0) * scale,
+            color,
+        );
+    }
 
     if let Some((grid_x, grid_y)) = game.mouse_grid_pos
-        && can_place_tower_at(world, &keys, grid_x, grid_y)
+        && can_place_tower_at(world, grid_x, grid_y)
     {
         let tower_type = game.selected_tower_type;
         if game.money >= tower_type.cost() {
@@ -1592,74 +1525,59 @@ fn render_grid(world: &DynWorld) {
 
 fn render_towers(world: &DynWorld) {
     let game = world.resource::<GameResources>().unwrap();
-    let keys = game.keys;
     let scale = get_scale();
     let offset = get_offset();
 
-    world.for_each_tables(keys.tower.mask | keys.position.mask, 0, |table| {
-        let towers = table.column(keys.tower);
-        let positions = table.column(keys.position);
-        for (tower, pos) in towers.iter().zip(positions) {
-            let screen_pos = Vec2::new(offset.x + pos.0.x * scale, offset.y + pos.0.y * scale);
+    for (_entity, (tower, pos)) in world.query_ref::<(&Tower, &Position)>().iter() {
+        let screen_pos = Vec2::new(offset.x + pos.0.x * scale, offset.y + pos.0.y * scale);
 
-            let base_size = 20.0 + tower.fire_animation * 4.0;
-            let size = base_size * (1.0 + 0.15 * (tower.level - 1) as f32) * scale;
+        let base_size = 20.0 + tower.fire_animation * 4.0;
+        let size = base_size * (1.0 + 0.15 * (tower.level - 1) as f32) * scale;
 
-            let color = tower.tower_type.color();
-            let level_brightness = 1.0 + 0.2 * (tower.level - 1) as f32;
-            let upgraded_color = Color::new(
-                (color.r * level_brightness).min(1.0),
-                (color.g * level_brightness).min(1.0),
-                (color.b * level_brightness).min(1.0),
-                color.a,
-            );
+        let color = tower.tower_type.color();
+        let level_brightness = 1.0 + 0.2 * (tower.level - 1) as f32;
+        let upgraded_color = Color::new(
+            (color.r * level_brightness).min(1.0),
+            (color.g * level_brightness).min(1.0),
+            (color.b * level_brightness).min(1.0),
+            color.a,
+        );
 
-            draw_circle(screen_pos.x, screen_pos.y, size / 2.0, upgraded_color);
-            draw_circle_lines(screen_pos.x, screen_pos.y, size / 2.0, 2.0, BLACK);
+        draw_circle(screen_pos.x, screen_pos.y, size / 2.0, upgraded_color);
+        draw_circle_lines(screen_pos.x, screen_pos.y, size / 2.0, 2.0, BLACK);
 
-            for ring in 1..tower.level {
-                let ring_radius = size / 2.0 + ring as f32 * 3.0 * scale;
-                draw_circle_lines(screen_pos.x, screen_pos.y, ring_radius, 1.5, upgraded_color);
-            }
-
-            if tower.tower_type == TowerType::Sniper
-                && let Some(target_entity) = tower.target
-                && let Some(target_pos) = world.get::<Position>(target_entity)
-            {
-                let target_screen_pos = Vec2::new(
-                    offset.x + target_pos.0.x * scale,
-                    offset.y + target_pos.0.y * scale,
-                );
-                draw_line(
-                    screen_pos.x,
-                    screen_pos.y,
-                    target_screen_pos.x,
-                    target_screen_pos.y,
-                    2.0,
-                    RED,
-                );
-            }
+        for ring in 1..tower.level {
+            let ring_radius = size / 2.0 + ring as f32 * 3.0 * scale;
+            draw_circle_lines(screen_pos.x, screen_pos.y, ring_radius, 1.5, upgraded_color);
         }
-    });
+
+        if tower.tower_type == TowerType::Sniper
+            && let Some(target_entity) = tower.target
+            && let Some(target_pos) = world.get::<Position>(target_entity)
+        {
+            let target_screen_pos = Vec2::new(
+                offset.x + target_pos.0.x * scale,
+                offset.y + target_pos.0.y * scale,
+            );
+            draw_line(
+                screen_pos.x,
+                screen_pos.y,
+                target_screen_pos.x,
+                target_screen_pos.y,
+                2.0,
+                RED,
+            );
+        }
+    }
 
     if let Some((grid_x, grid_y)) = game.mouse_grid_pos {
-        let mut tower_data = None;
-        world.for_each_tables(
-            keys.tower.mask | keys.grid_position.mask | keys.position.mask,
-            0,
-            |table| {
-                let towers = table.column(keys.tower);
-                let grid_positions = table.column(keys.grid_position);
-                let positions = table.column(keys.position);
-                for ((tower, grid_position), position) in
-                    towers.iter().zip(grid_positions).zip(positions)
-                {
-                    if grid_position.x == grid_x && grid_position.y == grid_y {
-                        tower_data = Some((*tower, *position));
-                    }
-                }
-            },
-        );
+        let tower_data = world
+            .query_ref::<(&Tower, &GridPosition, &Position)>()
+            .iter()
+            .find(|(_entity, (_tower, grid_position, _position))| {
+                grid_position.x == grid_x && grid_position.y == grid_y
+            })
+            .map(|(_entity, (tower, _grid_position, position))| (*tower, *position));
 
         if let Some((tower, pos)) = tower_data {
             let screen_pos = Vec2::new(offset.x + pos.0.x * scale, offset.y + pos.0.y * scale);
@@ -1716,60 +1634,55 @@ fn render_towers(world: &DynWorld) {
 }
 
 fn render_enemies(world: &DynWorld) {
-    let keys = world.resource::<GameResources>().unwrap().keys;
     let scale = get_scale();
     let offset = get_offset();
 
-    world.for_each_tables(keys.enemy.mask | keys.position.mask, 0, |table| {
-        let enemies = table.column(keys.enemy);
-        let positions = table.column(keys.position);
-        for (enemy, pos) in enemies.iter().zip(positions) {
-            let screen_pos = Vec2::new(offset.x + pos.0.x * scale, offset.y + pos.0.y * scale);
-            let size = enemy.enemy_type.size() * scale;
-            draw_circle(screen_pos.x, screen_pos.y, size, enemy.enemy_type.color());
-            draw_circle_lines(screen_pos.x, screen_pos.y, size, 2.0, BLACK);
+    for (_entity, (enemy, pos)) in world.query_ref::<(&Enemy, &Position)>().iter() {
+        let screen_pos = Vec2::new(offset.x + pos.0.x * scale, offset.y + pos.0.y * scale);
+        let size = enemy.enemy_type.size() * scale;
+        draw_circle(screen_pos.x, screen_pos.y, size, enemy.enemy_type.color());
+        draw_circle_lines(screen_pos.x, screen_pos.y, size, 2.0, BLACK);
 
-            if enemy.shield_health > 0.0 {
-                let shield_alpha = enemy.shield_health / enemy.max_shield;
-                draw_circle_lines(
-                    screen_pos.x,
-                    screen_pos.y,
-                    size + 3.0 * scale,
-                    2.0,
-                    Color::new(0.5, 0.5, 1.0, shield_alpha),
-                );
-            }
-
-            let health_percent = enemy.health / enemy.max_health;
-            let bar_width = size * 2.0;
-            let bar_height = 4.0 * scale;
-            let bar_y = screen_pos.y - size - 10.0 * scale;
-
-            draw_rectangle(
-                screen_pos.x - bar_width / 2.0,
-                bar_y,
-                bar_width,
-                bar_height,
-                BLACK,
-            );
-
-            let health_color = if health_percent > 0.5 {
-                GREEN
-            } else if health_percent > 0.25 {
-                YELLOW
-            } else {
-                RED
-            };
-
-            draw_rectangle(
-                screen_pos.x - bar_width / 2.0,
-                bar_y,
-                bar_width * health_percent,
-                bar_height,
-                health_color,
+        if enemy.shield_health > 0.0 {
+            let shield_alpha = enemy.shield_health / enemy.max_shield;
+            draw_circle_lines(
+                screen_pos.x,
+                screen_pos.y,
+                size + 3.0 * scale,
+                2.0,
+                Color::new(0.5, 0.5, 1.0, shield_alpha),
             );
         }
-    });
+
+        let health_percent = enemy.health / enemy.max_health;
+        let bar_width = size * 2.0;
+        let bar_height = 4.0 * scale;
+        let bar_y = screen_pos.y - size - 10.0 * scale;
+
+        draw_rectangle(
+            screen_pos.x - bar_width / 2.0,
+            bar_y,
+            bar_width,
+            bar_height,
+            BLACK,
+        );
+
+        let health_color = if health_percent > 0.5 {
+            GREEN
+        } else if health_percent > 0.25 {
+            YELLOW
+        } else {
+            RED
+        };
+
+        draw_rectangle(
+            screen_pos.x - bar_width / 2.0,
+            bar_y,
+            bar_width * health_percent,
+            bar_height,
+            health_color,
+        );
+    }
 }
 
 fn render_projectiles(world: &DynWorld) {
@@ -1797,86 +1710,76 @@ fn render_projectiles(world: &DynWorld) {
 }
 
 fn render_visual_effects(world: &DynWorld) {
-    let keys = world.resource::<GameResources>().unwrap().keys;
     let scale = get_scale();
     let offset = get_offset();
 
-    world.for_each_tables(keys.visual_effect.mask | keys.position.mask, 0, |table| {
-        let effects = table.column(keys.visual_effect);
-        let positions = table.column(keys.position);
-        for (effect, pos) in effects.iter().zip(positions) {
-            let screen_pos = Vec2::new(offset.x + pos.0.x * scale, offset.y + pos.0.y * scale);
-            let progress = effect.age / effect.lifetime;
-            let alpha = 1.0 - progress;
+    for (_entity, (effect, pos)) in world.query_ref::<(&VisualEffect, &Position)>().iter() {
+        let screen_pos = Vec2::new(offset.x + pos.0.x * scale, offset.y + pos.0.y * scale);
+        let progress = effect.age / effect.lifetime;
+        let alpha = 1.0 - progress;
 
-            match effect.effect_type {
-                EffectType::Explosion => {
-                    let size = (1.0 - progress) * 10.0 * scale;
-                    draw_circle(
-                        screen_pos.x,
-                        screen_pos.y,
-                        size,
-                        Color::new(1.0, 0.5, 0.0, alpha),
-                    );
-                }
-                EffectType::PoisonBubble => {
-                    let size = 5.0 * (1.0 + progress * 0.5) * scale;
-                    draw_circle(
-                        screen_pos.x,
-                        screen_pos.y,
-                        size,
-                        Color::new(0.5, 0.0, 0.8, alpha * 0.6),
-                    );
-                }
-                EffectType::DeathParticle => {
-                    let size = (1.0 - progress) * 5.0 * scale;
-                    draw_circle(
-                        screen_pos.x,
-                        screen_pos.y,
-                        size,
-                        Color::new(1.0, 0.0, 0.0, alpha),
-                    );
-                }
+        match effect.effect_type {
+            EffectType::Explosion => {
+                let size = (1.0 - progress) * 10.0 * scale;
+                draw_circle(
+                    screen_pos.x,
+                    screen_pos.y,
+                    size,
+                    Color::new(1.0, 0.5, 0.0, alpha),
+                );
+            }
+            EffectType::PoisonBubble => {
+                let size = 5.0 * (1.0 + progress * 0.5) * scale;
+                draw_circle(
+                    screen_pos.x,
+                    screen_pos.y,
+                    size,
+                    Color::new(0.5, 0.0, 0.8, alpha * 0.6),
+                );
+            }
+            EffectType::DeathParticle => {
+                let size = (1.0 - progress) * 5.0 * scale;
+                draw_circle(
+                    screen_pos.x,
+                    screen_pos.y,
+                    size,
+                    Color::new(1.0, 0.0, 0.0, alpha),
+                );
             }
         }
-    });
+    }
 }
 
 fn render_money_popups(world: &DynWorld) {
-    let keys = world.resource::<GameResources>().unwrap().keys;
     let scale = get_scale();
     let offset = get_offset();
 
-    world.for_each_tables(keys.money_popup.mask | keys.position.mask, 0, |table| {
-        let popups = table.column(keys.money_popup);
-        let positions = table.column(keys.position);
-        for (popup, pos) in popups.iter().zip(positions) {
-            let screen_pos = Vec2::new(offset.x + pos.0.x * scale, offset.y + pos.0.y * scale);
-            let progress = popup.lifetime / 2.0;
-            let alpha = 1.0 - progress.min(1.0);
-            let text_scale = 1.0 + progress * 0.5;
+    for (_entity, (popup, pos)) in world.query_ref::<(&MoneyPopup, &Position)>().iter() {
+        let screen_pos = Vec2::new(offset.x + pos.0.x * scale, offset.y + pos.0.y * scale);
+        let progress = popup.lifetime / 2.0;
+        let alpha = 1.0 - progress.min(1.0);
+        let text_scale = 1.0 + progress * 0.5;
 
-            let text = if popup.amount > 0 {
-                format!("+${}", popup.amount)
-            } else {
-                format!("-${}", -popup.amount)
-            };
+        let text = if popup.amount > 0 {
+            format!("+${}", popup.amount)
+        } else {
+            format!("-${}", -popup.amount)
+        };
 
-            let color = if popup.amount > 0 {
-                Color::new(0.0, 1.0, 0.0, alpha)
-            } else {
-                Color::new(1.0, 0.0, 0.0, alpha)
-            };
+        let color = if popup.amount > 0 {
+            Color::new(0.0, 1.0, 0.0, alpha)
+        } else {
+            Color::new(1.0, 0.0, 0.0, alpha)
+        };
 
-            draw_text(
-                &text,
-                screen_pos.x - 20.0 * scale,
-                screen_pos.y,
-                20.0 * scale * text_scale,
-                color,
-            );
-        }
-    });
+        draw_text(
+            &text,
+            screen_pos.x - 20.0 * scale,
+            screen_pos.y,
+            20.0 * scale * text_scale,
+            color,
+        );
+    }
 }
 
 fn enemy_died_event_handler(world: &mut DynWorld) {
@@ -1991,28 +1894,22 @@ fn wave_completed_event_handler(world: &mut DynWorld) {
 }
 
 fn tag_query_example_system(world: &DynWorld) {
-    let game = world.resource::<GameResources>().unwrap();
-    let tags = game.tags;
-    let keys = game.keys;
+    let flying_enemy_count = world.query_tag_type::<FlyingEnemy>().count();
+    let healer_enemy_count = world.query_tag_type::<HealerEnemy>().count();
+    let tank_enemy_count = world.query_tag_type::<TankEnemy>().count();
 
-    let flying_enemy_count = world.query_tag(tags.flying_enemy).count();
-    let healer_enemy_count = world.query_tag(tags.healer_enemy).count();
-    let tank_enemy_count = world.query_tag(tags.tank_enemy).count();
-
-    let sniper_tower_count = world.query_tag(tags.sniper_tower).count();
-    let frost_tower_count = world.query_tag(tags.frost_tower).count();
+    let sniper_tower_count = world.query_tag_type::<SniperTower>().count();
+    let frost_tower_count = world.query_tag_type::<FrostTower>().count();
 
     let _ = flying_enemy_count > 0 && sniper_tower_count == 0;
     let _ = healer_enemy_count > 0 && tank_enemy_count > 2;
 
     if frost_tower_count > 0 {
-        world.for_each(
-            keys.tower.mask | tags.frost_tower.mask,
-            0,
-            |_entity, table, index| {
-                let _tower = &table.column(keys.tower)[index];
-            },
-        );
+        for (_entity, (_tower,)) in world
+            .query_ref::<(&Tower,)>()
+            .with_tag_type::<FrostTower>()
+            .iter()
+        {}
     }
 }
 
@@ -2214,32 +2111,6 @@ fn update_money_popups_wrapper(world: &mut DynWorld) {
 async fn main() {
     let mut world = DynWorld::new();
 
-    let keys = GameKeys {
-        position: world.register::<Position>(),
-        tower: world.register::<Tower>(),
-        enemy: world.register::<Enemy>(),
-        projectile: world.register::<Projectile>(),
-        grid_cell: world.register::<GridCell>(),
-        grid_position: world.register::<GridPosition>(),
-        visual_effect: world.register::<VisualEffect>(),
-        range_indicator: world.register::<RangeIndicator>(),
-        money_popup: world.register::<MoneyPopup>(),
-    };
-
-    let tags = GameTags {
-        basic_enemy: world.register_tag(),
-        tank_enemy: world.register_tag(),
-        fast_enemy: world.register_tag(),
-        flying_enemy: world.register_tag(),
-        healer_enemy: world.register_tag(),
-        basic_tower: world.register_tag(),
-        frost_tower: world.register_tag(),
-        cannon_tower: world.register_tag(),
-        sniper_tower: world.register_tag(),
-        poison_tower: world.register_tag(),
-        path_cell: world.register_tag(),
-    };
-
     world.insert_resource(GameResources {
         money: 200,
         lives: 1,
@@ -2254,8 +2125,6 @@ async fn main() {
         game_speed: 1.0,
         current_hp: 20,
         max_hp: 20,
-        keys,
-        tags,
     });
 
     initialize_grid(&mut world);
