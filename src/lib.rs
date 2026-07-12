@@ -1437,6 +1437,27 @@ macro_rules! ecs_kernel_impl {
             }
 
             #[allow(unused)]
+            impl [<$world ComponentArrays>] {
+                /// Stamps every row of the masked columns as changed at
+                /// `tick`, the bulk opt-in for whole-column raw writes:
+                /// after filling columns through `query_mut()` closures or
+                /// `for_each_*_mut` table loops, one call here makes the
+                /// pass visible to tick-diffing consumers at zero per-row
+                /// cost during the write. Pass the world's `current_tick`.
+                pub fn mark_columns_changed(&mut self, mask: u64, tick: u32) {
+                    $(
+                        $(#[$comp_attr])*
+                        {
+                            if self.mask & mask & $mask != 0 {
+                                self.[<$name _changed>].fill(tick);
+                                self.[<$name _peak_changed>] = tick;
+                            }
+                        }
+                    )*
+                }
+            }
+
+            #[allow(unused)]
             fn [<get_component_index_ $world:snake>](mask: u64) -> Option<usize> {
                 match mask {
                     $($(#[$comp_attr])* $mask => Some([<$world Component>]::$mask as _),)*
@@ -2515,6 +2536,35 @@ macro_rules! ecs_kernel_impl {
                         table_index: 0,
                         array_index: 0,
                     }
+                }
+
+                /// Explicitly stamps change ticks for the masked components
+                /// on one entity. This is the opt-in for raw-tier writes:
+                /// `query_mut()` closures, `for_each_*_mut`, and slice
+                /// iterators do not stamp, so follow such writes with this
+                /// call when downstream consumers diff by ticks. Returns
+                /// false if the entity is missing or its table lacks every
+                /// masked component.
+                pub fn mark_changed(&mut self, entity: $crate::Entity, mask: u64) -> bool {
+                    let Some((table_index, array_index)) = [<get_location_ $world:snake>](&self.entity_locations, entity) else {
+                        return false;
+                    };
+                    let current_tick = self.current_tick;
+                    let table = &mut self.tables[table_index];
+                    let present = table.mask & mask & [<$world:snake:upper _ALL_COMPONENTS>];
+                    if present == 0 {
+                        return false;
+                    }
+                    $(
+                        $(#[$comp_attr])*
+                        {
+                            if present & $mask != 0 {
+                                table.[<$name _changed>][array_index] = current_tick;
+                                table.[<$name _peak_changed>] = current_tick;
+                            }
+                        }
+                    )*
+                    true
                 }
 
                 pub fn query_first_entity(&self, mask: u64) -> Option<$crate::Entity> {
@@ -4852,6 +4902,61 @@ mod tests {
                 ));
             }
         }
+    }
+
+    #[test]
+    fn test_mark_changed_stamps_raw_writes() {
+        let mut world = World::default();
+        let entities = world.spawn_entities(POSITION, 3);
+
+        world.step();
+
+        world.for_each_mut(POSITION, 0, |entity, table, index| {
+            if entity == entities[1] {
+                table.position[index].x = 5.0;
+            }
+        });
+        assert_eq!(world.query_entities_changed(POSITION).count(), 0);
+
+        assert!(world.mark_changed(entities[1], POSITION));
+        let changed: Vec<_> = world.query_entities_changed(POSITION).collect();
+        assert_eq!(changed, vec![entities[1]]);
+    }
+
+    #[test]
+    fn test_mark_changed_rejects_missing_rows() {
+        let mut world = World::default();
+        let entity = world.spawn_entities(POSITION, 1)[0];
+        let dead = world.spawn_entities(POSITION, 1)[0];
+        world.despawn_entities(&[dead]);
+
+        assert!(!world.mark_changed(entity, VELOCITY));
+        assert!(!world.mark_changed(dead, POSITION));
+        assert!(world.mark_changed(entity, POSITION | VELOCITY));
+    }
+
+    #[test]
+    fn test_mark_columns_changed_bulk_stamps_one_table() {
+        let mut world = World::default();
+        world.spawn_entities(POSITION, 2);
+        let moving = world.spawn_entities(POSITION | VELOCITY, 2);
+
+        world.step();
+
+        let current_tick = world.current_tick();
+        for table in &mut world.tables {
+            if table.mask & (POSITION | VELOCITY) != POSITION | VELOCITY {
+                continue;
+            }
+            for value in &mut table.position {
+                value.x += 1.0;
+            }
+            table.mark_columns_changed(POSITION, current_tick);
+        }
+
+        let changed: Vec<_> = world.query_entities_changed(POSITION).collect();
+        assert_eq!(changed, moving);
+        assert_eq!(world.query_entities_changed(VELOCITY).count(), 0);
     }
 
     #[test]

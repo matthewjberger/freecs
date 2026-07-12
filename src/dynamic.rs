@@ -66,6 +66,10 @@
 //! # assert_eq!(total, 2.0);
 //! ```
 //!
+//! Tags can be named by marker types (`world.add_tag_type::<Selected>(entity)`,
+//! `.with_tag_type::<Selected>()`), registering lazily like components, or
+//! held as [`TagKey`] values; both forms are the same sparse sets underneath.
+//!
 //! Registration is a schema: mask bits are assigned in registration order, so
 //! anything serializing masks should register components deterministically,
 //! or build one [`ComponentRegistry`] up front and construct worlds from it.
@@ -188,6 +192,7 @@ pub struct ComponentRegistry {
     pub components: Vec<ComponentInfo>,
     pub components_by_type: HashMap<TypeId, u32>,
     pub tag_count: u32,
+    pub tags_by_type: HashMap<TypeId, u32>,
     #[cfg(feature = "snapshot")]
     pub codecs: Vec<Option<ComponentCodec>>,
 }
@@ -205,6 +210,7 @@ impl ComponentRegistry {
             components: Vec::new(),
             components_by_type: HashMap::new(),
             tag_count: 0,
+            tags_by_type: HashMap::new(),
             #[cfg(feature = "snapshot")]
             codecs: Vec::new(),
         }
@@ -273,6 +279,28 @@ impl ComponentRegistry {
         );
         let tag_index = self.tag_count;
         self.tag_count += 1;
+        self.tag_key_for(tag_index)
+    }
+
+    /// Registers a tag identified by the marker type `T` if it is not
+    /// already registered and returns its key. Idempotent per type; the tag
+    /// is an ordinary sparse-set tag underneath, `T` is only its name.
+    pub fn register_tag_type<T: 'static>(&mut self) -> TagKey {
+        if let Some(&tag_index) = self.tags_by_type.get(&TypeId::of::<T>()) {
+            return self.tag_key_for(tag_index);
+        }
+        let key = self.register_tag();
+        self.tags_by_type.insert(TypeId::of::<T>(), key.tag_index);
+        key
+    }
+
+    /// Resolves the marker type `T`'s tag key without registering.
+    pub fn lookup_tag_type<T: 'static>(&self) -> Option<TagKey> {
+        let &tag_index = self.tags_by_type.get(&TypeId::of::<T>())?;
+        Some(self.tag_key_for(tag_index))
+    }
+
+    fn tag_key_for(&self, tag_index: u32) -> TagKey {
         TagKey {
             tag_index,
             mask: 1 << (63 - tag_index),
@@ -353,6 +381,23 @@ impl DynComponentArrays {
 
     pub fn has_component(&self, mask: u64) -> bool {
         self.mask & mask != 0
+    }
+
+    /// Stamps every row of the masked columns as changed at `tick`, the
+    /// bulk opt-in for whole-column raw writes: after filling a column
+    /// through `column_mut` or `columns_pair` inside a table loop, one call
+    /// here makes the pass visible to tick-diffing consumers at zero
+    /// per-row cost during the write. Pass the world's `current_tick()`.
+    pub fn mark_columns_changed(&mut self, mask: u64, tick: u32) {
+        let mut remaining = self.mask & mask;
+        while remaining != 0 {
+            let component_mask = remaining & remaining.wrapping_neg();
+            remaining &= remaining - 1;
+            let position = column_position(self.mask, component_mask);
+            let column = &mut self.columns[position];
+            column.changed.fill(tick);
+            column.peak_changed = tick;
+        }
     }
 
     /// Disjoint mutable and shared column slices in one call, for hoisting
@@ -521,6 +566,22 @@ impl DynWorld {
             self.tags.push(SparseTagSet::default());
         }
         key
+    }
+
+    /// The lazy typed tier for tags: resolves or registers the marker type
+    /// `T`'s tag and returns its key.
+    pub fn tag_key<T: 'static>(&mut self) -> TagKey {
+        let key = self.registry.register_tag_type::<T>();
+        while self.tags.len() < self.registry.tag_count as usize {
+            self.tags.push(SparseTagSet::default());
+        }
+        key
+    }
+
+    /// Resolves the marker type `T`'s tag key without registering. Returns
+    /// `None` for marker types this world has never seen.
+    pub fn lookup_tag_key<T: 'static>(&self) -> Option<TagKey> {
+        self.registry.lookup_tag_type::<T>()
     }
 
     fn check_key(&self, registry_id: u32) {
@@ -723,6 +784,22 @@ impl DynWorld {
         let despawned = self.despawn_entities_in(&mut allocator, entities);
         self.allocator = allocator;
         despawned
+    }
+
+    /// Despawns every entity carrying at least one of the bundle's component
+    /// types, so one call clears several kinds of entity at once:
+    /// `world.despawn_with_any::<(Projectile, VisualEffect)>()`. Types
+    /// register lazily; a type nothing carries despawns nothing. Returns the
+    /// despawned entities.
+    pub fn despawn_with_any<B: Bundle>(&mut self) -> Vec<Entity> {
+        let mask = B::component_mask(self);
+        let entities: Vec<Entity> = self
+            .tables
+            .iter()
+            .filter(|table| table.mask & mask != 0)
+            .flat_map(|table| table.entity_indices.iter().copied())
+            .collect();
+        self.despawn_entities(&entities)
     }
 
     /// Despawns through an external allocator, the grouped-worlds form used
@@ -951,6 +1028,34 @@ impl DynWorld {
         Some(&mut column_vec_mut::<T>(column.data.as_mut())[array_index])
     }
 
+    /// Explicitly stamps change ticks for the masked components on one
+    /// entity. This is the opt-in for raw-tier writes: table access through
+    /// [`for_each_tables_mut`](Self::for_each_tables_mut), `column_mut`, and
+    /// `columns_pair` does not stamp, so follow such writes with this call
+    /// when downstream consumers diff by ticks. Returns false if the entity
+    /// is missing or its table lacks every masked component.
+    pub fn mark_changed(&mut self, entity: Entity, mask: u64) -> bool {
+        let Some((table_index, array_index)) = get_location(&self.entity_locations, entity) else {
+            return false;
+        };
+        let current_tick = self.current_tick;
+        let table = &mut self.tables[table_index];
+        let present = table.mask & mask & self.registry.all_components_mask();
+        if present == 0 {
+            return false;
+        }
+        let mut remaining = present;
+        while remaining != 0 {
+            let component_mask = remaining & remaining.wrapping_neg();
+            remaining &= remaining - 1;
+            let position = column_position(table.mask, component_mask);
+            let column = &mut table.columns[position];
+            column.changed[array_index] = current_tick;
+            column.peak_changed = current_tick;
+        }
+        true
+    }
+
     pub fn set_keyed<T: 'static>(&mut self, key: ComponentKey<T>, entity: Entity, value: T) {
         self.check_key(key.registry_id);
         let current_tick = self.current_tick;
@@ -1068,6 +1173,39 @@ impl DynWorld {
     pub fn query_tag(&self, key: TagKey) -> impl Iterator<Item = Entity> + '_ {
         self.check_key(key.registry_id);
         self.tags[key.tag_index as usize].iter()
+    }
+
+    /// Adds the marker type `T`'s tag to an entity, registering the tag on
+    /// first use.
+    pub fn add_tag_type<T: 'static>(&mut self, entity: Entity) {
+        let key = self.tag_key::<T>();
+        self.add_tag(key, entity);
+    }
+
+    /// Removes the marker type `T`'s tag from an entity. Unregistered marker
+    /// types remove nothing.
+    pub fn remove_tag_type<T: 'static>(&mut self, entity: Entity) -> bool {
+        match self.lookup_tag_key::<T>() {
+            Some(key) => self.remove_tag(key, entity),
+            None => false,
+        }
+    }
+
+    /// Whether an entity carries the marker type `T`'s tag. Unregistered
+    /// marker types read as absent.
+    pub fn has_tag_type<T: 'static>(&self, entity: Entity) -> bool {
+        match self.lookup_tag_key::<T>() {
+            Some(key) => self.has_tag(key, entity),
+            None => false,
+        }
+    }
+
+    /// Iterates entities carrying the marker type `T`'s tag. Unregistered
+    /// marker types match nothing.
+    pub fn query_tag_type<T: 'static>(&self) -> impl Iterator<Item = Entity> + '_ {
+        self.lookup_tag_key::<T>()
+            .into_iter()
+            .flat_map(|key| self.tags[key.tag_index as usize].iter())
     }
 
     fn entity_matches_tags(&self, entity: Entity, tag_include: u64, tag_exclude: u64) -> bool {
@@ -1538,6 +1676,16 @@ impl DynWorld {
 
     pub fn queue_remove_tag(&mut self, key: TagKey, entity: Entity) {
         self.command_buffer.push(DynCommand::RemoveTag(entity, key));
+    }
+
+    pub fn queue_add_tag_type<T: 'static>(&mut self, entity: Entity) {
+        let key = self.tag_key::<T>();
+        self.queue_add_tag(key, entity);
+    }
+
+    pub fn queue_remove_tag_type<T: 'static>(&mut self, entity: Entity) {
+        let key = self.tag_key::<T>();
+        self.queue_remove_tag(key, entity);
     }
 
     /// Queues a typed component write. The value is boxed with the command;
@@ -2660,6 +2808,17 @@ impl<'world, Q: QueryTuple> DynQuery<'world, Q> {
         self
     }
 
+    /// Filter by the marker type `T`'s tag, registering it on first use.
+    pub fn with_tag_type<T: 'static>(mut self) -> Self {
+        self.include |= self.world.tag_key::<T>().mask;
+        self
+    }
+
+    pub fn without_tag_type<T: 'static>(mut self) -> Self {
+        self.exclude |= self.world.tag_key::<T>().mask;
+        self
+    }
+
     /// Filter by membership in an external tag set, the grouped-worlds form:
     /// [`DynEcs`] tags live outside any single world's mask space, so they
     /// filter by set reference instead of by mask bit.
@@ -2784,6 +2943,23 @@ impl<'world, Q: ReadQueryTuple> DynQueryRef<'world, Q> {
 
     pub fn without_tag(mut self, key: TagKey) -> Self {
         self.exclude |= key.mask;
+        self
+    }
+
+    /// Filter by the marker type `T`'s tag. Unregistered marker types match
+    /// no entities.
+    pub fn with_tag_type<T: 'static>(mut self) -> Self {
+        match self.world.lookup_tag_key::<T>() {
+            Some(key) => self.include |= key.mask,
+            None => self.dead = true,
+        }
+        self
+    }
+
+    pub fn without_tag_type<T: 'static>(mut self) -> Self {
+        if let Some(key) = self.world.lookup_tag_key::<T>() {
+            self.exclude |= key.mask;
+        }
         self
     }
 
@@ -3469,6 +3645,190 @@ mod tests {
             0
         );
         assert_eq!(world.registry.components.len(), registered);
+    }
+
+    #[test]
+    fn test_marker_tags_register_lazily_and_share_index_space() {
+        struct Boss;
+        struct Frozen;
+
+        let mut world = DynWorld::new();
+        let keyed = world.register_tag();
+        let boss = world.tag_key::<Boss>();
+        let boss_again = world.tag_key::<Boss>();
+
+        assert_eq!(boss.tag_index, keyed.tag_index + 1);
+        assert_eq!(boss, boss_again);
+        assert!(world.lookup_tag_key::<Frozen>().is_none());
+
+        let entity = world.spawn((Position::default(),));
+        world.add_tag_type::<Boss>(entity);
+        assert!(world.has_tag_type::<Boss>(entity));
+        assert!(world.has_tag(boss, entity));
+        assert!(!world.has_tag_type::<Frozen>(entity));
+
+        assert_eq!(
+            world.query_tag_type::<Boss>().collect::<Vec<_>>(),
+            vec![entity]
+        );
+        assert_eq!(world.query_tag_type::<Frozen>().count(), 0);
+
+        assert!(world.remove_tag_type::<Boss>(entity));
+        assert!(!world.has_tag_type::<Boss>(entity));
+        assert!(!world.remove_tag_type::<Frozen>(entity));
+    }
+
+    #[test]
+    fn test_marker_tag_query_filters() {
+        struct Boss;
+
+        let mut world = DynWorld::new();
+        let tagged = world.spawn((Position { x: 1.0, y: 0.0 },));
+        let untagged = world.spawn((Position { x: 2.0, y: 0.0 },));
+        world.add_tag_type::<Boss>(tagged);
+
+        let mut with_tag = Vec::new();
+        world
+            .query::<(&Position,)>()
+            .with_tag_type::<Boss>()
+            .for_each(|entity, _| with_tag.push(entity));
+        assert_eq!(with_tag, vec![tagged]);
+
+        let mut without_tag = Vec::new();
+        world
+            .query::<(&Position,)>()
+            .without_tag_type::<Boss>()
+            .for_each(|entity, _| without_tag.push(entity));
+        assert_eq!(without_tag, vec![untagged]);
+
+        let with_tag_ref: Vec<Entity> = world
+            .query_ref::<(&Position,)>()
+            .with_tag_type::<Boss>()
+            .iter()
+            .map(|(entity, _)| entity)
+            .collect();
+        assert_eq!(with_tag_ref, vec![tagged]);
+    }
+
+    #[test]
+    fn test_marker_tag_filters_on_unregistered_types() {
+        struct Never;
+
+        let mut world = DynWorld::new();
+        world.spawn((Position::default(),));
+
+        assert_eq!(
+            world
+                .query_ref::<(&Position,)>()
+                .with_tag_type::<Never>()
+                .iter()
+                .count(),
+            0
+        );
+        assert_eq!(
+            world
+                .query_ref::<(&Position,)>()
+                .without_tag_type::<Never>()
+                .iter()
+                .count(),
+            1
+        );
+        assert!(world.lookup_tag_key::<Never>().is_none());
+    }
+
+    #[test]
+    fn test_marker_tag_commands() {
+        struct Boss;
+
+        let mut world = DynWorld::new();
+        let entity = world.spawn((Position::default(),));
+
+        world.queue_add_tag_type::<Boss>(entity);
+        world.apply_commands();
+        assert!(world.has_tag_type::<Boss>(entity));
+
+        world.queue_remove_tag_type::<Boss>(entity);
+        world.apply_commands();
+        assert!(!world.has_tag_type::<Boss>(entity));
+    }
+
+    #[test]
+    fn test_mark_changed_stamps_raw_writes() {
+        let mut world = DynWorld::new();
+        let position = world.register::<Position>();
+        let entities = world.spawn_entities(position.mask, 3);
+
+        world.step();
+        world.for_each_tables_mut(position.mask, 0, |table| {
+            table.column_mut(position)[1].x = 5.0;
+        });
+        assert_eq!(world.query_entities_changed(position.mask).count(), 0);
+
+        assert!(world.mark_changed(entities[1], position.mask));
+        let changed: Vec<Entity> = world.query_entities_changed(position.mask).collect();
+        assert_eq!(changed, vec![entities[1]]);
+    }
+
+    #[test]
+    fn test_mark_changed_rejects_missing_rows() {
+        let mut world = DynWorld::new();
+        let position = world.register::<Position>();
+        let velocity = world.register::<Velocity>();
+        let entity = world.spawn_entities(position.mask, 1)[0];
+        let dead = world.spawn_entities(position.mask, 1)[0];
+        world.despawn_entities(&[dead]);
+
+        assert!(!world.mark_changed(entity, velocity.mask));
+        assert!(!world.mark_changed(dead, position.mask));
+
+        let boss = world.register_tag();
+        assert!(!world.mark_changed(entity, boss.mask));
+        assert!(world.mark_changed(entity, position.mask | boss.mask));
+    }
+
+    #[test]
+    fn test_mark_columns_changed_bulk_stamps_one_table() {
+        let mut world = DynWorld::new();
+        let position = world.register::<Position>();
+        let velocity = world.register::<Velocity>();
+        let plain = world.spawn_entities(position.mask, 2);
+        let moving = world.spawn_entities(position.mask | velocity.mask, 2);
+
+        world.step();
+        let current_tick = world.current_tick();
+        world.for_each_tables_mut(position.mask | velocity.mask, 0, |table| {
+            for value in table.column_mut(position) {
+                value.x += 1.0;
+            }
+            table.mark_columns_changed(position.mask, current_tick);
+        });
+
+        let changed: Vec<Entity> = world.query_entities_changed(position.mask).collect();
+        assert_eq!(changed, moving);
+        assert_eq!(world.query_entities_changed(velocity.mask).count(), 0);
+        let _ = plain;
+    }
+
+    #[test]
+    fn test_despawn_with_any_clears_matching_kinds() {
+        let mut world = DynWorld::new();
+        let plain = world.spawn((Position::default(),));
+        let moving = world.spawn((Position::default(), Velocity::default()));
+        let hurt = world.spawn((Health::default(),));
+
+        let despawned = world.despawn_with_any::<(Velocity, Health)>();
+
+        assert_eq!(despawned.len(), 2);
+        assert!(despawned.contains(&moving));
+        assert!(despawned.contains(&hurt));
+        assert!(world.is_alive(plain));
+        assert!(!world.is_alive(moving));
+        assert!(!world.is_alive(hurt));
+
+        #[derive(Default, Clone)]
+        struct NeverSpawned;
+        assert!(world.despawn_with_any::<(NeverSpawned,)>().is_empty());
+        assert!(world.is_alive(plain));
     }
 
     #[test]

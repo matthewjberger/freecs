@@ -23,11 +23,11 @@ struct CollisionEvent {
     entity_b: freecs::Entity,
 }
 
+struct Selected;
+
 fn main() {
     let mut world = DynWorld::new();
     world.insert_resource(1.0f32);
-
-    let selected = world.register_tag();
 
     println!("=== Spawning with bundles, types register lazily ===");
     let player = world.spawn((
@@ -37,7 +37,7 @@ fn main() {
     ));
     let enemy = world.spawn((Position { x: 4.0, y: 2.0 }, Velocity { x: -1.0, y: 0.0 }));
     let landmark = world.spawn((Position { x: 10.0, y: 10.0 },));
-    world.add_tag(selected, player);
+    world.add_tag_type::<Selected>(player);
 
     println!("player: {:?}", world.get::<Position>(player));
     println!("enemy:  {:?}", world.get::<Position>(enemy));
@@ -101,7 +101,7 @@ fn main() {
     println!("\n=== Tag and filter queries ===");
     world
         .query::<(&Position,)>()
-        .with_tag(selected)
+        .with_tag_type::<Selected>()
         .for_each(|entity, (position,)| {
             println!(
                 "selected {entity} at ({:.1}, {:.1})",

@@ -568,7 +568,22 @@ fn render_system(world: &mut World) {
 world.step();  // Increments tick counter and expires old events
 ```
 
-Mutations through `set_*()`, `get_*_mut()`, `modify_*()`, `query_*_mut()`, and `iter_*_mut()` mark the component slot as changed for the current tick, as do spawns and component add/remove migrations. Raw table access (`query_mut()` closures, slice iterators, `for_each_*_mut`) does not mark, so route writes through the accessors when you rely on change detection.
+Mutations through `set_*()`, `get_*_mut()`, `modify_*()`, `query_*_mut()`, and `iter_*_mut()` mark the component slot as changed for the current tick, as do spawns and component add/remove migrations. Raw table access (`query_mut()` closures, slice iterators, `for_each_*_mut`) does not mark. This matters the moment a downstream consumer diffs by ticks (delta sync, incremental render extraction): a raw-tier write is invisible to it until something else stamps the slot. Route writes through the accessors, or opt in explicitly:
+
+```rust
+// Per entity, after a raw write:
+world.mark_changed(entity, POSITION | VELOCITY);
+
+// Per table, after a whole-column pass:
+let current_tick = world.current_tick();
+for table in &mut world.tables {
+    if table.mask & POSITION == 0 { continue; }
+    for position in &mut table.position { position.x += 1.0; }
+    table.mark_columns_changed(POSITION, current_tick);
+}
+```
+
+`mark_changed(entity, mask)` stamps the masked components on one entity and returns false when the entity is missing or carries none of them. `table.mark_columns_changed(mask, tick)` stamps every row of the masked columns at once, so bulk passes stay free of per-row bookkeeping during the write. The dynamic world has the same pair (`DynWorld::mark_changed`, `mark_columns_changed` on its tables).
 
 Each table also keeps a per-component high-water tick. Changed queries compare it first and skip whole tables that no write has touched since the last `step()`, so scanning cost is proportional to tables with activity rather than total entity count. Tick comparisons are wrapping-safe, so detection keeps working after the `u32` tick counter overflows.
 
@@ -837,11 +852,27 @@ world.insert_resource(0u32);
 world.resource_scope(|world, kills: &mut u32| {
     *kills += world.query_ref::<(&Position,)>().iter().count() as u32;
 });
+
+// Tags can be named by marker types instead of keys; they register lazily
+// like components and stay sparse sets underneath.
+struct Selected;
+world.add_tag_type::<Selected>(entity);
+assert!(world.has_tag_type::<Selected>(entity));
+let selected_count = world
+    .query_ref::<(&Position,)>()
+    .with_tag_type::<Selected>()
+    .iter()
+    .count();
+assert_eq!(selected_count, 1);
+
+// One call clears every entity carrying any of the listed components.
+world.despawn_with_any::<(Position, Velocity)>();
+assert_eq!(world.entity_count(), 0);
 ```
 
 Three access tiers, from ergonomic to explicit:
 
-- **Typed**: `spawn(bundle)`, `get::<T>` / `set` / `remove`, `query::<(&mut A, &B)>()` with `Option<&T>` elements and up to eight per tuple, `query_ref` iterators on `&world`, `resource_scope`, `send(event)` / `read_events_since::<T>(cursor)`, `insert_resource` / `resource::<T>()`. `TypeId` lookups happen at registration and per typed call, never inside iteration loops.
+- **Typed**: `spawn(bundle)`, `get::<T>` / `set` / `remove`, `query::<(&mut A, &B)>()` with `Option<&T>` elements and up to eight per tuple, `query_ref` iterators on `&world`, marker-type tags (`add_tag_type::<T>`, `with_tag_type::<T>()`), `despawn_with_any::<(A, B)>()`, `resource_scope`, `send(event)` / `read_events_since::<T>(cursor)`, `insert_resource` / `resource::<T>()`. `TypeId` lookups happen at registration and per typed call, never inside iteration loops.
 - **Keyed**: `register::<T>()` returns a copyable `ComponentKey<T>` carrying the component's mask bit; `get_keyed` / `set_keyed` and mask-based `for_each` / `for_each_mut` skip the hash entirely.
 - **Raw tables**: `for_each_tables_mut(mask, 0, |table| ...)` with `table.columns_pair(a, b)` hoists concrete slices once per table for the tightest loops, no change stamping, same covenant as the static path.
 
