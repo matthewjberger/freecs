@@ -769,6 +769,7 @@ When a component or resource has a `#[cfg(...)]` attribute, all related generate
 
 - `serde` (default): derives `Serialize`/`Deserialize` on `Entity`. Disable with `default-features = false` if you don't need it.
 - `dynamic` (off by default): the runtime-registered [dynamic world](#dynamic-worlds) entry point. Costs the default build nothing.
+- `snapshot` (off by default, implies `dynamic` and `serde`): serializable snapshots of dynamic worlds and groups, with per-type column codecs registered alongside components.
 
 ## Dynamic Worlds
 
@@ -829,6 +830,52 @@ pays the `TypeId` map (16.5 ns versus 6.8 ns keyed), and every column adds one
 `Box` indirection per table.
 
 Component types need `Send + Sync + Default + 'static`, the same effective bounds the macro path relies on (`Default` because migration moves values with `mem::take`, `Send + Sync` for parallel iteration).
+
+### Grouped dynamic worlds
+
+`DynEcs` groups dynamic worlds over one shared entity allocator, the dynamic
+counterpart of the macro's multi-world form and the escape hatch past 64
+components. Each member world carries its own registry and full mask space,
+one entity can hold rows in any combination of worlds, and despawning retires
+it everywhere with the same generation broadcast the static multi-world uses,
+so stale handles are refused in every member. Group tags live outside any
+world's mask space and filter per-world typed queries by set reference:
+
+```rust
+use freecs::dynamic::{ComponentRegistry, DynEcs};
+
+let mut ecs = DynEcs::new();
+let core = ecs.add_world(ComponentRegistry::new());
+let render = ecs.add_world(ComponentRegistry::new());
+let selected = ecs.register_tag();
+
+let entity = ecs.spawn();
+ecs.worlds[core].set(entity, Position { x: 1.0, y: 0.0 });
+ecs.worlds[render].set(entity, Sprite { id: 7 });
+ecs.add_tag(selected, entity);
+
+let DynEcs { worlds, tags, .. } = &mut ecs;
+worlds[core]
+    .query::<(&mut Position,)>()
+    .with_tag_set(&tags[selected])
+    .for_each(|_entity, (position,)| position.x += 1.0);
+```
+
+### Snapshots
+
+The `snapshot` feature makes dynamic worlds serializable. Components register
+with a column codec, `register_serde::<T>()` uses postcard for the column
+bytes, or `register_codec` supplies any byte format, and `world.snapshot()`
+produces a plain `DynWorldSnapshot` you serialize with whatever serde format
+you like. `DynWorld::from_snapshot(registry, &snapshot)` rebuilds the world
+over a registry with the same registration order (appending new components
+after the snapshot's schema is fine, masks stay stable). Allocator state
+survives, so despawned ids recycle correctly after a load, stale-handle
+refusal is reconstructed from allocator liveness even for entities that never
+had a row, and every restored slot reads as changed so incremental consumers
+resync. Events, pending commands, and the structural log are transient and
+not captured. `DynEcs` snapshots the same way with one registry per member
+world.
 
 The trust boundary is the registry. Bits are assigned in registration order,
 so registration is schema: build one `ComponentRegistry`, clone it into every

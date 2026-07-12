@@ -30,6 +30,7 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y libx11-dev libxi-dev libgl1-mesa-dev libasound2-dev
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo clippy --all-targets --features dynamic -- -D warnings
+      - run: cargo clippy --all-targets --features snapshot -- -D warnings
 
   test:
     strategy:
@@ -45,6 +46,7 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y libx11-dev libxi-dev libgl1-mesa-dev libasound2-dev
       - run: cargo test
       - run: cargo test --features dynamic
+      - run: cargo test --features snapshot
       - run: cargo check --lib --no-default-features
 
   wasm:
@@ -58,6 +60,7 @@ jobs:
       - run: cargo check --lib --target wasm32-unknown-unknown
       - run: cargo check --lib --target wasm32-unknown-unknown --no-default-features
       - run: cargo check --lib --target wasm32-unknown-unknown --features dynamic
+      - run: cargo check --lib --target wasm32-unknown-unknown --features snapshot
 
   msrv:
     runs-on: ubuntu-latest
@@ -66,5 +69,5 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.90
       - uses: Swatinem/rust-cache@v2
       - run: cargo check --lib
-      - run: cargo check --lib --features dynamic
+      - run: cargo check --lib --features snapshot
       - run: cargo check --lib --features dynamic
