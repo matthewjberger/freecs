@@ -1632,8 +1632,8 @@ impl DynWorld {
     /// resource as independent borrows, then puts the resource back. This is
     /// the take/put pattern for systems that mutate both a resource and the
     /// world in one pass; the resource is absent from the world inside the
-    /// closure, and a panic in the closure drops it. Panics if `R` is not
-    /// present.
+    /// closure and is reinserted even when the closure panics, before the
+    /// panic resumes. Panics if `R` is not present.
     pub fn resource_scope<R: Send + Sync + 'static, T>(
         &mut self,
         f: impl FnOnce(&mut DynWorld, &mut R) -> T,
@@ -1641,9 +1641,13 @@ impl DynWorld {
         let mut resource = self
             .remove_resource::<R>()
             .expect("resource_scope requires the resource to be present");
-        let result = f(self, &mut resource);
+        let result =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(self, &mut resource)));
         self.insert_resource(resource);
-        result
+        match result {
+            Ok(value) => value,
+            Err(panic) => std::panic::resume_unwind(panic),
+        }
     }
 
     pub fn queue_spawn_entities(&mut self, mask: u64, count: usize) {
@@ -2290,6 +2294,7 @@ pub trait QueryElement: sealed::SealedElement {
     ) -> Self::Fetch<'table>;
     fn changed_newer(fetch: &Self::Fetch<'_>, index: usize, since_tick: u32) -> bool;
     fn item<'fetch>(fetch: &'fetch mut Self::Fetch<'_>, index: usize) -> Self::Item<'fetch>;
+    fn stamp_peaks(fetch: &mut Self::Fetch<'_>);
 }
 
 impl<T: Send + Sync + Default + 'static> sealed::SealedElement for &T {}
@@ -2321,12 +2326,14 @@ impl<T: Send + Sync + Default + 'static> QueryElement for &T {
     fn item<'fetch>(fetch: &'fetch mut Self::Fetch<'_>, index: usize) -> Self::Item<'fetch> {
         &fetch.0[index]
     }
+
+    fn stamp_peaks(_fetch: &mut Self::Fetch<'_>) {}
 }
 
 impl<T: Send + Sync + Default + 'static> sealed::SealedElement for &mut T {}
 
 impl<T: Send + Sync + Default + 'static> QueryElement for &mut T {
-    type Fetch<'table> = (&'table mut [T], &'table mut [u32], u32);
+    type Fetch<'table> = (&'table mut [T], &'table mut [u32], u32, &'table mut u32);
     type Item<'item> = &'item mut T;
     const REQUIRED: bool = true;
 
@@ -2339,11 +2346,11 @@ impl<T: Send + Sync + Default + 'static> QueryElement for &mut T {
         current_tick: u32,
     ) -> Self::Fetch<'table> {
         let slot = slot.expect("required query element column missing");
-        slot.peak_changed = current_tick;
         (
             column_vec_mut::<T>(slot.data.as_mut()).as_mut_slice(),
             slot.changed.as_mut_slice(),
             current_tick,
+            &mut slot.peak_changed,
         )
     }
 
@@ -2354,6 +2361,10 @@ impl<T: Send + Sync + Default + 'static> QueryElement for &mut T {
     fn item<'fetch>(fetch: &'fetch mut Self::Fetch<'_>, index: usize) -> Self::Item<'fetch> {
         fetch.1[index] = fetch.2;
         &mut fetch.0[index]
+    }
+
+    fn stamp_peaks(fetch: &mut Self::Fetch<'_>) {
+        *fetch.3 = fetch.2;
     }
 }
 
@@ -2384,12 +2395,14 @@ impl<T: Send + Sync + Default + 'static> QueryElement for Option<&T> {
     fn item<'fetch>(fetch: &'fetch mut Self::Fetch<'_>, index: usize) -> Self::Item<'fetch> {
         fetch.as_ref().map(|fetch| &fetch.0[index])
     }
+
+    fn stamp_peaks(_fetch: &mut Self::Fetch<'_>) {}
 }
 
 impl<T: Send + Sync + Default + 'static> sealed::SealedElement for Option<&mut T> {}
 
 impl<T: Send + Sync + Default + 'static> QueryElement for Option<&mut T> {
-    type Fetch<'table> = Option<(&'table mut [T], &'table mut [u32], u32)>;
+    type Fetch<'table> = Option<(&'table mut [T], &'table mut [u32], u32, &'table mut u32)>;
     type Item<'item> = Option<&'item mut T>;
     const REQUIRED: bool = false;
 
@@ -2415,6 +2428,12 @@ impl<T: Send + Sync + Default + 'static> QueryElement for Option<&mut T> {
             fetch.1[index] = fetch.2;
             &mut fetch.0[index]
         })
+    }
+
+    fn stamp_peaks(fetch: &mut Self::Fetch<'_>) {
+        if let Some(fetch) = fetch {
+            *fetch.3 = fetch.2;
+        }
     }
 }
 
@@ -2496,6 +2515,7 @@ pub trait QueryTuple: sealed::SealedQueryTuple {
         since_tick: u32,
     ) -> bool;
     fn item<'fetch>(fetch: &'fetch mut Self::Fetch<'_>, index: usize) -> Self::Item<'fetch>;
+    fn stamp_peaks(fetch: &mut Self::Fetch<'_>);
 }
 
 /// The read-only half of [`QueryTuple`], tuples of `&T` and `Option<&T>`
@@ -2640,6 +2660,10 @@ macro_rules! impl_query_tuple {
 
             fn item<'fetch>(fetch: &'fetch mut Self::Fetch<'_>, index: usize) -> Self::Item<'fetch> {
                 ($($element::item(&mut fetch.$position, index),)+)
+            }
+
+            fn stamp_peaks(fetch: &mut Self::Fetch<'_>) {
+                $($element::stamp_peaks(&mut fetch.$position);)+
             }
         }
     };
@@ -2877,21 +2901,47 @@ impl<'world, Q: QueryTuple> DynQuery<'world, Q> {
             let entity_indices = &table.entity_indices;
             let mut fetch = Q::fetch(table_mask, &mut table.columns, &element_masks, current_tick);
 
-            for (index, &entity) in entity_indices.iter().enumerate() {
-                if (tag_include != 0 || tag_exclude != 0)
-                    && !tags_match(tags, entity, tag_include, tag_exclude)
-                {
-                    continue;
+            let has_row_filters = tag_include != 0
+                || tag_exclude != 0
+                || changed_mask != 0
+                || self.include_tag_sets.iter().any(Option::is_some)
+                || self.exclude_tag_sets.iter().any(Option::is_some);
+
+            if has_row_filters {
+                let mut visited = false;
+                for (index, &entity) in entity_indices.iter().enumerate() {
+                    if (tag_include != 0 || tag_exclude != 0)
+                        && !tags_match(tags, entity, tag_include, tag_exclude)
+                    {
+                        continue;
+                    }
+                    if !tag_sets_match(&self.include_tag_sets, &self.exclude_tag_sets, entity) {
+                        continue;
+                    }
+                    if changed_mask != 0
+                        && !Q::changed_newer(
+                            &fetch,
+                            index,
+                            &element_masks,
+                            changed_mask,
+                            since_tick,
+                        )
+                    {
+                        continue;
+                    }
+                    visited = true;
+                    f(entity, Q::item(&mut fetch, index));
                 }
-                if !tag_sets_match(&self.include_tag_sets, &self.exclude_tag_sets, entity) {
-                    continue;
+                if visited {
+                    Q::stamp_peaks(&mut fetch);
                 }
-                if changed_mask != 0
-                    && !Q::changed_newer(&fetch, index, &element_masks, changed_mask, since_tick)
-                {
-                    continue;
+            } else {
+                for (index, &entity) in entity_indices.iter().enumerate() {
+                    f(entity, Q::item(&mut fetch, index));
                 }
-                f(entity, Q::item(&mut fetch, index));
+                if !entity_indices.is_empty() {
+                    Q::stamp_peaks(&mut fetch);
+                }
             }
         }
     }
@@ -3020,6 +3070,12 @@ impl<'world, Q: ReadQueryTuple> DynQueryRef<'world, Q> {
             None => done = true,
         }
 
+        let cached_tables = self
+            .world
+            .query_cache
+            .get(&component_include)
+            .map(|indices| indices.as_slice());
+
         DynQueryRefIter {
             world: self.world,
             element_masks,
@@ -3031,6 +3087,7 @@ impl<'world, Q: ReadQueryTuple> DynQueryRef<'world, Q> {
             exclude_tag_sets: self.exclude_tag_sets,
             changed_mask: self.changed_mask,
             since_tick: self.world.last_tick,
+            cached_tables,
             table_index: 0,
             row_index: 0,
             current: None,
@@ -3040,7 +3097,10 @@ impl<'world, Q: ReadQueryTuple> DynQueryRef<'world, Q> {
 }
 
 /// The iterator behind [`DynQueryRef::iter`]. Walks matching tables in
-/// order, resolving columns once per table.
+/// order, resolving columns once per table. When a `&mut` query path has
+/// already cached this include mask's table list, the iterator reuses it
+/// instead of scanning every table; the cache stays valid because table
+/// registration appends to matching entries.
 pub struct DynQueryRefIter<'world, Q: ReadQueryTuple> {
     world: &'world DynWorld,
     element_masks: [u64; 8],
@@ -3052,6 +3112,7 @@ pub struct DynQueryRefIter<'world, Q: ReadQueryTuple> {
     exclude_tag_sets: [Option<&'world SparseTagSet>; 4],
     changed_mask: u64,
     since_tick: u32,
+    cached_tables: Option<&'world [usize]>,
     table_index: usize,
     row_index: usize,
     current: Option<(&'world [Entity], Q::ReadFetch<'world>)>,
@@ -3096,15 +3157,25 @@ impl<'world, Q: ReadQueryTuple> Iterator for DynQueryRefIter<'world, Q> {
             }
 
             loop {
-                let Some(table) = self.world.tables.get(self.table_index) else {
-                    self.done = true;
-                    return None;
+                let table = if let Some(indices) = self.cached_tables {
+                    let Some(&cached_index) = indices.get(self.table_index) else {
+                        self.done = true;
+                        return None;
+                    };
+                    self.table_index += 1;
+                    &self.world.tables[cached_index]
+                } else {
+                    let Some(table) = self.world.tables.get(self.table_index) else {
+                        self.done = true;
+                        return None;
+                    };
+                    self.table_index += 1;
+                    if table.mask & self.include != self.include {
+                        continue;
+                    }
+                    table
                 };
-                self.table_index += 1;
-                if table.mask & self.include == self.include
-                    && table.mask & self.exclude == 0
-                    && !table.entity_indices.is_empty()
-                {
+                if table.mask & self.exclude == 0 && !table.entity_indices.is_empty() {
                     self.row_index = 0;
                     self.current = Some((
                         table.entity_indices.as_slice(),
@@ -3144,7 +3215,15 @@ macro_rules! impl_bundle {
         impl<$($element: Send + Sync + Default + 'static),+> Bundle for ($($element,)+) {
             fn component_mask(world: &mut DynWorld) -> u64 {
                 let mut mask = 0;
-                $(mask |= world.component_key::<$element>().mask;)+
+                $(
+                    let element_mask = world.component_key::<$element>().mask;
+                    assert_eq!(
+                        mask & element_mask,
+                        0,
+                        "bundles must not repeat a component type"
+                    );
+                    mask |= element_mask;
+                )+
                 mask
             }
 
@@ -3829,6 +3908,86 @@ mod tests {
         struct NeverSpawned;
         assert!(world.despawn_with_any::<(NeverSpawned,)>().is_empty());
         assert!(world.is_alive(plain));
+    }
+
+    #[test]
+    fn test_mutable_query_stamps_peak_only_when_rows_are_visited() {
+        let mut world = DynWorld::new();
+        let position = world.register::<Position>();
+        let boss = world.register_tag();
+        world.spawn_entities(position.mask, 2);
+
+        world.step();
+        world
+            .query::<(&mut Position,)>()
+            .with_tag(boss)
+            .for_each(|_entity, _items| {});
+
+        for table in &world.tables {
+            if table.mask == position.mask {
+                assert!(
+                    !tick_is_newer(table.columns[0].peak_changed, world.last_tick),
+                    "a query that visits no rows must not stamp the table peak"
+                );
+            }
+        }
+
+        world
+            .query::<(&mut Position,)>()
+            .for_each(|_entity, _items| {});
+        for table in &world.tables {
+            if table.mask == position.mask {
+                assert!(tick_is_newer(
+                    table.columns[0].peak_changed,
+                    world.last_tick
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn test_query_ref_reuses_cached_table_lists() {
+        let mut world = DynWorld::new();
+        let position = world.register::<Position>();
+        world.spawn_entities(position.mask, 2);
+        let velocity = world.register::<Velocity>();
+        world.spawn_entities(position.mask | velocity.mask, 3);
+
+        world.for_each_mut(position.mask, 0, |_entity, _table, _index| {});
+        assert!(world.query_cache.contains_key(&position.mask));
+
+        assert_eq!(world.query_ref::<(&Position,)>().iter().count(), 5);
+
+        world.spawn_entities(position.mask, 1);
+        assert_eq!(
+            world.query_ref::<(&Position,)>().iter().count(),
+            6,
+            "cache entries must stay current as tables grow"
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "bundles must not repeat a component type")]
+    fn test_bundle_rejects_repeated_component() {
+        let mut world = DynWorld::new();
+        world.spawn((Position::default(), Position { x: 1.0, y: 0.0 }));
+    }
+
+    #[test]
+    fn test_resource_scope_preserves_resource_on_panic() {
+        struct Score {
+            value: u32,
+        }
+
+        let mut world = DynWorld::new();
+        world.insert_resource(Score { value: 7 });
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            world.resource_scope(|_world, _score: &mut Score| panic!("boom"));
+        }));
+
+        assert!(result.is_err());
+        assert_eq!(world.resource::<Score>().unwrap().value, 7);
     }
 
     #[test]
