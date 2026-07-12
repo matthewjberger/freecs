@@ -167,6 +167,8 @@ pub struct ComponentRegistry {
     pub components: Vec<ComponentInfo>,
     pub components_by_type: HashMap<TypeId, u32>,
     pub tag_count: u32,
+    #[cfg(feature = "snapshot")]
+    pub codecs: Vec<Option<ComponentCodec>>,
 }
 
 impl Default for ComponentRegistry {
@@ -182,6 +184,8 @@ impl ComponentRegistry {
             components: Vec::new(),
             components_by_type: HashMap::new(),
             tag_count: 0,
+            #[cfg(feature = "snapshot")]
+            codecs: Vec::new(),
         }
     }
 
@@ -210,7 +214,35 @@ impl ComponentRegistry {
         });
         self.components_by_type
             .insert(TypeId::of::<T>(), component_index);
+        #[cfg(feature = "snapshot")]
+        self.codecs.push(None);
         self.key_for(component_index)
+    }
+
+    /// Registers `T` with a snapshot codec, so worlds carrying it can be
+    /// serialized. The codec encodes whole columns with postcard; register
+    /// through [`register_codec`](Self::register_codec) instead to supply a
+    /// custom byte format.
+    #[cfg(feature = "snapshot")]
+    pub fn register_serde<T>(&mut self) -> ComponentKey<T>
+    where
+        T: serde::Serialize + serde::de::DeserializeOwned + Send + Sync + Default + 'static,
+    {
+        self.register_codec::<T>(ComponentCodec {
+            encode_column: encode_column_postcard::<T>,
+            decode_column: decode_column_postcard::<T>,
+        })
+    }
+
+    /// Registers `T` with an explicit snapshot codec.
+    #[cfg(feature = "snapshot")]
+    pub fn register_codec<T: Send + Sync + Default + 'static>(
+        &mut self,
+        codec: ComponentCodec,
+    ) -> ComponentKey<T> {
+        let key = self.register::<T>();
+        self.codecs[key.component_index as usize] = Some(codec);
+        key
     }
 
     pub fn register_tag(&mut self) -> TagKey {
@@ -376,6 +408,11 @@ fn event_update<T: Send + Sync + 'static>(data: &mut (dyn Any + Send + Sync)) {
 pub struct DynWorld {
     pub registry: ComponentRegistry,
     pub allocator: EntityAllocator,
+    /// When true, a live handle this world has never stored gets a row
+    /// inserted on `add_components`/`set`, gated by the retired-generation
+    /// check. Grouped worlds under [`DynEcs`] need this; a standalone world
+    /// leaves it false so unknown handles are refused outright.
+    pub insert_missing_rows: bool,
     pub entity_locations: EntityLocations,
     pub tables: Vec<DynComponentArrays>,
     pub table_lookup: HashMap<u64, usize>,
@@ -426,9 +463,11 @@ impl DynWorld {
     /// Builds a world over a prebuilt schema. Worlds built from clones of one
     /// registry agree on every mask bit.
     pub fn from_registry(registry: ComponentRegistry) -> Self {
-        Self {
+        let tag_count = registry.tag_count as usize;
+        let mut world = Self {
             registry,
             allocator: EntityAllocator::default(),
+            insert_missing_rows: false,
             entity_locations: EntityLocations::default(),
             tables: Vec::new(),
             table_lookup: HashMap::new(),
@@ -443,7 +482,11 @@ impl DynWorld {
             event_slots: Vec::new(),
             events_by_type: HashMap::new(),
             resources: HashMap::new(),
+        };
+        while world.tags.len() < tag_count {
+            world.tags.push(SparseTagSet::default());
         }
+        world
     }
 
     /// Registers `T` on this world's registry and returns its key.
@@ -536,11 +579,25 @@ impl DynWorld {
     }
 
     pub fn spawn_entities(&mut self, mask: u64, count: usize) -> Vec<Entity> {
+        let mut allocator = std::mem::take(&mut self.allocator);
+        let entities = self.spawn_entities_in(&mut allocator, mask, count);
+        self.allocator = allocator;
+        entities
+    }
+
+    /// Spawns through an external allocator, the grouped-worlds form used by
+    /// [`DynEcs`].
+    pub fn spawn_entities_in(
+        &mut self,
+        allocator: &mut EntityAllocator,
+        mask: u64,
+        count: usize,
+    ) -> Vec<Entity> {
         let table_index = self.get_or_create_table(mask);
         let current_tick = self.current_tick;
 
         let mut entities = Vec::new();
-        self.allocator.allocate_batch(count, &mut entities);
+        allocator.allocate_batch(count, &mut entities);
 
         let start_index = self.tables[table_index].entity_indices.len();
         {
@@ -641,9 +698,22 @@ impl DynWorld {
     }
 
     pub fn despawn_entities(&mut self, entities: &[Entity]) -> Vec<Entity> {
+        let mut allocator = std::mem::take(&mut self.allocator);
+        let despawned = self.despawn_entities_in(&mut allocator, entities);
+        self.allocator = allocator;
+        despawned
+    }
+
+    /// Despawns through an external allocator, the grouped-worlds form used
+    /// by [`DynEcs`].
+    pub fn despawn_entities_in(
+        &mut self,
+        allocator: &mut EntityAllocator,
+        entities: &[Entity],
+    ) -> Vec<Entity> {
         let mut despawned = Vec::with_capacity(entities.len());
         for &entity in entities {
-            if self.allocator.deallocate(entity) {
+            if allocator.deallocate(entity) {
                 self.retire_entity(entity);
                 for tag_set in &mut self.tags {
                     tag_set.remove(entity);
@@ -716,7 +786,7 @@ impl DynWorld {
             "component masks must not contain tag bits or unregistered component bits"
         );
         let Some((table_index, array_index)) = get_location(&self.entity_locations, entity) else {
-            return false;
+            return self.insert_missing_rows && self.insert_row(entity, mask);
         };
         let current_mask = self.tables[table_index].mask;
         if current_mask & mask == mask {
@@ -750,6 +820,37 @@ impl DynWorld {
             StructuralChangeKind::ComponentsAdded,
             mask & !current_mask,
         );
+        true
+    }
+
+    /// Creates a row for a live handle this world has never stored. Refuses
+    /// stale handles via the generation the despawn broadcast retired.
+    fn insert_row(&mut self, entity: Entity, mask: u64) -> bool {
+        if let Some(location) = self.entity_locations.get(entity.id)
+            && (location.allocated || location.generation != entity.generation)
+        {
+            return false;
+        }
+
+        let table_index = self.get_or_create_table(mask);
+        let current_tick = self.current_tick;
+        let start_index = self.tables[table_index].entity_indices.len();
+        {
+            let table = &mut self.tables[table_index];
+            for column in &mut table.columns {
+                let info = &self.registry.components[column.component_index as usize];
+                (info.push_default)(column.data.as_mut(), 1);
+                column.changed.push(current_tick);
+                column.peak_changed = current_tick;
+            }
+            table.entity_indices.push(entity);
+        }
+        insert_location(
+            &mut self.entity_locations,
+            entity,
+            (table_index, start_index),
+        );
+        self.record_structural(entity, StructuralChangeKind::Spawned, mask);
         true
     }
 
@@ -831,8 +932,8 @@ impl DynWorld {
 
     pub fn set_keyed<T: 'static>(&mut self, key: ComponentKey<T>, entity: Entity, value: T) {
         self.check_key(key.registry_id);
+        let current_tick = self.current_tick;
         if let Some((table_index, array_index)) = get_location(&self.entity_locations, entity) {
-            let current_tick = self.current_tick;
             let table = &mut self.tables[table_index];
             if table.mask & key.mask != 0 {
                 let position = column_position(table.mask, key.mask);
@@ -842,17 +943,16 @@ impl DynWorld {
                 column.peak_changed = current_tick;
                 return;
             }
-            if self.add_components(entity, key.mask)
-                && let Some((table_index, array_index)) =
-                    get_location(&self.entity_locations, entity)
-            {
-                let table = &mut self.tables[table_index];
-                let position = column_position(table.mask, key.mask);
-                let column = &mut table.columns[position];
-                column_vec_mut::<T>(column.data.as_mut())[array_index] = value;
-                column.changed[array_index] = current_tick;
-                column.peak_changed = current_tick;
-            }
+        }
+        if self.add_components(entity, key.mask)
+            && let Some((table_index, array_index)) = get_location(&self.entity_locations, entity)
+        {
+            let table = &mut self.tables[table_index];
+            let position = column_position(table.mask, key.mask);
+            let column = &mut table.columns[position];
+            column_vec_mut::<T>(column.data.as_mut())[array_index] = value;
+            column.changed[array_index] = current_tick;
+            column.peak_changed = current_tick;
         }
     }
 
@@ -1510,10 +1610,452 @@ impl DynWorld {
             include,
             exclude: 0,
             changed_mask: 0,
+            include_tag_sets: [None; 4],
+            exclude_tag_sets: [None; 4],
             marker: PhantomData,
         }
     }
 }
+
+/// A group of dynamic worlds over one shared entity allocator, the dynamic
+/// counterpart of the macro's multi-world form. Each world carries its own
+/// registry and full 64-bit mask space, so the group's component budget is
+/// 64 per world rather than 64 total. One entity can hold rows in any
+/// combination of worlds; despawning retires it everywhere and broadcasts
+/// the bumped generation, so stale handles are refused in every world,
+/// including worlds that never stored the entity.
+///
+/// Group tags live outside any world's mask space as plain sparse sets.
+/// Filter per-world queries by them with
+/// [`with_tag_set`](DynQuery::with_tag_set), or check membership directly.
+///
+/// ```rust
+/// use freecs::dynamic::{ComponentRegistry, DynEcs};
+///
+/// #[derive(Default, Clone, Debug)]
+/// struct Position { x: f32 }
+///
+/// #[derive(Default, Clone, Debug)]
+/// struct Sprite { id: u32 }
+///
+/// let mut ecs = DynEcs::new();
+/// let core = ecs.add_world(ComponentRegistry::new());
+/// let render = ecs.add_world(ComponentRegistry::new());
+/// let selected = ecs.register_tag();
+///
+/// let entity = ecs.spawn();
+/// ecs.worlds[core].set(entity, Position { x: 1.0 });
+/// ecs.worlds[render].set(entity, Sprite { id: 7 });
+/// ecs.add_tag(selected, entity);
+///
+/// assert_eq!(ecs.worlds[core].get::<Position>(entity).unwrap().x, 1.0);
+/// assert!(ecs.despawn(entity));
+/// assert!(ecs.worlds[render].get::<Sprite>(entity).is_none());
+/// assert!(!ecs.has_tag(selected, entity));
+/// ```
+#[derive(Default)]
+pub struct DynEcs {
+    pub allocator: EntityAllocator,
+    pub worlds: Vec<DynWorld>,
+    pub tags: Vec<SparseTagSet>,
+}
+
+impl DynEcs {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Adds a world built from the given registry and returns its index.
+    /// Grouped worlds insert rows for live handles they have never stored,
+    /// which is what lets an entity gain components per world lazily.
+    pub fn add_world(&mut self, registry: ComponentRegistry) -> usize {
+        let mut world = DynWorld::from_registry(registry);
+        world.insert_missing_rows = true;
+        self.worlds.push(world);
+        self.worlds.len() - 1
+    }
+
+    /// Allocates a handle with no rows anywhere. Give it components through
+    /// any member world's `set`/`add_components`.
+    pub fn spawn(&mut self) -> Entity {
+        self.allocator.allocate()
+    }
+
+    pub fn spawn_count(&mut self, count: usize) -> Vec<Entity> {
+        let mut entities = Vec::new();
+        self.allocator.allocate_batch(count, &mut entities);
+        entities
+    }
+
+    /// Spawns entities with rows in one member world.
+    pub fn spawn_entities(&mut self, world_index: usize, mask: u64, count: usize) -> Vec<Entity> {
+        self.worlds[world_index].spawn_entities_in(&mut self.allocator, mask, count)
+    }
+
+    pub fn is_alive(&self, entity: Entity) -> bool {
+        self.allocator.is_alive(entity)
+    }
+
+    /// Despawns the entity across every world, dropping its group tags.
+    /// Returns false for stale or already-despawned handles. Retirement
+    /// broadcasts the bumped generation into every world's location table,
+    /// 16 bytes per despawned id per world, which is what makes stale writes
+    /// refusable everywhere.
+    pub fn despawn(&mut self, entity: Entity) -> bool {
+        if !self.allocator.deallocate(entity) {
+            return false;
+        }
+        for world in &mut self.worlds {
+            world.retire_entity(entity);
+        }
+        for tag_set in &mut self.tags {
+            tag_set.remove(entity);
+        }
+        true
+    }
+
+    pub fn despawn_entities(&mut self, entities: &[Entity]) -> Vec<Entity> {
+        let mut despawned = Vec::with_capacity(entities.len());
+        for &entity in entities {
+            if self.despawn(entity) {
+                despawned.push(entity);
+            }
+        }
+        despawned
+    }
+
+    /// Registers a group-level tag and returns its index. Group tags have no
+    /// mask bit; they filter queries by set reference.
+    pub fn register_tag(&mut self) -> usize {
+        self.tags.push(SparseTagSet::default());
+        self.tags.len() - 1
+    }
+
+    pub fn add_tag(&mut self, tag_index: usize, entity: Entity) {
+        if self.allocator.is_alive(entity) {
+            self.tags[tag_index].insert(entity);
+        }
+    }
+
+    pub fn remove_tag(&mut self, tag_index: usize, entity: Entity) -> bool {
+        self.tags[tag_index].remove(entity)
+    }
+
+    pub fn has_tag(&self, tag_index: usize, entity: Entity) -> bool {
+        self.tags[tag_index].contains(entity)
+    }
+
+    pub fn query_tag(&self, tag_index: usize) -> impl Iterator<Item = Entity> + '_ {
+        self.tags[tag_index].iter()
+    }
+
+    /// Steps every member world: event expiry and change-detection ticks.
+    pub fn step(&mut self) {
+        for world in &mut self.worlds {
+            world.step();
+        }
+    }
+}
+
+#[cfg(feature = "snapshot")]
+mod snapshot {
+    use super::*;
+
+    /// Column byte codec for one component type, plain function pointers
+    /// like the rest of the registry's vtable. The built-in pair encodes the
+    /// whole `Vec<T>` with postcard; any byte format works as long as encode
+    /// and decode agree.
+    #[derive(Clone, Copy)]
+    pub struct ComponentCodec {
+        pub encode_column: fn(&(dyn Any + Send + Sync)) -> Result<Vec<u8>, SnapshotError>,
+        pub decode_column: fn(&[u8]) -> Result<ErasedColumn, SnapshotError>,
+    }
+
+    pub(super) fn encode_column_postcard<T>(
+        column: &(dyn Any + Send + Sync),
+    ) -> Result<Vec<u8>, SnapshotError>
+    where
+        T: serde::Serialize + Send + Sync + Default + 'static,
+    {
+        postcard::to_allocvec(column_vec::<T>(column))
+            .map_err(|error| SnapshotError::Codec(error.to_string()))
+    }
+
+    pub(super) fn decode_column_postcard<T>(bytes: &[u8]) -> Result<ErasedColumn, SnapshotError>
+    where
+        T: serde::de::DeserializeOwned + Send + Sync + Default + 'static,
+    {
+        let column: Vec<T> =
+            postcard::from_bytes(bytes).map_err(|error| SnapshotError::Codec(error.to_string()))?;
+        Ok(Box::new(column))
+    }
+
+    #[derive(Debug, Clone, PartialEq)]
+    pub enum SnapshotError {
+        /// A component present in a table has no registered codec.
+        MissingCodec(&'static str),
+        /// The registry's component names or order do not match the snapshot.
+        SchemaMismatch { expected: String, found: String },
+        /// A column failed to encode or decode.
+        Codec(String),
+    }
+
+    impl std::fmt::Display for SnapshotError {
+        fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            match self {
+                SnapshotError::MissingCodec(type_name) => {
+                    write!(formatter, "component {type_name} has no snapshot codec")
+                }
+                SnapshotError::SchemaMismatch { expected, found } => write!(
+                    formatter,
+                    "registry schema mismatch: snapshot has {expected}, registry has {found}"
+                ),
+                SnapshotError::Codec(message) => write!(formatter, "codec error: {message}"),
+            }
+        }
+    }
+
+    impl std::error::Error for SnapshotError {}
+
+    /// One archetype table's serialized form: the mask, the entity handles,
+    /// and one postcard-or-custom byte payload per column in ascending bit
+    /// order.
+    #[derive(serde::Serialize, serde::Deserialize)]
+    pub struct DynTableSnapshot {
+        pub mask: u64,
+        pub entities: Vec<Entity>,
+        pub columns: Vec<Vec<u8>>,
+    }
+
+    /// A serializable image of a [`DynWorld`]: schema names for validation,
+    /// allocator state, tables, tag memberships, and tick counters. Events,
+    /// pending commands, and the structural log are transient and not
+    /// captured. Serialize this with any serde format.
+    #[derive(serde::Serialize, serde::Deserialize)]
+    pub struct DynWorldSnapshot {
+        pub component_types: Vec<String>,
+        pub allocator: EntityAllocator,
+        pub tables: Vec<DynTableSnapshot>,
+        pub tags: Vec<Vec<Entity>>,
+        pub current_tick: u32,
+        pub last_tick: u32,
+    }
+
+    /// A serializable image of a [`DynEcs`]: the shared allocator, one world
+    /// snapshot per member, and group tag memberships.
+    #[derive(serde::Serialize, serde::Deserialize)]
+    pub struct DynEcsSnapshot {
+        pub allocator: EntityAllocator,
+        pub worlds: Vec<DynWorldSnapshot>,
+        pub tags: Vec<Vec<Entity>>,
+    }
+
+    /// Rebuilds the retirement stamps a despawn broadcast would have left,
+    /// from allocator liveness: dead ids stamp the next generation, live ids
+    /// stamp their current one, so stale-handle refusal survives a restore
+    /// even for entities that never had a row in this world.
+    fn stamp_retirements(world: &mut DynWorld, slots: &[crate::EntitySlot]) {
+        for (id, slot) in slots.iter().enumerate() {
+            let id = id as u32;
+            let expected_generation = if slot.alive {
+                slot.generation
+            } else {
+                slot.generation.wrapping_add(1)
+            };
+            let needs_stamp = match world.entity_locations.get(id) {
+                None => true,
+                Some(location) => !location.allocated,
+            };
+            if needs_stamp {
+                world.entity_locations.ensure_slot(id, expected_generation);
+            }
+        }
+    }
+
+    impl DynWorld {
+        /// Captures the world. Fails with [`SnapshotError::MissingCodec`] if
+        /// any component stored in a table was registered without a codec.
+        pub fn snapshot(&self) -> Result<DynWorldSnapshot, SnapshotError> {
+            let mut tables = Vec::with_capacity(self.tables.len());
+            for table in &self.tables {
+                let mut columns = Vec::with_capacity(table.columns.len());
+                for column in &table.columns {
+                    let info = &self.registry.components[column.component_index as usize];
+                    let codec = self.registry.codecs[column.component_index as usize]
+                        .as_ref()
+                        .ok_or(SnapshotError::MissingCodec(info.type_name))?;
+                    columns.push((codec.encode_column)(column.data.as_ref())?);
+                }
+                tables.push(DynTableSnapshot {
+                    mask: table.mask,
+                    entities: table.entity_indices.clone(),
+                    columns,
+                });
+            }
+
+            Ok(DynWorldSnapshot {
+                component_types: self
+                    .registry
+                    .components
+                    .iter()
+                    .map(|info| info.type_name.to_string())
+                    .collect(),
+                allocator: EntityAllocator {
+                    next_id: self.allocator.next_id,
+                    free_ids: self.allocator.free_ids.clone(),
+                    slots: self.allocator.slots.clone(),
+                },
+                tables,
+                tags: self
+                    .tags
+                    .iter()
+                    .map(|tag_set| tag_set.iter().collect())
+                    .collect(),
+                current_tick: self.current_tick,
+                last_tick: self.last_tick,
+            })
+        }
+
+        /// Rebuilds a world from a snapshot over a registry with the same
+        /// registration order. The registry may have additional components
+        /// appended after the snapshot's schema; masks stay stable because
+        /// bits are assigned in registration order. Every restored slot is
+        /// stamped with the restored `current_tick`, so change-detection
+        /// consumers see the whole world as changed on load.
+        pub fn from_snapshot(
+            registry: ComponentRegistry,
+            snapshot: &DynWorldSnapshot,
+        ) -> Result<DynWorld, SnapshotError> {
+            for (index, expected) in snapshot.component_types.iter().enumerate() {
+                let found = registry
+                    .components
+                    .get(index)
+                    .map(|info| info.type_name)
+                    .unwrap_or("<unregistered>");
+                if expected != found {
+                    return Err(SnapshotError::SchemaMismatch {
+                        expected: expected.clone(),
+                        found: found.to_string(),
+                    });
+                }
+            }
+
+            let mut world = DynWorld::from_registry(registry);
+            world.allocator = EntityAllocator {
+                next_id: snapshot.allocator.next_id,
+                free_ids: snapshot.allocator.free_ids.clone(),
+                slots: snapshot.allocator.slots.clone(),
+            };
+            world.current_tick = snapshot.current_tick;
+            world.last_tick = snapshot.last_tick;
+
+            for table_snapshot in &snapshot.tables {
+                let table_index = world.get_or_create_table(table_snapshot.mask);
+                let table = &mut world.tables[table_index];
+                table.entity_indices = table_snapshot.entities.clone();
+
+                let mut column_payloads = table_snapshot.columns.iter();
+                for column in &mut table.columns {
+                    let info = &world.registry.components[column.component_index as usize];
+                    let codec = world.registry.codecs[column.component_index as usize]
+                        .as_ref()
+                        .ok_or(SnapshotError::MissingCodec(info.type_name))?;
+                    let payload = column_payloads.next().ok_or_else(|| {
+                        SnapshotError::Codec("missing column payload".to_string())
+                    })?;
+                    column.data = (codec.decode_column)(payload)?;
+                    column.changed = vec![snapshot.current_tick; table_snapshot.entities.len()];
+                    column.peak_changed = snapshot.current_tick;
+                }
+
+                for (array_index, &entity) in table_snapshot.entities.iter().enumerate() {
+                    insert_location(
+                        &mut world.entity_locations,
+                        entity,
+                        (table_index, array_index),
+                    );
+                }
+            }
+
+            stamp_retirements(&mut world, &snapshot.allocator.slots);
+
+            for (tag_index, tag_entities) in snapshot.tags.iter().enumerate() {
+                while world.tags.len() <= tag_index {
+                    world.tags.push(SparseTagSet::default());
+                }
+                for &entity in tag_entities {
+                    world.tags[tag_index].insert(entity);
+                }
+            }
+
+            Ok(world)
+        }
+    }
+
+    impl DynEcs {
+        pub fn snapshot(&self) -> Result<DynEcsSnapshot, SnapshotError> {
+            let mut worlds = Vec::with_capacity(self.worlds.len());
+            for world in &self.worlds {
+                worlds.push(world.snapshot()?);
+            }
+            Ok(DynEcsSnapshot {
+                allocator: EntityAllocator {
+                    next_id: self.allocator.next_id,
+                    free_ids: self.allocator.free_ids.clone(),
+                    slots: self.allocator.slots.clone(),
+                },
+                worlds,
+                tags: self
+                    .tags
+                    .iter()
+                    .map(|tag_set| tag_set.iter().collect())
+                    .collect(),
+            })
+        }
+
+        /// Rebuilds a group from a snapshot and one registry per member
+        /// world, in the same order the worlds were added.
+        pub fn from_snapshot(
+            registries: Vec<ComponentRegistry>,
+            snapshot: &DynEcsSnapshot,
+        ) -> Result<DynEcs, SnapshotError> {
+            if registries.len() != snapshot.worlds.len() {
+                return Err(SnapshotError::SchemaMismatch {
+                    expected: format!("{} worlds", snapshot.worlds.len()),
+                    found: format!("{} registries", registries.len()),
+                });
+            }
+
+            let mut ecs = DynEcs::new();
+            ecs.allocator = EntityAllocator {
+                next_id: snapshot.allocator.next_id,
+                free_ids: snapshot.allocator.free_ids.clone(),
+                slots: snapshot.allocator.slots.clone(),
+            };
+            for (registry, world_snapshot) in registries.into_iter().zip(&snapshot.worlds) {
+                let mut world = DynWorld::from_snapshot(registry, world_snapshot)?;
+                world.insert_missing_rows = true;
+                stamp_retirements(&mut world, &snapshot.allocator.slots);
+                ecs.worlds.push(world);
+            }
+            for tag_entities in &snapshot.tags {
+                let tag_index = ecs.register_tag();
+                for &entity in tag_entities {
+                    ecs.tags[tag_index].insert(entity);
+                }
+            }
+            Ok(ecs)
+        }
+    }
+}
+
+#[cfg(feature = "snapshot")]
+pub use snapshot::{
+    ComponentCodec, DynEcsSnapshot, DynTableSnapshot, DynWorldSnapshot, SnapshotError,
+};
+
+#[cfg(feature = "snapshot")]
+use snapshot::{decode_column_postcard, encode_column_postcard};
 
 mod sealed {
     pub trait SealedElement {}
@@ -1690,7 +2232,40 @@ pub struct DynQuery<'world, Q: QueryTuple> {
     include: u64,
     exclude: u64,
     changed_mask: u64,
+    include_tag_sets: [Option<&'world SparseTagSet>; 4],
+    exclude_tag_sets: [Option<&'world SparseTagSet>; 4],
     marker: PhantomData<Q>,
+}
+
+fn push_tag_set<'world>(
+    slots: &mut [Option<&'world SparseTagSet>; 4],
+    tag_set: &'world SparseTagSet,
+) {
+    for slot in slots.iter_mut() {
+        if slot.is_none() {
+            *slot = Some(tag_set);
+            return;
+        }
+    }
+    panic!("a query supports at most four tag-set filters per side");
+}
+
+fn tag_sets_match(
+    include: &[Option<&SparseTagSet>; 4],
+    exclude: &[Option<&SparseTagSet>; 4],
+    entity: Entity,
+) -> bool {
+    for tag_set in include.iter().flatten() {
+        if !tag_set.contains(entity) {
+            return false;
+        }
+    }
+    for tag_set in exclude.iter().flatten() {
+        if tag_set.contains(entity) {
+            return false;
+        }
+    }
+    true
 }
 
 impl<'world, Q: QueryTuple> DynQuery<'world, Q> {
@@ -1721,6 +2296,19 @@ impl<'world, Q: QueryTuple> DynQuery<'world, Q> {
 
     pub fn without_tag(mut self, key: TagKey) -> Self {
         self.exclude |= key.mask;
+        self
+    }
+
+    /// Filter by membership in an external tag set, the grouped-worlds form:
+    /// [`DynEcs`] tags live outside any single world's mask space, so they
+    /// filter by set reference instead of by mask bit.
+    pub fn with_tag_set(mut self, tag_set: &'world SparseTagSet) -> Self {
+        push_tag_set(&mut self.include_tag_sets, tag_set);
+        self
+    }
+
+    pub fn without_tag_set(mut self, tag_set: &'world SparseTagSet) -> Self {
+        push_tag_set(&mut self.exclude_tag_sets, tag_set);
         self
     }
 
@@ -1773,6 +2361,9 @@ impl<'world, Q: QueryTuple> DynQuery<'world, Q> {
                 if (tag_include != 0 || tag_exclude != 0)
                     && !tags_match(tags, entity, tag_include, tag_exclude)
                 {
+                    continue;
+                }
+                if !tag_sets_match(&self.include_tag_sets, &self.exclude_tag_sets, entity) {
                     continue;
                 }
                 if changed_mask != 0
@@ -1840,23 +2431,27 @@ mod tests {
     use super::*;
 
     #[derive(Default, Clone, Debug, PartialEq)]
+    #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
     pub struct Position {
         pub x: f32,
         pub y: f32,
     }
 
     #[derive(Default, Clone, Debug, PartialEq)]
+    #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
     pub struct Velocity {
         pub x: f32,
         pub y: f32,
     }
 
     #[derive(Default, Clone, Debug, PartialEq)]
+    #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
     pub struct Health {
         pub value: f32,
     }
 
-    #[derive(Debug, Clone, PartialEq)]
+    #[derive(Default, Debug, Clone, PartialEq)]
+    #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
     pub struct PingEvent {
         pub value: u32,
     }
@@ -2392,6 +2987,375 @@ mod tests {
                     .count();
                 assert_eq!(world.query_entities(mask).count(), expected);
             }
+        }
+    }
+
+    #[test]
+    fn test_dyn_ecs_group_shares_entities_across_worlds() {
+        let mut ecs = DynEcs::new();
+        let core = ecs.add_world(ComponentRegistry::new());
+        let render = ecs.add_world(ComponentRegistry::new());
+
+        let entity = ecs.spawn();
+        ecs.worlds[core].set(entity, Position { x: 1.0, y: 2.0 });
+        ecs.worlds[render].set(entity, Health { value: 9.0 });
+
+        assert_eq!(ecs.worlds[core].get::<Position>(entity).unwrap().x, 1.0);
+        assert_eq!(ecs.worlds[render].get::<Health>(entity).unwrap().value, 9.0);
+        assert!(ecs.worlds[core].get::<Health>(entity).is_none());
+
+        let core_position = ecs.worlds[core].register::<Position>();
+        let render_health = ecs.worlds[render].register::<Health>();
+        assert_eq!(
+            core_position.mask, render_health.mask,
+            "each grouped world owns an independent 64-bit mask space"
+        );
+    }
+
+    #[test]
+    fn test_dyn_ecs_despawn_broadcasts_and_refuses_stale() {
+        let mut ecs = DynEcs::new();
+        let core = ecs.add_world(ComponentRegistry::new());
+        let render = ecs.add_world(ComponentRegistry::new());
+
+        let old = ecs.spawn();
+        ecs.worlds[core].set(old, Position { x: 1.0, y: 0.0 });
+
+        assert!(ecs.despawn(old));
+        assert!(!ecs.despawn(old), "double despawn must be refused");
+
+        assert!(
+            !ecs.worlds[core].add_components(old, 1),
+            "stale add must be refused in a world that stored the entity"
+        );
+        ecs.worlds[render].set(old, Health { value: 3.0 });
+        assert!(
+            ecs.worlds[render].get::<Health>(old).is_none(),
+            "stale set must be refused in a world that never stored the entity"
+        );
+
+        let reused = ecs.spawn();
+        assert_eq!(reused.id, old.id);
+        assert_eq!(reused.generation, old.generation + 1);
+        ecs.worlds[render].set(reused, Health { value: 5.0 });
+        assert_eq!(ecs.worlds[render].get::<Health>(reused).unwrap().value, 5.0);
+        assert!(ecs.worlds[render].get::<Health>(old).is_none());
+    }
+
+    #[test]
+    fn test_dyn_ecs_group_tags_filter_queries() {
+        let mut ecs = DynEcs::new();
+        let core = ecs.add_world(ComponentRegistry::new());
+        let selected = ecs.register_tag();
+
+        let first = ecs.spawn();
+        let second = ecs.spawn();
+        ecs.worlds[core].set(first, Position { x: 1.0, y: 0.0 });
+        ecs.worlds[core].set(second, Position { x: 2.0, y: 0.0 });
+        ecs.add_tag(selected, first);
+
+        let DynEcs { worlds, tags, .. } = &mut ecs;
+        let mut visited = Vec::new();
+        worlds[core]
+            .query::<(&Position,)>()
+            .with_tag_set(&tags[selected])
+            .for_each(|entity, _| visited.push(entity));
+        assert_eq!(visited, vec![first]);
+
+        let mut excluded = Vec::new();
+        worlds[core]
+            .query::<(&Position,)>()
+            .without_tag_set(&tags[selected])
+            .for_each(|entity, _| excluded.push(entity));
+        assert_eq!(excluded, vec![second]);
+
+        assert!(ecs.despawn(first));
+        assert!(!ecs.has_tag(selected, first), "despawn drops group tags");
+    }
+
+    #[test]
+    fn test_dyn_ecs_spawn_entities_in_member_world() {
+        let mut ecs = DynEcs::new();
+        let core = ecs.add_world(ComponentRegistry::new());
+        let position = ecs.worlds[core].register::<Position>();
+
+        let entities = ecs.spawn_entities(core, position.mask, 3);
+        assert_eq!(entities.len(), 3);
+        for &entity in &entities {
+            assert!(ecs.is_alive(entity));
+            assert!(ecs.worlds[core].get_keyed(position, entity).is_some());
+        }
+
+        let next = ecs.spawn();
+        assert_eq!(next.id, 3, "member spawns draw from the shared allocator");
+    }
+
+    #[cfg(feature = "snapshot")]
+    mod snapshots {
+        use super::*;
+
+        fn build_registry() -> ComponentRegistry {
+            let mut registry = ComponentRegistry::new();
+            registry.register_serde::<Position>();
+            registry.register_serde::<Velocity>();
+            registry.register_serde::<Health>();
+            registry.register_tag();
+            registry
+        }
+
+        fn populated_world() -> (DynWorld, Vec<Entity>) {
+            let mut world = DynWorld::from_registry(build_registry());
+            let position = world.component_key::<Position>();
+            let health = world.component_key::<Health>();
+            let boss = TagKey {
+                tag_index: 0,
+                mask: 1 << 63,
+                registry_id: world.registry.registry_id,
+            };
+
+            let mut entities = Vec::new();
+            for index in 0..10 {
+                let entity = world.spawn((
+                    Position {
+                        x: index as f32,
+                        y: index as f32 * 2.0,
+                    },
+                    Velocity { x: 1.0, y: 0.0 },
+                ));
+                entities.push(entity);
+            }
+            world.set_keyed(health, entities[3], Health { value: 42.0 });
+            world.despawn_entities(&[entities[5]]);
+            world.add_tag(boss, entities[7]);
+            world.step();
+            let _ = position;
+            (world, entities)
+        }
+
+        #[test]
+        fn test_snapshot_round_trip_preserves_state() {
+            let (world, entities) = populated_world();
+
+            let snapshot = world.snapshot().unwrap();
+            let bytes = postcard::to_allocvec(&snapshot).unwrap();
+            let decoded: DynWorldSnapshot = postcard::from_bytes(&bytes).unwrap();
+            let restored = DynWorld::from_snapshot(build_registry(), &decoded).unwrap();
+
+            assert_eq!(restored.entity_count(), world.entity_count());
+            for &entity in &entities {
+                assert_eq!(restored.is_alive(entity), world.is_alive(entity));
+                assert_eq!(
+                    restored.component_mask(entity),
+                    world.component_mask(entity)
+                );
+                assert_eq!(
+                    restored.get::<Position>(entity).map(|p| (p.x, p.y)),
+                    world.get::<Position>(entity).map(|p| (p.x, p.y))
+                );
+                assert_eq!(
+                    restored.get::<Health>(entity).map(|h| h.value),
+                    world.get::<Health>(entity).map(|h| h.value)
+                );
+            }
+            assert_eq!(restored.tags[0].len(), 1);
+            assert!(restored.tags[0].contains(entities[7]));
+
+            let respawned = {
+                let mut restored = restored;
+                restored.spawn((Position::default(),))
+            };
+            assert_eq!(
+                respawned.id, entities[5].id,
+                "the restored allocator must recycle the despawned id"
+            );
+            assert_eq!(respawned.generation, entities[5].generation + 1);
+        }
+
+        #[test]
+        fn test_snapshot_restored_world_stays_in_lockstep() {
+            let (mut original, _) = populated_world();
+            let snapshot = original.snapshot().unwrap();
+            let mut restored = DynWorld::from_snapshot(build_registry(), &snapshot).unwrap();
+
+            let mut rng = Lcg(99);
+            let mut handles: Vec<Entity> = original.get_all_entities();
+            for _ in 0..500 {
+                match rng.next() % 5 {
+                    0 => {
+                        let first = original.spawn((Position { x: 1.0, y: 1.0 },));
+                        let second = restored.spawn((Position { x: 1.0, y: 1.0 },));
+                        assert_eq!(first, second);
+                        handles.push(first);
+                    }
+                    1 => {
+                        if !handles.is_empty() {
+                            let entity = handles[rng.next() as usize % handles.len()];
+                            assert_eq!(
+                                original.despawn_entities(&[entity]),
+                                restored.despawn_entities(&[entity])
+                            );
+                        }
+                    }
+                    2 => {
+                        if !handles.is_empty() {
+                            let entity = handles[rng.next() as usize % handles.len()];
+                            let value = (rng.next() % 100) as f32;
+                            original.set(entity, Health { value });
+                            restored.set(entity, Health { value });
+                        }
+                    }
+                    3 => {
+                        if !handles.is_empty() {
+                            let entity = handles[rng.next() as usize % handles.len()];
+                            let velocity_mask = original.component_key::<Velocity>().mask;
+                            assert_eq!(
+                                original.remove_components(entity, velocity_mask),
+                                restored.remove_components(entity, velocity_mask)
+                            );
+                        }
+                    }
+                    _ => {
+                        original.step();
+                        restored.step();
+                    }
+                }
+            }
+
+            assert_eq!(original.entity_count(), restored.entity_count());
+            for &entity in &handles {
+                assert_eq!(
+                    original.component_mask(entity),
+                    restored.component_mask(entity)
+                );
+                assert_eq!(
+                    original.get::<Health>(entity).map(|h| h.value),
+                    restored.get::<Health>(entity).map(|h| h.value)
+                );
+            }
+        }
+
+        #[test]
+        fn test_snapshot_schema_mismatch_is_refused() {
+            let (world, _) = populated_world();
+            let snapshot = world.snapshot().unwrap();
+
+            let mut wrong_order = ComponentRegistry::new();
+            wrong_order.register_serde::<Velocity>();
+            wrong_order.register_serde::<Position>();
+            wrong_order.register_serde::<Health>();
+
+            match DynWorld::from_snapshot(wrong_order, &snapshot) {
+                Err(SnapshotError::SchemaMismatch { .. }) => {}
+                Err(other) => panic!("expected schema mismatch, got {other:?}"),
+                Ok(_) => panic!("expected schema mismatch, got a restored world"),
+            }
+        }
+
+        #[test]
+        fn test_snapshot_registry_may_extend_the_schema() {
+            let (world, entities) = populated_world();
+            let snapshot = world.snapshot().unwrap();
+
+            let mut extended = build_registry();
+            extended.register_serde::<PingEvent>();
+
+            let restored = DynWorld::from_snapshot(extended, &snapshot).unwrap();
+            assert_eq!(
+                restored.get::<Position>(entities[0]).unwrap().x,
+                0.0,
+                "components appended after the snapshot schema must not shift masks"
+            );
+        }
+
+        #[test]
+        fn test_snapshot_missing_codec_is_refused() {
+            let mut world = DynWorld::new();
+            world.spawn((Position::default(),));
+
+            match world.snapshot() {
+                Err(SnapshotError::MissingCodec(_)) => {}
+                other => panic!(
+                    "expected missing codec for a plain-registered component, got {:?}",
+                    other.map(|_| ())
+                ),
+            }
+        }
+
+        #[test]
+        fn test_snapshot_restores_change_detection_as_all_changed() {
+            let (world, _) = populated_world();
+            let snapshot = world.snapshot().unwrap();
+            let restored = DynWorld::from_snapshot(build_registry(), &snapshot).unwrap();
+
+            let position_mask = 1u64;
+            let changed = restored.query_entities_changed(position_mask).count();
+            assert_eq!(
+                changed,
+                restored.entity_count(),
+                "restored slots must read as changed so consumers resync"
+            );
+        }
+
+        #[test]
+        fn test_dyn_ecs_snapshot_round_trip() {
+            let mut ecs = DynEcs::new();
+            let core = ecs.add_world({
+                let mut registry = ComponentRegistry::new();
+                registry.register_serde::<Position>();
+                registry
+            });
+            let render = ecs.add_world({
+                let mut registry = ComponentRegistry::new();
+                registry.register_serde::<Health>();
+                registry
+            });
+            let selected = ecs.register_tag();
+
+            let entity = ecs.spawn();
+            ecs.worlds[core].set(entity, Position { x: 3.0, y: 4.0 });
+            ecs.worlds[render].set(entity, Health { value: 7.0 });
+            ecs.add_tag(selected, entity);
+            let dead = ecs.spawn();
+            ecs.despawn(dead);
+
+            let snapshot = ecs.snapshot().unwrap();
+            let bytes = postcard::to_allocvec(&snapshot).unwrap();
+            let decoded: DynEcsSnapshot = postcard::from_bytes(&bytes).unwrap();
+
+            let restored = DynEcs::from_snapshot(
+                vec![
+                    {
+                        let mut registry = ComponentRegistry::new();
+                        registry.register_serde::<Position>();
+                        registry
+                    },
+                    {
+                        let mut registry = ComponentRegistry::new();
+                        registry.register_serde::<Health>();
+                        registry
+                    },
+                ],
+                &decoded,
+            )
+            .unwrap();
+
+            assert!(restored.is_alive(entity));
+            assert!(!restored.is_alive(dead));
+            assert_eq!(
+                restored.worlds[core].get::<Position>(entity).unwrap().x,
+                3.0
+            );
+            assert_eq!(
+                restored.worlds[render].get::<Health>(entity).unwrap().value,
+                7.0
+            );
+            assert!(restored.has_tag(selected, entity));
+
+            let mut restored = restored;
+            assert!(
+                !restored.worlds[core].add_components(dead, 1),
+                "stale refusal must survive the round trip"
+            );
         }
     }
 

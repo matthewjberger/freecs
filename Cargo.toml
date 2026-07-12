@@ -16,11 +16,13 @@ rust-version = "1.90"
 default = ["serde"]
 serde = ["dep:serde"]
 dynamic = []
+snapshot = ["dynamic", "serde", "dep:postcard"]
 audio = []
 
 [dependencies]
 paste = { package = "pastey", version = "0.2" }
 serde = { version = "1.0", features = ["derive"], optional = true }
+postcard = { version = "1.1", features = ["alloc"], optional = true }
 
 [target.'cfg(not(target_family = "wasm"))'.dependencies]
 rayon = "1.11"

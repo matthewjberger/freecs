@@ -479,6 +479,7 @@ impl std::fmt::Display for Entity {
 /// Liveness record for one entity id: the generation currently associated
 /// with the id and whether that handle is live.
 #[derive(Default, Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct EntitySlot {
     pub generation: u32,
     pub alive: bool,
@@ -490,6 +491,7 @@ pub struct EntitySlot {
 /// handles, so an id can never enter the free list twice and two live entities
 /// can never share an id and generation.
 #[derive(Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct EntityAllocator {
     pub next_id: u32,
     pub free_ids: Vec<(u32, u32)>,
