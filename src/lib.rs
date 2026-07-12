@@ -760,10 +760,14 @@ impl ArchetypeEdges {
 /// query-cache entry the new table satisfies, and wires single-component
 /// edges from existing tables toward the new one. `table_masks` must iterate
 /// every table including the new one, in index order.
+pub struct ArchetypeRouting<'world> {
+    pub table_lookup: &'world mut std::collections::HashMap<u64, usize>,
+    pub table_edges: &'world mut Vec<ArchetypeEdges>,
+    pub query_cache: &'world mut std::collections::HashMap<u64, Vec<usize>>,
+}
+
 pub fn archetype_register_table<M>(
-    table_lookup: &mut std::collections::HashMap<u64, usize>,
-    table_edges: &mut Vec<ArchetypeEdges>,
-    query_cache: &mut std::collections::HashMap<u64, Vec<usize>>,
+    routing: ArchetypeRouting<'_>,
     component_count: usize,
     mask: u64,
     table_index: usize,
@@ -772,10 +776,12 @@ pub fn archetype_register_table<M>(
 ) where
     M: Iterator<Item = u64> + Clone,
 {
-    table_edges.push(ArchetypeEdges::new(component_count));
-    table_lookup.insert(mask, table_index);
+    routing
+        .table_edges
+        .push(ArchetypeEdges::new(component_count));
+    routing.table_lookup.insert(mask, table_index);
 
-    for (query_mask, cached_tables) in query_cache.iter_mut() {
+    for (query_mask, cached_tables) in routing.query_cache.iter_mut() {
         if mask & *query_mask == *query_mask {
             cached_tables.push(table_index);
         }
@@ -784,10 +790,10 @@ pub fn archetype_register_table<M>(
     for (component_mask, component_index) in component_bits {
         for (index, existing_mask) in table_masks.clone().enumerate() {
             if existing_mask | component_mask == mask {
-                table_edges[index].add_edges[component_index] = Some(table_index);
+                routing.table_edges[index].add_edges[component_index] = Some(table_index);
             }
             if existing_mask & !component_mask == mask {
-                table_edges[index].remove_edges[component_index] = Some(table_index);
+                routing.table_edges[index].remove_edges[component_index] = Some(table_index);
             }
         }
     }
@@ -797,11 +803,11 @@ pub fn archetype_register_table<M>(
 /// computing and caching it on first use. Taking the cache and the table
 /// masks as separate parameters keeps the borrows disjoint, so callers can
 /// mutate tables while holding the returned slice.
-pub fn archetype_cached_tables<'cache, M>(
-    query_cache: &'cache mut std::collections::HashMap<u64, Vec<usize>>,
+pub fn archetype_cached_tables<M>(
+    query_cache: &mut std::collections::HashMap<u64, Vec<usize>>,
     table_masks: M,
     mask: u64,
-) -> &'cache [usize]
+) -> &[usize]
 where
     M: Iterator<Item = u64>,
 {
@@ -1535,9 +1541,11 @@ macro_rules! ecs_kernel_impl {
                     ..Default::default()
                 });
                 $crate::archetype_register_table(
-                    &mut world.table_lookup,
-                    &mut world.table_edges,
-                    &mut world.query_cache,
+                    $crate::ArchetypeRouting {
+                        table_lookup: &mut world.table_lookup,
+                        table_edges: &mut world.table_edges,
+                        query_cache: &mut world.query_cache,
+                    },
                     [<$world:snake:upper _COMPONENT_COUNT>],
                     mask,
                     table_index,
