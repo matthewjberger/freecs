@@ -1237,6 +1237,16 @@ world.resource_scope(|_world, score: &mut Score| score.0 += 1);
 let _ = (delta_time, world.remove_resource::<Score>());
 ```
 
+The scopes are the intended take/put pattern. Reach for them before
+hand-rolling remove then reinsert. An engine that wraps `DynWorld` or
+`DynEcs` in its own world type needs the closure to receive that wrapper,
+which the scope methods cannot do since their closures receive the bare
+world. Implement `ResourceHost` on the wrapper (one method returning the
+wrapped resource map) and call the free-function forms
+`dynamic::resource_scope(&mut host, ...)` and `dynamic::resources_scope`.
+Their closures receive the host itself, with the same take/put semantics
+and panic reinsertion.
+
 #### Tags
 
 Tags are sparse sets outside the archetype tables: adding or removing one

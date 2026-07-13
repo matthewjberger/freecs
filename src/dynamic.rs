@@ -629,6 +629,97 @@ impl ResourceMap {
     }
 }
 
+/// Access to a resource map for the free-function scope forms,
+/// [`resource_scope()`] and [`resources_scope()`]. [`DynWorld`] and
+/// [`DynEcs`] implement it over their own maps. A host that wraps either
+/// in a larger state struct implements it by delegating to the wrapped
+/// map, and the free scopes then lend the whole host to the closure,
+/// which the inherent scope methods structurally cannot do.
+pub trait ResourceHost {
+    fn resource_map_mut(&mut self) -> &mut ResourceMap;
+}
+
+impl ResourceHost for DynWorld {
+    fn resource_map_mut(&mut self) -> &mut ResourceMap {
+        &mut self.resources
+    }
+}
+
+impl ResourceHost for DynEcs {
+    fn resource_map_mut(&mut self) -> &mut ResourceMap {
+        &mut self.resources
+    }
+}
+
+/// The host form of [`DynWorld::resource_scope`]: takes `R` out of the
+/// host's resource map, runs the closure with the host and the resource as
+/// independent borrows, then puts the resource back, even when the closure
+/// panics. The host can be a world, a group, or any wrapper implementing
+/// [`ResourceHost`], which is how an engine state struct holding a
+/// [`DynWorld`] or [`DynEcs`] plus its own fields lends the whole wrapper
+/// to systems. Panics if `R` is not present.
+///
+/// ```rust
+/// use freecs::dynamic::{DynWorld, ResourceHost, ResourceMap};
+///
+/// struct Engine {
+///     ecs: DynWorld,
+///     frames: u32,
+/// }
+///
+/// impl ResourceHost for Engine {
+///     fn resource_map_mut(&mut self) -> &mut ResourceMap {
+///         &mut self.ecs.resources
+///     }
+/// }
+///
+/// struct Score(u32);
+///
+/// let mut engine = Engine { ecs: DynWorld::new(), frames: 0 };
+/// engine.ecs.insert_resource(Score(0));
+///
+/// freecs::dynamic::resource_scope(&mut engine, |engine, score: &mut Score| {
+///     engine.frames += 1;
+///     score.0 += 1;
+/// });
+///
+/// assert_eq!(engine.frames, 1);
+/// assert_eq!(engine.ecs.resource::<Score>().unwrap().0, 1);
+/// ```
+pub fn resource_scope<H: ResourceHost, R: Send + Sync + 'static, T>(
+    host: &mut H,
+    f: impl FnOnce(&mut H, &mut R) -> T,
+) -> T {
+    let mut resource = host.resource_map_mut().remove::<R>().unwrap_or_else(|| {
+        panic!(
+            "resource_scope requires {} to be present",
+            std::any::type_name::<R>()
+        )
+    });
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(host, &mut resource)));
+    host.resource_map_mut().insert(resource);
+    match result {
+        Ok(value) => value,
+        Err(panic) => std::panic::resume_unwind(panic),
+    }
+}
+
+/// The host form of [`DynWorld::resources_scope`]: the tuple variant of
+/// [`resource_scope()`], with the same presence and distinctness checks
+/// before anything is removed and the same reinsertion on panic.
+pub fn resources_scope<H: ResourceHost, B: ResourceBundle, T>(
+    host: &mut H,
+    f: impl FnOnce(&mut H, &mut B) -> T,
+) -> T {
+    let mut bundle = B::take(host.resource_map_mut());
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(host, &mut bundle)));
+    bundle.put(host.resource_map_mut());
+    match result {
+        Ok(value) => value,
+        Err(panic) => std::panic::resume_unwind(panic),
+    }
+}
+
 /// A world whose component set is a runtime value. Same archetype storage,
 /// change detection, structural log, tags, events, and command deferral as
 /// the macro-generated worlds, with dispatch confined to registration
@@ -1915,23 +2006,17 @@ impl DynWorld {
     /// closure and is reinserted even when the closure panics, before the
     /// panic resumes. Panics if `R` is not present. For several resources at
     /// once, use [`resources_scope`](Self::resources_scope).
+    ///
+    /// A host that wraps this world in a larger state struct cannot lend
+    /// that wrapper through this method, because the closure receives only
+    /// the `DynWorld`. Implement [`ResourceHost`] on the wrapper and use
+    /// the free [`resource_scope()`] form, whose closure receives the host
+    /// itself.
     pub fn resource_scope<R: Send + Sync + 'static, T>(
         &mut self,
         f: impl FnOnce(&mut DynWorld, &mut R) -> T,
     ) -> T {
-        let mut resource = self.remove_resource::<R>().unwrap_or_else(|| {
-            panic!(
-                "resource_scope requires {} to be present",
-                std::any::type_name::<R>()
-            )
-        });
-        let result =
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(self, &mut resource)));
-        self.insert_resource(resource);
-        match result {
-            Ok(value) => value,
-            Err(panic) => std::panic::resume_unwind(panic),
-        }
+        resource_scope(self, f)
     }
 
     /// The tuple form of [`resource_scope`](Self::resource_scope): takes
@@ -1968,14 +2053,7 @@ impl DynWorld {
         &mut self,
         f: impl FnOnce(&mut DynWorld, &mut B) -> T,
     ) -> T {
-        let mut bundle = B::take(&mut self.resources);
-        let result =
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(self, &mut bundle)));
-        bundle.put(&mut self.resources);
-        match result {
-            Ok(value) => value,
-            Err(panic) => std::panic::resume_unwind(panic),
-        }
+        resources_scope(self, f)
     }
 
     pub fn queue_spawn_entities(&mut self, mask: u64, count: usize) {
@@ -2592,23 +2670,16 @@ impl DynEcs {
     /// Takes a group resource out, runs the closure with the group and the
     /// resource as independent borrows, then puts it back, even when the
     /// closure panics. Panics if `R` is not present.
+    ///
+    /// The closure receives the bare `DynEcs`, so a host that wraps the
+    /// group in its own state struct implements [`ResourceHost`] and uses
+    /// the free [`resource_scope()`] form, whose closure receives the host
+    /// itself.
     pub fn resource_scope<R: Send + Sync + 'static, T>(
         &mut self,
         f: impl FnOnce(&mut DynEcs, &mut R) -> T,
     ) -> T {
-        let mut resource = self.remove_resource::<R>().unwrap_or_else(|| {
-            panic!(
-                "resource_scope requires {} to be present",
-                std::any::type_name::<R>()
-            )
-        });
-        let result =
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(self, &mut resource)));
-        self.insert_resource(resource);
-        match result {
-            Ok(value) => value,
-            Err(panic) => std::panic::resume_unwind(panic),
-        }
+        resource_scope(self, f)
     }
 
     /// The tuple form of [`resource_scope`](Self::resource_scope), same
@@ -2617,14 +2688,7 @@ impl DynEcs {
         &mut self,
         f: impl FnOnce(&mut DynEcs, &mut B) -> T,
     ) -> T {
-        let mut bundle = B::take(&mut self.resources);
-        let result =
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(self, &mut bundle)));
-        bundle.put(&mut self.resources);
-        match result {
-            Ok(value) => value,
-            Err(panic) => std::panic::resume_unwind(panic),
-        }
+        resources_scope(self, f)
     }
 
     /// [`add_world`](Self::add_world) with the index asserted against the
@@ -9208,6 +9272,84 @@ mod tests {
             0,
             "an unregistered required element degrades to empty"
         );
+    }
+
+    struct HostWorld {
+        world: DynWorld,
+        frames: u32,
+    }
+
+    impl ResourceHost for HostWorld {
+        fn resource_map_mut(&mut self) -> &mut ResourceMap {
+            &mut self.world.resources
+        }
+    }
+
+    struct ScopePoints(u32);
+    struct ScopeLabel(&'static str);
+
+    #[test]
+    fn test_host_resource_scope_lends_the_wrapper() {
+        let mut host = HostWorld {
+            world: DynWorld::new(),
+            frames: 0,
+        };
+        host.world.insert_resource(ScopePoints(0));
+        let entity = host.world.spawn((Position::default(),));
+
+        let seen = resource_scope(&mut host, |host, points: &mut ScopePoints| {
+            host.frames += 1;
+            host.world.get_mut::<Position>(entity).unwrap().x = 2.0;
+            points.0 += 5;
+            points.0
+        });
+
+        assert_eq!(seen, 5);
+        assert_eq!(host.frames, 1);
+        assert_eq!(host.world.get::<Position>(entity).unwrap().x, 2.0);
+        assert_eq!(host.world.resource::<ScopePoints>().unwrap().0, 5);
+    }
+
+    #[test]
+    fn test_host_resource_scope_reinserts_on_panic() {
+        let mut host = HostWorld {
+            world: DynWorld::new(),
+            frames: 0,
+        };
+        host.world.insert_resource(ScopePoints(3));
+
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            resource_scope(&mut host, |_host, points: &mut ScopePoints| {
+                points.0 += 1;
+                panic!("scope body panics");
+            });
+        }));
+
+        assert!(outcome.is_err());
+        assert_eq!(host.world.resource::<ScopePoints>().unwrap().0, 4);
+    }
+
+    #[test]
+    fn test_host_resources_scope_takes_the_tuple() {
+        let mut host = HostWorld {
+            world: DynWorld::new(),
+            frames: 0,
+        };
+        host.world.insert_resource(ScopePoints(1));
+        host.world.insert_resource(ScopeLabel("group"));
+
+        resources_scope(
+            &mut host,
+            |host, (points, label): &mut (ScopePoints, ScopeLabel)| {
+                host.frames += 1;
+                points.0 += 1;
+                assert_eq!(label.0, "group");
+            },
+        );
+
+        assert_eq!(host.frames, 1);
+        assert_eq!(host.world.resource::<ScopePoints>().unwrap().0, 2);
+        assert!(host.world.resource::<ScopeLabel>().is_some());
     }
 
     #[test]
