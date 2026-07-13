@@ -2336,15 +2336,36 @@ impl DynEcs {
 
     /// A typed query against the first member world where every required
     /// element of the tuple is registered; optional elements do not
-    /// constrain the routing. Panics when no member world qualifies,
-    /// because a mutable query cannot pick a world to register types in.
+    /// constrain the routing. Panics when no member world qualifies: a
+    /// mutable query cannot pick a world to register types in, and a tuple
+    /// spanning member worlds runs through
+    /// [`query_join`](Self::query_join) instead.
     pub fn query<Q: QueryTuple>(&mut self) -> DynQuery<'_, Q> {
         let index = self
             .worlds
             .iter()
             .position(|world| Q::routing_match(world))
-            .expect("no member world registers every required component of the query tuple");
+            .expect(
+                "no member world registers every required component of the query tuple; \
+                 tuples spanning member worlds run through query_join",
+            );
         self.worlds[index].query::<Q>()
+    }
+
+    /// A typed query whose tuple may span member worlds, joined by entity.
+    /// One world drives the iteration at full slice speed, the world
+    /// holding every mutable element; the other worlds resolve their
+    /// elements per entity at `get` speed, read-only, skipping entities
+    /// that lack a required foreign component. Mutable elements in two
+    /// different worlds panic at [`for_each`](DynJoin::for_each): mutate
+    /// your own state, read theirs, or co-locate the types in one schema
+    /// when a hot loop needs slice speed for everything. A tuple that
+    /// resolves to a single world degenerates to a plain scan of it.
+    pub fn query_join<Q: QueryTuple>(&mut self) -> DynJoin<'_, Q> {
+        DynJoin {
+            ecs: self,
+            marker: PhantomData,
+        }
     }
 
     /// The read-only routed query. When no member world registers every
@@ -2919,8 +2940,10 @@ pub trait QueryElement: sealed::SealedElement {
     type Fetch<'table>;
     type Item<'item>;
     const REQUIRED: bool;
+    const MUTABLE: bool;
     fn component_mask(world: &mut DynWorld) -> u64;
     fn route_registered(world: &DynWorld) -> bool;
+    fn foreign_item<'world>(world: &'world DynWorld, entity: Entity) -> Option<Self::Item<'world>>;
     fn fetch<'table>(
         slot: Option<&'table mut ColumnSlot>,
         current_tick: u32,
@@ -2936,6 +2959,7 @@ impl<T: Send + Sync + Default + 'static> QueryElement for &T {
     type Fetch<'table> = (&'table [T], &'table [u32]);
     type Item<'item> = &'item T;
     const REQUIRED: bool = true;
+    const MUTABLE: bool = false;
 
     fn component_mask(world: &mut DynWorld) -> u64 {
         world.component_key::<T>().mask
@@ -2943,6 +2967,10 @@ impl<T: Send + Sync + Default + 'static> QueryElement for &T {
 
     fn route_registered(world: &DynWorld) -> bool {
         world.lookup_key::<T>().is_some()
+    }
+
+    fn foreign_item<'world>(world: &'world DynWorld, entity: Entity) -> Option<Self::Item<'world>> {
+        world.get::<T>(entity)
     }
 
     fn fetch<'table>(
@@ -2973,6 +3001,7 @@ impl<T: Send + Sync + Default + 'static> QueryElement for &mut T {
     type Fetch<'table> = (&'table mut [T], &'table mut [u32], u32, &'table mut u32);
     type Item<'item> = &'item mut T;
     const REQUIRED: bool = true;
+    const MUTABLE: bool = true;
 
     fn component_mask(world: &mut DynWorld) -> u64 {
         world.component_key::<T>().mask
@@ -2980,6 +3009,13 @@ impl<T: Send + Sync + Default + 'static> QueryElement for &mut T {
 
     fn route_registered(world: &DynWorld) -> bool {
         world.lookup_key::<T>().is_some()
+    }
+
+    fn foreign_item<'world>(
+        _world: &'world DynWorld,
+        _entity: Entity,
+    ) -> Option<Self::Item<'world>> {
+        unreachable!("cross-world queries mutate only driver-world components")
     }
 
     fn fetch<'table>(
@@ -3021,6 +3057,7 @@ impl<T: Send + Sync + Default + 'static> QueryElement for Option<&T> {
     type Fetch<'table> = Option<(&'table [T], &'table [u32])>;
     type Item<'item> = Option<&'item T>;
     const REQUIRED: bool = false;
+    const MUTABLE: bool = false;
 
     fn component_mask(world: &mut DynWorld) -> u64 {
         world.component_key::<T>().mask
@@ -3028,6 +3065,10 @@ impl<T: Send + Sync + Default + 'static> QueryElement for Option<&T> {
 
     fn route_registered(world: &DynWorld) -> bool {
         world.lookup_key::<T>().is_some()
+    }
+
+    fn foreign_item<'world>(world: &'world DynWorld, entity: Entity) -> Option<Self::Item<'world>> {
+        Some(world.get::<T>(entity))
     }
 
     fn fetch<'table>(
@@ -3056,6 +3097,7 @@ impl<T: Send + Sync + Default + 'static> QueryElement for Option<&mut T> {
     type Fetch<'table> = Option<(&'table mut [T], &'table mut [u32], u32, &'table mut u32)>;
     type Item<'item> = Option<&'item mut T>;
     const REQUIRED: bool = false;
+    const MUTABLE: bool = true;
 
     fn component_mask(world: &mut DynWorld) -> u64 {
         world.component_key::<T>().mask
@@ -3063,6 +3105,13 @@ impl<T: Send + Sync + Default + 'static> QueryElement for Option<&mut T> {
 
     fn route_registered(world: &DynWorld) -> bool {
         world.lookup_key::<T>().is_some()
+    }
+
+    fn foreign_item<'world>(
+        _world: &'world DynWorld,
+        _entity: Entity,
+    ) -> Option<Self::Item<'world>> {
+        unreachable!("cross-world queries mutate only driver-world components")
     }
 
     fn fetch<'table>(
@@ -3161,12 +3210,29 @@ impl<T: Send + Sync + Default + 'static> ReadQueryElement for Option<&T> {
 /// `Option<&T>`, and `Option<&mut T>` up to eight elements; all component
 /// types in one tuple must be distinct. Only the non-optional elements
 /// constrain which entities the query visits.
+/// One query-tuple element's routing facts for a cross-world join: which
+/// member world holds its type, whether the element narrows the match, and
+/// whether it writes (writers must share one world, the driver).
+#[derive(Clone, Copy)]
+pub struct JoinRoute {
+    pub world: Option<usize>,
+    pub required: bool,
+    pub mutable: bool,
+    pub type_name: &'static str,
+}
+
 pub trait QueryTuple: sealed::SealedQueryTuple {
     type Fetch<'table>;
     type Item<'item>;
     fn component_mask(world: &mut DynWorld) -> u64;
     fn element_masks(world: &mut DynWorld) -> [u64; 8];
     fn routing_match(world: &DynWorld) -> bool;
+    fn join_routes(worlds: &[DynWorld]) -> [Option<JoinRoute>; 8];
+    fn join_for_each<F: for<'item> FnMut(Entity, Self::Item<'item>)>(
+        driver: &mut DynWorld,
+        element_worlds: &[Option<&DynWorld>; 8],
+        f: F,
+    );
     fn fetch<'table>(
         table_mask: u64,
         columns: &'table mut [ColumnSlot],
@@ -3305,6 +3371,108 @@ macro_rules! impl_query_tuple {
                 matched
             }
 
+            fn join_routes(worlds: &[DynWorld]) -> [Option<JoinRoute>; 8] {
+                let mut routes = [None; 8];
+                $(
+                    routes[$position] = Some(JoinRoute {
+                        world: worlds
+                            .iter()
+                            .position(|world| $element::route_registered(world)),
+                        required: $element::REQUIRED,
+                        mutable: $element::MUTABLE,
+                        type_name: std::any::type_name::<$element>(),
+                    });
+                )+
+                routes
+            }
+
+            #[allow(non_snake_case)]
+            fn join_for_each<FN: for<'item> FnMut(Entity, Self::Item<'item>)>(
+                driver: &mut DynWorld,
+                element_worlds: &[Option<&DynWorld>; 8],
+                mut f: FN,
+            ) {
+                let mut element_masks = [0u64; 8];
+                let mut local_include = 0u64;
+                $(
+                    if element_worlds[$position].is_none() {
+                        element_masks[$position] = $element::component_mask(driver);
+                        if $element::REQUIRED {
+                            local_include |= element_masks[$position];
+                        }
+                    }
+                )+
+                let current_tick = driver.current_tick;
+                let table_indices = archetype_cached_tables(
+                    &mut driver.query_cache,
+                    driver.tables.iter().map(|table| table.mask),
+                    local_include,
+                );
+                let tables = &mut driver.tables;
+                for &table_index in table_indices {
+                    let table = &mut tables[table_index];
+                    let table_mask = table.mask;
+                    let DynComponentArrays {
+                        entity_indices,
+                        columns,
+                        ..
+                    } = table;
+                    let positions = [$(
+                        if element_worlds[$position].is_none()
+                            && table_mask & element_masks[$position] != 0
+                        {
+                            Some(column_position(table_mask, element_masks[$position]))
+                        } else {
+                            None
+                        },
+                    )+];
+                    let [$($element,)+] = distribute_slots(columns, positions);
+                    $(
+                        let mut $element = if element_worlds[$position].is_none() {
+                            Some(<$element as QueryElement>::fetch($element, current_tick))
+                        } else {
+                            None
+                        };
+                    )+
+                    let mut visited = false;
+                    'rows: for (row_index, &entity) in entity_indices.iter().enumerate() {
+                        $crate::paste::paste! {
+                            $(
+                                let [<foreign_ $position>] = match element_worlds[$position] {
+                                    Some(world) => {
+                                        match <$element as QueryElement>::foreign_item(
+                                            world, entity,
+                                        ) {
+                                            Some(item) => Some(item),
+                                            None => continue 'rows,
+                                        }
+                                    }
+                                    None => None,
+                                };
+                            )+
+                            $(
+                                let [<item_ $position>] = match [<foreign_ $position>] {
+                                    Some(item) => item,
+                                    None => <$element as QueryElement>::item(
+                                        $element.as_mut().expect("local positions carry a fetch"),
+                                        row_index,
+                                    ),
+                                };
+                            )+
+                            visited = true;
+                            f(entity, ($([<item_ $position>],)+));
+                        }
+                    }
+                    if visited {
+                        $(
+                            if let Some(fetch) = &mut $element {
+                                <$element as QueryElement>::stamp_peaks(fetch);
+                            }
+                        )+
+                    }
+                }
+            }
+
             #[allow(non_snake_case)]
             fn fetch<'table>(
                 table_mask: u64,
@@ -3399,6 +3567,84 @@ macro_rules! impl_bare_element_query {
                 fn routing_match(world: &DynWorld) -> bool {
                     !<$element as QueryElement>::REQUIRED
                         || <$element as QueryElement>::route_registered(world)
+                }
+
+                fn join_routes(worlds: &[DynWorld]) -> [Option<JoinRoute>; 8] {
+                    let mut routes = [None; 8];
+                    routes[0] = Some(JoinRoute {
+                        world: worlds
+                            .iter()
+                            .position(|world| {
+                                <$element as QueryElement>::route_registered(world)
+                            }),
+                        required: <$element as QueryElement>::REQUIRED,
+                        mutable: <$element as QueryElement>::MUTABLE,
+                        type_name: std::any::type_name::<$element>(),
+                    });
+                    routes
+                }
+
+                fn join_for_each<FN: for<'item> FnMut(Entity, Self::Item<'item>)>(
+                    driver: &mut DynWorld,
+                    element_worlds: &[Option<&DynWorld>; 8],
+                    mut f: FN,
+                ) {
+                    let mut element_masks = [0u64; 8];
+                    let mut local_include = 0u64;
+                    if element_worlds[0].is_none() {
+                        element_masks[0] = <$element as QueryElement>::component_mask(driver);
+                        if <$element as QueryElement>::REQUIRED {
+                            local_include |= element_masks[0];
+                        }
+                    }
+                    let current_tick = driver.current_tick;
+                    let table_indices = archetype_cached_tables(
+                        &mut driver.query_cache,
+                        driver.tables.iter().map(|table| table.mask),
+                        local_include,
+                    );
+                    let tables = &mut driver.tables;
+                    for &table_index in table_indices {
+                        let table = &mut tables[table_index];
+                        let table_mask = table.mask;
+                        let DynComponentArrays {
+                            entity_indices,
+                            columns,
+                            ..
+                        } = table;
+                        let positions = [if element_worlds[0].is_none()
+                            && table_mask & element_masks[0] != 0
+                        {
+                            Some(column_position(table_mask, element_masks[0]))
+                        } else {
+                            None
+                        }];
+                        let [slot] = distribute_slots(columns, positions);
+                        let mut fetch = if element_worlds[0].is_none() {
+                            Some(<$element as QueryElement>::fetch(slot, current_tick))
+                        } else {
+                            None
+                        };
+                        let mut visited = false;
+                        'rows: for (row_index, &entity) in entity_indices.iter().enumerate() {
+                            let item = match &mut fetch {
+                                Some(fetch) => <$element as QueryElement>::item(fetch, row_index),
+                                None => {
+                                    let world = element_worlds[0]
+                                        .expect("foreign positions carry their world");
+                                    match <$element as QueryElement>::foreign_item(world, entity) {
+                                        Some(item) => item,
+                                        None => continue 'rows,
+                                    }
+                                }
+                            };
+                            visited = true;
+                            f(entity, item);
+                        }
+                        if visited && let Some(fetch) = &mut fetch {
+                            <$element as QueryElement>::stamp_peaks(fetch);
+                        }
+                    }
                 }
 
                 fn fetch<'table>(
@@ -4339,6 +4585,83 @@ impl_bundle!(A, B, C, D, E);
 impl_bundle!(A, B, C, D, E, F);
 impl_bundle!(A, B, C, D, E, F, G);
 impl_bundle!(A, B, C, D, E, F, G, H);
+
+/// A cross-world typed query in progress, from [`DynEcs::query_join`].
+/// The fields are plain data like every query builder in this crate.
+pub struct DynJoin<'ecs, Q: QueryTuple> {
+    pub ecs: &'ecs mut DynEcs,
+    pub marker: PhantomData<Q>,
+}
+
+impl<Q: QueryTuple> DynJoin<'_, Q> {
+    /// Runs the join. Routing, the driver rule, and the borrow split are
+    /// documented on [`DynEcs::query_join`].
+    pub fn for_each(self, f: impl for<'item> FnMut(Entity, Q::Item<'item>)) {
+        let routes = Q::join_routes(&self.ecs.worlds);
+
+        let mut driver: Option<usize> = None;
+        for route in routes.iter().flatten() {
+            if route.required && route.world.is_none() {
+                panic!(
+                    "{} is not registered in any member world; add it to a member schema first",
+                    route.type_name
+                );
+            }
+            if route.mutable
+                && let Some(world) = route.world
+            {
+                match driver {
+                    None => driver = Some(world),
+                    Some(existing) => assert_eq!(
+                        existing, world,
+                        "cross-world queries mutate only one world's components; \
+                         {} lives in member world {world}, but another mutable element \
+                         already fixed the driver to member world {existing}",
+                        route.type_name
+                    ),
+                }
+            }
+        }
+        let driver = driver.unwrap_or_else(|| {
+            let mut counts = vec![0usize; self.ecs.worlds.len()];
+            for route in routes.iter().flatten() {
+                if let Some(world) = route.world {
+                    counts[world] += 1;
+                }
+            }
+            counts
+                .iter()
+                .copied()
+                .enumerate()
+                .max_by_key(|&(index, count)| (count, usize::MAX - index))
+                .map(|(index, _)| index)
+                .expect("query_join requires at least one member world")
+        });
+
+        let (left, rest) = self.ecs.worlds.split_at_mut(driver);
+        let (driver_world, right) = rest
+            .split_first_mut()
+            .expect("the driver index is within the member list");
+        let left: &[DynWorld] = left;
+        let right: &[DynWorld] = right;
+
+        let mut element_worlds: [Option<&DynWorld>; 8] = [None; 8];
+        for (position, route) in routes.iter().enumerate() {
+            if let Some(route) = route
+                && let Some(world) = route.world
+                && world != driver
+            {
+                element_worlds[position] = Some(if world < driver {
+                    &left[world]
+                } else {
+                    &right[world - driver - 1]
+                });
+            }
+        }
+
+        Q::join_for_each(driver_world, &element_worlds, f);
+    }
+}
 
 /// A parent link for entity hierarchies: plain data, pull-maintained, no
 /// hooks. Attach with `world.set(child, ChildOf(parent))`;
@@ -6504,6 +6827,109 @@ mod tests {
             let expected = if offset < 5 { 7.0 } else { 0.0 };
             assert_eq!(world.get_keyed(position, entity).unwrap().x, expected);
         }
+    }
+
+    #[test]
+    fn test_query_join_spans_member_worlds() {
+        let mut core_registry = ComponentRegistry::new();
+        core_registry.register::<Position>();
+        let mut game_registry = ComponentRegistry::new();
+        game_registry.register::<Health>();
+        game_registry.register::<Velocity>();
+
+        let mut ecs = DynEcs::new();
+        ecs.add_world_at(0, core_registry);
+        ecs.add_world_at(1, game_registry);
+
+        let both = ecs.spawn_with((Position { x: 1.0, y: 0.0 }, Health { value: 10.0 }));
+        let position_only = ecs.spawn_with((Position { x: 2.0, y: 0.0 },));
+        let all_three = ecs.spawn_with((
+            Position { x: 3.0, y: 0.0 },
+            Health { value: 30.0 },
+            Velocity { x: 9.0, y: 0.0 },
+        ));
+        ecs.spawn_with((Health { value: 99.0 },));
+
+        ecs.worlds[0].step();
+        let mut visited = Vec::new();
+        ecs.query_join::<(&mut Position, &Health, Option<&Velocity>)>()
+            .for_each(|entity, (position, health, velocity)| {
+                position.x += health.value + velocity.map_or(0.0, |velocity| velocity.x);
+                visited.push(entity);
+            });
+        assert_eq!(visited, vec![both, all_three]);
+        assert_eq!(ecs.get::<Position>(both).unwrap().x, 11.0);
+        assert_eq!(ecs.get::<Position>(all_three).unwrap().x, 42.0);
+        assert_eq!(ecs.get::<Position>(position_only).unwrap().x, 2.0);
+        assert_eq!(
+            ecs.worlds[0]
+                .query_entities_changed(ecs.worlds[0].lookup_key::<Position>().unwrap().mask)
+                .count(),
+            2,
+            "join mutation stamps driver-world ticks per visited row"
+        );
+
+        let manual: Vec<(Entity, f32)> = {
+            let mut pairs = Vec::new();
+            for (entity, position) in ecs.worlds[0].query_ref::<&Position>().iter() {
+                if let Some(health) = ecs.worlds[1].get::<Health>(entity) {
+                    pairs.push((entity, position.x + health.value));
+                }
+            }
+            pairs
+        };
+        let mut joined: Vec<(Entity, f32)> = Vec::new();
+        ecs.query_join::<(&Position, &Health)>()
+            .for_each(|entity, (position, health)| {
+                joined.push((entity, position.x + health.value));
+            });
+        assert_eq!(
+            joined, manual,
+            "the join matches the hand-rolled routing loop"
+        );
+
+        let mut shared_only = Vec::new();
+        ecs.query_join::<(&Health, &Position)>()
+            .for_each(|entity, (_health, _position)| shared_only.push(entity));
+        assert_eq!(
+            shared_only.len(),
+            2,
+            "all-shared joins pick a driver themselves"
+        );
+
+        let mut degenerate = Vec::new();
+        ecs.query_join::<(&Health, &Velocity)>()
+            .for_each(|entity, (_health, _velocity)| degenerate.push(entity));
+        assert_eq!(
+            degenerate,
+            vec![all_three],
+            "a single-world tuple degenerates to a plain scan"
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "mutate only one world's components")]
+    fn test_query_join_rejects_mutable_elements_in_two_worlds() {
+        let mut core_registry = ComponentRegistry::new();
+        core_registry.register::<Position>();
+        let mut game_registry = ComponentRegistry::new();
+        game_registry.register::<Health>();
+
+        let mut ecs = DynEcs::new();
+        ecs.add_world_at(0, core_registry);
+        ecs.add_world_at(1, game_registry);
+
+        ecs.query_join::<(&mut Position, &mut Health)>()
+            .for_each(|_entity, (_position, _health)| {});
+    }
+
+    #[test]
+    #[should_panic(expected = "not registered in any member world")]
+    fn test_query_join_rejects_unregistered_required_types() {
+        let mut ecs = DynEcs::new();
+        ecs.add_world(ComponentRegistry::new());
+        ecs.query_join::<(&Position,)>()
+            .for_each(|_entity, (_position,)| {});
     }
 
     #[test]

@@ -1406,6 +1406,23 @@ channels (`send` / `consume_events` with per-consumer cursors), and
 call. World-local resources and events remain on each `DynWorld`; the two
 levels are separate channels, not mirrors.
 
+Tuples that span member worlds run through `ecs.query_join`: one world
+drives the iteration at full slice speed (the world holding every mutable
+element), the others resolve their elements per entity at `get` speed,
+read-only, skipping entities that lack a required foreign component.
+Mutable elements in two different worlds panic; mutate your own state and
+read theirs, or co-locate the types in one schema when a hot loop needs
+slice speed for everything (registries compose, so two parts sharing a
+member world is a declaration choice, not a framework feature). A tuple
+that resolves to one world degenerates to a plain scan:
+
+```rust
+ecs.query_join::<(&mut Position, &Burning)>()
+    .for_each(|_entity, (position, burning)| {
+        position.y += burning.lift;
+    });
+```
+
 Declare the members once with `dynamic_worlds!` (index constants plus the
 build function, each member asserted at its declared index; apps extending a
 built group use `add_world_at`):
