@@ -9210,6 +9210,105 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_query_join_ref_filters_and_windows() {
+        let mut core_registry = ComponentRegistry::new();
+        core_registry.register::<Position>();
+        let mut game_registry = ComponentRegistry::new();
+        game_registry.register::<Health>();
+
+        let mut ecs = DynEcs::new();
+        ecs.add_world_at(0, core_registry);
+        ecs.add_world_at(1, game_registry);
+        let still = ecs.spawn_with((Position { x: 1.0, y: 0.0 }, Health { value: 1.0 }));
+        let moved = ecs.spawn_with((Position { x: 2.0, y: 0.0 }, Health { value: 2.0 }));
+
+        ecs.worlds[0].step();
+        ecs.get_mut::<Position>(moved).unwrap().x = 9.0;
+        let changed: Vec<Entity> = ecs
+            .query_join_ref::<(&Position, &Health)>()
+            .changed::<Position>()
+            .iter()
+            .map(|(entity, _items)| entity)
+            .collect();
+        assert_eq!(changed, vec![moved]);
+
+        ecs.worlds[0].step();
+        let fresh = ecs.spawn_with((Position { x: 3.0, y: 0.0 }, Health { value: 3.0 }));
+        let appeared: Vec<Entity> = ecs
+            .query_join_ref::<(&Position, &Health)>()
+            .added::<Position>()
+            .iter()
+            .map(|(entity, _items)| entity)
+            .collect();
+        assert_eq!(appeared, vec![fresh]);
+
+        assert_eq!(
+            ecs.query_join_ref::<(&Position, &Health)>()
+                .changed::<Velocity>()
+                .iter()
+                .count(),
+            0,
+            "an unregistered filter type degrades the read join to empty"
+        );
+        let _ = still;
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    #[test]
+    fn test_prepared_query_runs_parallel() {
+        let mut world = DynWorld::new();
+        world.spawn_bundles((Position::default(), Velocity { x: 1.0, y: 0.0 }), 64);
+        let prepared = world.query::<(&mut Position, &Velocity)>().prepare();
+
+        prepared
+            .query(&mut world)
+            .par_for_each(|_entity, (position, velocity)| {
+                position.x += velocity.x;
+            });
+        let total: f32 = world
+            .query_ref::<&Position>()
+            .iter()
+            .map(|(_entity, position)| position.x)
+            .sum();
+        assert_eq!(total, 64.0);
+    }
+
+    #[cfg(feature = "snapshot")]
+    #[test]
+    fn test_group_delta_serializes_and_group_compact_runs() {
+        let mut core_registry = ComponentRegistry::new();
+        core_registry.register_serde::<Position>();
+        core_registry.register_serde::<Velocity>();
+        let mut source = DynEcs::new();
+        source.add_world_at(0, core_registry.clone());
+        let seed = source.spawn_with((Position::default(),));
+
+        let snapshot = source.snapshot().unwrap();
+        let mut replica = DynEcs::from_snapshot(vec![core_registry], &snapshot).unwrap();
+        let cursor = source.delta_cursor();
+
+        source.get_mut::<Position>(seed).unwrap().x = 4.0;
+        let doomed = source.spawn_with((Position { x: 9.0, y: 0.0 }, Velocity::default()));
+        source.despawn(doomed);
+
+        let delta = source.delta_since(&cursor).unwrap();
+        let bytes = postcard::to_allocvec(&delta).unwrap();
+        let decoded: DynEcsDelta = postcard::from_bytes(&bytes).unwrap();
+        replica.apply_delta(&decoded).unwrap();
+        assert_eq!(replica.get::<Position>(seed).unwrap().x, 4.0);
+        assert!(!replica.is_alive(doomed));
+
+        assert!(
+            source.worlds[0].stats().empty_table_count >= 1,
+            "the despawned spawn's table sits empty"
+        );
+        let dropped = source.compact();
+        assert!(dropped >= 1);
+        assert_eq!(source.get::<Position>(seed).unwrap().x, 4.0);
+        assert_eq!(source.stats().free_ids, 1);
+    }
+
     #[cfg(not(target_family = "wasm"))]
     #[test]
     fn test_query_join_par_for_each_matches_sequential() {
