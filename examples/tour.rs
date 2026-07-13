@@ -1,5 +1,7 @@
 use freecs::Schedule;
-use freecs::dynamic::{ChildOf, ComponentRegistry, DynEcs, DynWorld, ResourceHost, ResourceMap};
+use freecs::dynamic::{
+    ChildOf, ComponentRegistry, DynEcs, DynWorld, ResourceHost, ResourceHostExt, ResourceMap,
+};
 
 // Components are plain structs. Default is the only requirement; there is
 // no derive macro and no registration ceremony, first use registers them.
@@ -111,15 +113,15 @@ fn main() {
     world.insert_resource(Score(0));
     assert_eq!(world.expect_resource::<DeltaTime>().0, 0.5);
 
-    // Host scopes: the free-function form takes the resource out of any
-    // ResourceHost and hands the closure the host itself, so a system can
+    // Host scopes: ResourceHostExt gives any ResourceHost the scopes as
+    // methods, and the closure receives the host itself, so a system can
     // mutate engine state, world state, and the resource in one pass.
     let mut engine = Engine {
         world: DynWorld::new(),
         frames: 0,
     };
     engine.world.insert_resource(Score(0));
-    freecs::dynamic::resource_scope(&mut engine, |engine, score: &mut Score| {
+    engine.resource_scope(|engine, score: &mut Score| {
         engine.frames += 1;
         score.0 += 1;
     });

@@ -634,10 +634,65 @@ impl ResourceMap {
 /// [`DynEcs`] implement it over their own maps. A host that wraps either
 /// in a larger state struct implements it by delegating to the wrapped
 /// map, and the free scopes then lend the whole host to the closure,
-/// which the inherent scope methods structurally cannot do.
+/// which the inherent scope methods structurally cannot do. Import
+/// [`ResourceHostExt`] for the same scopes as methods on the host.
+///
+/// Implementations must return the same map from every call. The scopes
+/// call it twice, once to take the resource and once to reinsert it, and
+/// a host that routes the two calls to different maps loses the resource.
 pub trait ResourceHost {
     fn resource_map_mut(&mut self) -> &mut ResourceMap;
 }
+
+/// Method-call syntax for the free scope forms, blanket-implemented for
+/// every [`ResourceHost`]: `host.resource_scope(...)` instead of
+/// `resource_scope(&mut host, ...)`. On [`DynWorld`] and [`DynEcs`] the
+/// inherent methods take precedence, which is harmless because they
+/// delegate to the same implementations.
+///
+/// ```rust
+/// use freecs::dynamic::{DynWorld, ResourceHost, ResourceHostExt, ResourceMap};
+///
+/// struct Engine {
+///     ecs: DynWorld,
+///     frames: u32,
+/// }
+///
+/// impl ResourceHost for Engine {
+///     fn resource_map_mut(&mut self) -> &mut ResourceMap {
+///         &mut self.ecs.resources
+///     }
+/// }
+///
+/// struct Score(u32);
+///
+/// let mut engine = Engine { ecs: DynWorld::new(), frames: 0 };
+/// engine.ecs.insert_resource(Score(0));
+///
+/// engine.resource_scope(|engine, score: &mut Score| {
+///     engine.frames += 1;
+///     score.0 += 1;
+/// });
+///
+/// assert_eq!(engine.frames, 1);
+/// ```
+pub trait ResourceHostExt: ResourceHost + Sized {
+    fn resource_scope<R: Send + Sync + 'static, T>(
+        &mut self,
+        f: impl FnOnce(&mut Self, &mut R) -> T,
+    ) -> T {
+        resource_scope(self, f)
+    }
+
+    fn resources_scope<B: ResourceBundle, T>(
+        &mut self,
+        f: impl FnOnce(&mut Self, &mut B) -> T,
+    ) -> T {
+        resources_scope(self, f)
+    }
+}
+
+impl<H: ResourceHost> ResourceHostExt for H {}
 
 impl ResourceHost for DynWorld {
     fn resource_map_mut(&mut self) -> &mut ResourceMap {
@@ -9338,14 +9393,11 @@ mod tests {
         host.world.insert_resource(ScopePoints(1));
         host.world.insert_resource(ScopeLabel("group"));
 
-        resources_scope(
-            &mut host,
-            |host, (points, label): &mut (ScopePoints, ScopeLabel)| {
-                host.frames += 1;
-                points.0 += 1;
-                assert_eq!(label.0, "group");
-            },
-        );
+        host.resources_scope(|host, (points, label): &mut (ScopePoints, ScopeLabel)| {
+            host.frames += 1;
+            points.0 += 1;
+            assert_eq!(label.0, "group");
+        });
 
         assert_eq!(host.frames, 1);
         assert_eq!(host.world.resource::<ScopePoints>().unwrap().0, 2);

@@ -1242,10 +1242,12 @@ hand-rolling remove then reinsert. An engine that wraps `DynWorld` or
 `DynEcs` in its own world type needs the closure to receive that wrapper,
 which the scope methods cannot do since their closures receive the bare
 world. Implement `ResourceHost` on the wrapper (one method returning the
-wrapped resource map) and call the free-function forms
-`dynamic::resource_scope(&mut host, ...)` and `dynamic::resources_scope`.
-Their closures receive the host itself, with the same take/put semantics
-and panic reinsertion.
+wrapped resource map) and import `ResourceHostExt` for the same scopes as
+methods on the host, `host.resource_scope(...)` and
+`host.resources_scope(...)`. Their closures receive the host itself, with
+the same take/put semantics and panic reinsertion. The free-function forms
+`dynamic::resource_scope(&mut host, ...)` and `dynamic::resources_scope`
+are the no-import spelling of the same calls.
 
 #### Tags
 
