@@ -58,7 +58,6 @@ The `ecs!` macro generates the entire ECS at compile time using only plain data 
   - [Grouped dynamic worlds](#grouped-dynamic-worlds)
   - [Snapshots](#snapshots)
 - [Multi-World ECS](#multi-world-ecs)
-- [Migrating from 2.x](#migrating-from-2x)
 - [License](#license)
 
 ## How it works (build it from scratch)
@@ -1168,19 +1167,6 @@ core_world.for_each_with_tags(POSITION, 0, &[player], &[], |entity, table, idx| 
 Component mask constants (e.g. `POSITION`, `SPRITE`) have globally unique names but each world numbers its components independently starting at bit 0, so never mix masks from different worlds in one query.
 
 Single-world syntax remains unchanged. Multi-world is detected by the presence of multiple `Ident { ... }` blocks inside the first group.
-
-## Migrating from 2.x
-
-3.0 is a breaking release. The changes that affect user code:
-
-- `drain_<event>()` is gone; use `collect_<event>()` plus `clear_<event>()`, or better, the cursor API (`read_<event>_since` / `sequence_<event>`).
-- Tags are `SparseTagSet` instead of `HashSet<Entity>`: `contains(entity)` takes the entity by value, and tag adds require a live entity.
-- Tag mask values moved to the top bits of the `u64`. Constants are opaque, so this only matters for masks you serialized.
-- Multi-world `despawn` returns `bool`, and `EntityAllocator::deallocate` returns `bool` (false for stale or double frees).
-- Multi-world `remove_entity` is now `retire_entity` and is generation-safe.
-- The single-world `Component` enum is now named `<World>Component`, and `COMPONENT_COUNT` is `<WORLD>_COMPONENT_COUNT` (components only, tags are counted separately).
-- Passing tag bits to spawn masks, `add_components`/`remove_components`, or the mask-only queries is a `debug_assert` failure instead of silent misbehavior.
-- `serde` support is now behind the (default-on) `serde` feature.
 
 ## License
 
