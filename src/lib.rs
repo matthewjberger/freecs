@@ -542,6 +542,55 @@ macro_rules! dynamic_schema {
     };
 }
 
+/// Declares a [`dynamic::DynEcs`] group's member worlds in one place: the
+/// index constants in declaration order and the build function that adds
+/// each member's registry at its asserted index, replacing the hand-written
+/// const-add-assert dance. Pair each member with a registration function,
+/// typically from [`dynamic_schema!`]. Apps extending a built group add
+/// their own member with [`dynamic::DynEcs::add_world_at`].
+///
+/// ```rust
+/// freecs::dynamic_schema! {
+///     pub fn register_main {
+///         value: u32 => VALUE,
+///     }
+/// }
+///
+/// freecs::dynamic_worlds! {
+///     pub fn build_ecs {
+///         MAIN => register_main,
+///     }
+/// }
+///
+/// let ecs = build_ecs();
+/// assert_eq!(MAIN, 0);
+/// assert_eq!(ecs.worlds.len(), 1);
+/// ```
+#[cfg(feature = "dynamic")]
+#[macro_export]
+macro_rules! dynamic_worlds {
+    (@consts $index:expr;) => {};
+    (@consts $index:expr; $const:ident $(, $rest:ident)*) => {
+        pub const $const: usize = $index;
+        $crate::dynamic_worlds!(@consts $index + 1; $($rest),*);
+    };
+    (
+        $vis:vis fn $build_fn:ident {
+            $($const:ident => $register_fn:ident,)+
+        }
+    ) => {
+        $crate::dynamic_worlds!(@consts 0usize; $($const),+);
+
+        $vis fn $build_fn() -> $crate::dynamic::DynEcs {
+            let mut ecs = $crate::dynamic::DynEcs::new();
+            $(
+                ecs.add_world_at($const, $register_fn());
+            )+
+            ecs
+        }
+    };
+}
+
 /// Generates the macro-world accessor ergonomics over the keyed tier: a
 /// keys struct holding one [`dynamic::ComponentKey`] or
 /// [`dynamic::TagKey`] per entry, a `resolve` constructor registering them

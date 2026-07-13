@@ -2119,6 +2119,7 @@ pub struct DynEcs {
     pub tags: Vec<SparseTagSet>,
     pub structural_log: Vec<StructuralChange>,
     pub structural_sequence: u64,
+    pub type_routes: HashMap<TypeId, usize>,
 }
 
 impl DynEcs {
@@ -2183,6 +2184,128 @@ impl DynEcs {
         let entity = self.allocator.allocate();
         self.record_structural(entity, StructuralChangeKind::Spawned, 0);
         entity
+    }
+
+    /// Spawns one group entity carrying the bundle, with each component
+    /// routed to the member world that registered its type, so a bundle can
+    /// span worlds. Panics like [`set`](Self::set) if a component type is
+    /// registered nowhere.
+    pub fn spawn_with<B: Bundle>(&mut self, bundle: B) -> Entity {
+        let entity = self.spawn();
+        bundle.write_group(self, entity);
+        entity
+    }
+
+    /// Which member world holds `T`, scanning members in index order and
+    /// caching the answer in [`type_routes`](Self::type_routes). Returns
+    /// `None` when no member world has registered `T`; group-typed access
+    /// never registers lazily, because only a schema decides where a type
+    /// lives.
+    pub fn route<T: Send + Sync + Default + 'static>(&mut self) -> Option<usize> {
+        if let Some(&index) = self.type_routes.get(&TypeId::of::<T>()) {
+            return Some(index);
+        }
+        let index = self
+            .worlds
+            .iter()
+            .position(|world| world.lookup_key::<T>().is_some())?;
+        self.type_routes.insert(TypeId::of::<T>(), index);
+        Some(index)
+    }
+
+    fn route_ref<T: Send + Sync + Default + 'static>(&self) -> Option<usize> {
+        if let Some(&index) = self.type_routes.get(&TypeId::of::<T>()) {
+            return Some(index);
+        }
+        self.worlds
+            .iter()
+            .position(|world| world.lookup_key::<T>().is_some())
+    }
+
+    /// Reads `T` from whichever member world holds it, no world index
+    /// required.
+    pub fn get<T: Send + Sync + Default + 'static>(&self, entity: Entity) -> Option<&T> {
+        let index = self.route_ref::<T>()?;
+        self.worlds[index].get::<T>(entity)
+    }
+
+    /// The mutable form of [`get`](Self::get); stamps change ticks exactly
+    /// like the member world's accessor.
+    pub fn get_mut<T: Send + Sync + Default + 'static>(
+        &mut self,
+        entity: Entity,
+    ) -> Option<&mut T> {
+        let index = self.route::<T>()?;
+        self.worlds[index].get_mut::<T>(entity)
+    }
+
+    /// Writes `T` on the member world that registered it, adding the
+    /// component if the entity lacks it. Panics if no member world has
+    /// registered `T`: group-typed access never picks a world for a new
+    /// type, that is a schema decision.
+    pub fn set<T: Send + Sync + Default + 'static>(&mut self, entity: Entity, value: T) {
+        let Some(index) = self.route::<T>() else {
+            panic!(
+                "{} is not registered in any member world; add it to a member schema first",
+                std::any::type_name::<T>()
+            );
+        };
+        self.worlds[index].set(entity, value);
+    }
+
+    /// Whether the entity carries `T` in whichever member world holds it.
+    pub fn has<T: Send + Sync + Default + 'static>(&self, entity: Entity) -> bool {
+        self.route_ref::<T>()
+            .is_some_and(|index| self.worlds[index].has::<T>(entity))
+    }
+
+    /// Removes `T` from the member world that holds it. Returns false when
+    /// the type is registered nowhere or the entity lacks it.
+    pub fn remove<T: Send + Sync + Default + 'static>(&mut self, entity: Entity) -> bool {
+        match self.route::<T>() {
+            Some(index) => self.worlds[index].remove::<T>(entity),
+            None => false,
+        }
+    }
+
+    /// A typed query against the first member world where every required
+    /// element of the tuple is registered; optional elements do not
+    /// constrain the routing. Panics when no member world qualifies,
+    /// because a mutable query cannot pick a world to register types in.
+    pub fn query<Q: QueryTuple>(&mut self) -> DynQuery<'_, Q> {
+        let index = self
+            .worlds
+            .iter()
+            .position(|world| Q::routing_match(world))
+            .expect("no member world registers every required component of the query tuple");
+        self.worlds[index].query::<Q>()
+    }
+
+    /// The read-only routed query. When no member world registers every
+    /// required element the query is empty rather than a panic, matching
+    /// [`DynWorld::query_ref`]'s graceful degradation.
+    pub fn query_ref<Q: ReadQueryTuple>(&self) -> DynQueryRef<'_, Q> {
+        match self.worlds.iter().position(|world| Q::routing_match(world)) {
+            Some(index) => self.worlds[index].query_ref::<Q>(),
+            None => {
+                let mut query = self.worlds[0].query_ref::<Q>();
+                query.dead = true;
+                query
+            }
+        }
+    }
+
+    /// [`add_world`](Self::add_world) with the index asserted against the
+    /// constant a schema pairs with this member, replacing the hand-written
+    /// add-then-assert dance. Panics when members register out of
+    /// declaration order.
+    pub fn add_world_at(&mut self, expected_index: usize, registry: ComponentRegistry) -> usize {
+        let index = self.add_world(registry);
+        assert_eq!(
+            index, expected_index,
+            "member world registered out of declaration order"
+        );
+        index
     }
 
     pub fn spawn_count(&mut self, count: usize) -> Vec<Entity> {
@@ -2617,6 +2740,7 @@ pub trait QueryElement: sealed::SealedElement {
     type Item<'item>;
     const REQUIRED: bool;
     fn component_mask(world: &mut DynWorld) -> u64;
+    fn route_registered(world: &DynWorld) -> bool;
     fn fetch<'table>(
         slot: Option<&'table mut ColumnSlot>,
         current_tick: u32,
@@ -2635,6 +2759,10 @@ impl<T: Send + Sync + Default + 'static> QueryElement for &T {
 
     fn component_mask(world: &mut DynWorld) -> u64 {
         world.component_key::<T>().mask
+    }
+
+    fn route_registered(world: &DynWorld) -> bool {
+        world.lookup_key::<T>().is_some()
     }
 
     fn fetch<'table>(
@@ -2668,6 +2796,10 @@ impl<T: Send + Sync + Default + 'static> QueryElement for &mut T {
 
     fn component_mask(world: &mut DynWorld) -> u64 {
         world.component_key::<T>().mask
+    }
+
+    fn route_registered(world: &DynWorld) -> bool {
+        world.lookup_key::<T>().is_some()
     }
 
     fn fetch<'table>(
@@ -2714,6 +2846,10 @@ impl<T: Send + Sync + Default + 'static> QueryElement for Option<&T> {
         world.component_key::<T>().mask
     }
 
+    fn route_registered(world: &DynWorld) -> bool {
+        world.lookup_key::<T>().is_some()
+    }
+
     fn fetch<'table>(
         slot: Option<&'table mut ColumnSlot>,
         current_tick: u32,
@@ -2743,6 +2879,10 @@ impl<T: Send + Sync + Default + 'static> QueryElement for Option<&mut T> {
 
     fn component_mask(world: &mut DynWorld) -> u64 {
         world.component_key::<T>().mask
+    }
+
+    fn route_registered(world: &DynWorld) -> bool {
+        world.lookup_key::<T>().is_some()
     }
 
     fn fetch<'table>(
@@ -2846,6 +2986,7 @@ pub trait QueryTuple: sealed::SealedQueryTuple {
     type Item<'item>;
     fn component_mask(world: &mut DynWorld) -> u64;
     fn element_masks(world: &mut DynWorld) -> [u64; 8];
+    fn routing_match(world: &DynWorld) -> bool;
     fn fetch<'table>(
         table_mask: u64,
         columns: &'table mut [ColumnSlot],
@@ -2974,6 +3115,16 @@ macro_rules! impl_query_tuple {
                 masks
             }
 
+            fn routing_match(world: &DynWorld) -> bool {
+                let mut matched = true;
+                $(
+                    if $element::REQUIRED && !$element::route_registered(world) {
+                        matched = false;
+                    }
+                )+
+                matched
+            }
+
             #[allow(non_snake_case)]
             fn fetch<'table>(
                 table_mask: u64,
@@ -3063,6 +3214,11 @@ macro_rules! impl_bare_element_query {
                     let mut masks = [0u64; 8];
                     masks[0] = <$element as QueryElement>::component_mask(world);
                     masks
+                }
+
+                fn routing_match(world: &DynWorld) -> bool {
+                    !<$element as QueryElement>::REQUIRED
+                        || <$element as QueryElement>::route_registered(world)
                 }
 
                 fn fetch<'table>(
@@ -3958,6 +4114,7 @@ fn tags_match(tags: &[SparseTagSet], entity: Entity, tag_include: u64, tag_exclu
 pub trait Bundle: sealed::SealedBundle {
     fn component_mask(world: &mut DynWorld) -> u64;
     fn write(self, world: &mut DynWorld, entity: Entity);
+    fn write_group(self, ecs: &mut DynEcs, entity: Entity);
 }
 
 macro_rules! impl_bundle {
@@ -3983,6 +4140,12 @@ macro_rules! impl_bundle {
             fn write(self, world: &mut DynWorld, entity: Entity) {
                 let ($($element,)+) = self;
                 $(world.set(entity, $element);)+
+            }
+
+            #[allow(non_snake_case)]
+            fn write_group(self, ecs: &mut DynEcs, entity: Entity) {
+                let ($($element,)+) = self;
+                $(ecs.set(entity, $element);)+
             }
         }
     };
@@ -6160,6 +6323,73 @@ mod tests {
             let expected = if offset < 5 { 7.0 } else { 0.0 };
             assert_eq!(world.get_keyed(position, entity).unwrap().x, expected);
         }
+    }
+
+    #[test]
+    fn test_dyn_ecs_routes_typed_access_to_owning_world() {
+        let mut core_registry = ComponentRegistry::new();
+        core_registry.register::<Position>();
+        let mut game_registry = ComponentRegistry::new();
+        game_registry.register::<Health>();
+
+        let mut ecs = DynEcs::new();
+        let core = ecs.add_world_at(0, core_registry);
+        let game = ecs.add_world_at(1, game_registry);
+
+        let entity = ecs.spawn_with((Position { x: 1.0, y: 0.0 }, Health { value: 10.0 }));
+        assert_eq!(ecs.worlds[core].get::<Position>(entity).unwrap().x, 1.0);
+        assert_eq!(ecs.worlds[game].get::<Health>(entity).unwrap().value, 10.0);
+        assert!(ecs.worlds[core].get::<Health>(entity).is_none());
+
+        assert_eq!(ecs.get::<Health>(entity).unwrap().value, 10.0);
+        ecs.worlds[core].step();
+        ecs.get_mut::<Position>(entity).unwrap().x = 2.0;
+        ecs.set(entity, Health { value: 5.0 });
+        assert!(ecs.has::<Position>(entity));
+        assert_eq!(ecs.type_routes.len(), 2);
+
+        assert_eq!(
+            ecs.worlds[core].query_entities_changed(1).count(),
+            1,
+            "routed mutation stamps ticks in the owning world"
+        );
+
+        assert!(ecs.remove::<Health>(entity));
+        assert!(!ecs.has::<Health>(entity));
+
+        let visited: Vec<Entity> = ecs
+            .query_ref::<&Position>()
+            .iter()
+            .map(|(entity, _position)| entity)
+            .collect();
+        assert_eq!(visited, vec![entity]);
+        ecs.query::<&mut Position>()
+            .for_each(|_entity, position| position.y = 7.0);
+        assert_eq!(ecs.get::<Position>(entity).unwrap().y, 7.0);
+
+        assert!(ecs.get::<Velocity>(entity).is_none());
+        assert!(!ecs.remove::<Velocity>(entity));
+        assert_eq!(
+            ecs.query_ref::<&Velocity>().iter().count(),
+            0,
+            "unrouteable read queries are empty, not a panic"
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "not registered in any member world")]
+    fn test_dyn_ecs_set_rejects_unregistered_types() {
+        let mut ecs = DynEcs::new();
+        ecs.add_world(ComponentRegistry::new());
+        let entity = ecs.spawn();
+        ecs.set(entity, Position::default());
+    }
+
+    #[test]
+    #[should_panic(expected = "member world registered out of declaration order")]
+    fn test_dyn_ecs_add_world_at_asserts_index() {
+        let mut ecs = DynEcs::new();
+        ecs.add_world_at(1, ComponentRegistry::new());
     }
 
     #[test]

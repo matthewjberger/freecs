@@ -1388,7 +1388,30 @@ components. Each member world carries its own registry and full mask space,
 one entity can hold rows in any combination of worlds, and despawning retires
 it everywhere with the same generation broadcast the static multi-world uses,
 so stale handles are refused in every member. Group tags live outside any
-world's mask space and filter per-world typed queries by set reference:
+world's mask space and filter per-world typed queries by set reference.
+
+Declare the members once with `dynamic_worlds!` (index constants plus the
+build function, each member asserted at its declared index; apps extending a
+built group use `add_world_at`):
+
+```rust
+freecs::dynamic_worlds! {
+    pub fn build_ecs {
+        CORE => register_core_components,
+        UI => register_ui_components,
+    }
+}
+```
+
+Since a component type lives in exactly one member world, the group routes
+typed access itself: `ecs.get::<T>()`, `set`, `get_mut`, `has`, `remove`,
+`query`, and `query_ref` resolve the owning world per type (first member in
+index order, cached in the public `type_routes` map), and
+`ecs.spawn_with(bundle)` spawns one group entity with each component routed
+to its world, so bundles span worlds. Routed access never registers types
+lazily; where a type lives is a schema decision, so `set` on an unregistered
+type panics instead of guessing. Member indexing remains for world-level
+operations, snapshots, and structural logs:
 
 ```rust
 use freecs::dynamic::{ComponentRegistry, DynEcs};
