@@ -1406,6 +1406,13 @@ channels (`send` / `consume_events` with per-consumer cursors), and
 call. World-local resources and events remain on each `DynWorld`; the two
 levels are separate channels, not mirrors.
 
+Marker tags exist at the group level too — `ecs.add_tag_type::<Selected>`,
+`remove_tag_type`, `has_tag_type`, `query_tag_type` — and they're the
+natural home for entity-scoped markers in a grouped world: they spend no
+member world's mask bits, need no world index to touch, land in the group
+structural log, and drop on group despawn. `ecs.tag_set_type::<T>()` hands
+the set to any per-world typed query via `with_tag_set`/`without_tag_set`.
+
 Tuples that span member worlds run through `ecs.query_join`: one world
 drives the iteration at full slice speed (the world holding every mutable
 element), the others resolve their elements per entity at `get` speed,

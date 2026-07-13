@@ -2184,6 +2184,7 @@ pub struct DynEcs {
     pub structural_log: Vec<StructuralChange>,
     pub structural_sequence: u64,
     pub type_routes: HashMap<TypeId, usize>,
+    pub tag_type_indices: HashMap<TypeId, usize>,
     pub resources: ResourceMap,
     pub events: EventBus,
 }
@@ -2618,6 +2619,65 @@ impl DynEcs {
 
     pub fn query_tag(&self, tag_index: usize) -> impl Iterator<Item = Entity> + '_ {
         self.tags[tag_index].iter()
+    }
+
+    /// The group tag index for marker type `T`, registering the tag on
+    /// first use. Group tags are the natural home for entity-scoped
+    /// markers: they consume no member world's mask bits and need no world
+    /// index to touch.
+    pub fn tag_type_index<T: 'static>(&mut self) -> usize {
+        if let Some(&index) = self.tag_type_indices.get(&TypeId::of::<T>()) {
+            return index;
+        }
+        let index = self.register_tag();
+        self.tag_type_indices.insert(TypeId::of::<T>(), index);
+        index
+    }
+
+    /// The group tag index for marker type `T` if it has been used, without
+    /// registering it.
+    pub fn lookup_tag_type<T: 'static>(&self) -> Option<usize> {
+        self.tag_type_indices.get(&TypeId::of::<T>()).copied()
+    }
+
+    /// Adds the marker type `T`'s group tag to an entity, registering the
+    /// tag on first use.
+    pub fn add_tag_type<T: 'static>(&mut self, entity: Entity) {
+        let index = self.tag_type_index::<T>();
+        self.add_tag(index, entity);
+    }
+
+    /// Removes the marker type `T`'s group tag from an entity. Unregistered
+    /// marker types remove nothing.
+    pub fn remove_tag_type<T: 'static>(&mut self, entity: Entity) -> bool {
+        match self.lookup_tag_type::<T>() {
+            Some(index) => self.remove_tag(index, entity),
+            None => false,
+        }
+    }
+
+    /// Whether an entity carries the marker type `T`'s group tag.
+    /// Unregistered marker types read as absent.
+    pub fn has_tag_type<T: 'static>(&self, entity: Entity) -> bool {
+        match self.lookup_tag_type::<T>() {
+            Some(index) => self.has_tag(index, entity),
+            None => false,
+        }
+    }
+
+    /// Iterates entities carrying the marker type `T`'s group tag.
+    /// Unregistered marker types match nothing.
+    pub fn query_tag_type<T: 'static>(&self) -> impl Iterator<Item = Entity> + '_ {
+        self.lookup_tag_type::<T>()
+            .into_iter()
+            .flat_map(|index| self.tags[index].iter())
+    }
+
+    /// The marker type `T`'s group tag set, for composing into per-world
+    /// typed queries with `with_tag_set`/`without_tag_set`. `None` until
+    /// the tag's first use.
+    pub fn tag_set_type<T: 'static>(&self) -> Option<&SparseTagSet> {
+        self.lookup_tag_type::<T>().map(|index| &self.tags[index])
     }
 }
 
@@ -6827,6 +6887,69 @@ mod tests {
             let expected = if offset < 5 { 7.0 } else { 0.0 };
             assert_eq!(world.get_keyed(position, entity).unwrap().x, expected);
         }
+    }
+
+    #[test]
+    fn test_dyn_ecs_group_marker_tags() {
+        struct Selected;
+        struct Locked;
+
+        let mut core_registry = ComponentRegistry::new();
+        core_registry.register::<Position>();
+        let mut ecs = DynEcs::new();
+        ecs.add_world_at(0, core_registry);
+
+        let first = ecs.spawn_with((Position { x: 1.0, y: 0.0 },));
+        let second = ecs.spawn_with((Position { x: 2.0, y: 0.0 },));
+
+        assert!(!ecs.has_tag_type::<Selected>(first));
+        assert_eq!(ecs.query_tag_type::<Selected>().count(), 0);
+        assert!(!ecs.remove_tag_type::<Selected>(first));
+
+        ecs.clear_structural_log();
+        ecs.add_tag_type::<Selected>(first);
+        ecs.add_tag_type::<Locked>(second);
+        assert!(ecs.has_tag_type::<Selected>(first));
+        assert!(!ecs.has_tag_type::<Selected>(second));
+        assert_eq!(
+            ecs.query_tag_type::<Selected>().collect::<Vec<_>>(),
+            vec![first]
+        );
+        assert_eq!(
+            ecs.structural_changes_since(0)
+                .iter()
+                .filter(|change| change.kind == StructuralChangeKind::TagsAdded)
+                .count(),
+            2,
+            "marker tags land in the group structural log"
+        );
+
+        let selected_positions: Vec<Entity> = ecs.worlds[0]
+            .query_ref::<&Position>()
+            .with_tag_set(ecs.tag_set_type::<Selected>().unwrap())
+            .iter()
+            .map(|(entity, _position)| entity)
+            .collect();
+        assert_eq!(
+            selected_positions,
+            vec![first],
+            "group marker sets compose into per-world typed queries"
+        );
+
+        assert!(ecs.remove_tag_type::<Selected>(first));
+        assert!(!ecs.has_tag_type::<Selected>(first));
+
+        ecs.add_tag_type::<Selected>(second);
+        ecs.despawn(second);
+        assert!(
+            !ecs.has_tag_type::<Selected>(second),
+            "despawn drops group marker tags"
+        );
+
+        assert!(
+            ecs.worlds[0].remaining_bits() == 63,
+            "group marker tags spend no member-world mask bits"
+        );
     }
 
     #[test]
