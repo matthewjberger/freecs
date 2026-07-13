@@ -1,5 +1,5 @@
 use freecs::Schedule;
-use freecs::dynamic::{ChildOf, ComponentRegistry, DynEcs, DynWorld};
+use freecs::dynamic::{ChildOf, ComponentRegistry, DynEcs, DynWorld, ResourceHost, ResourceMap};
 
 // Components are plain structs. Default is the only requirement; there is
 // no derive macro and no registration ceremony, first use registers them.
@@ -34,6 +34,21 @@ struct Damage {
 struct Player;
 struct Frozen;
 struct Selected;
+
+// An engine that wraps the world in its own state struct implements
+// ResourceHost, and the free-function scope forms in freecs::dynamic then
+// lend the whole wrapper to the closure, which the inherent scope methods
+// cannot do.
+struct Engine {
+    world: DynWorld,
+    frames: u32,
+}
+
+impl ResourceHost for Engine {
+    fn resource_map_mut(&mut self) -> &mut ResourceMap {
+        &mut self.world.resources
+    }
+}
 
 // A system is a plain function over the world. resource_scope takes the
 // resource out for the closure, so the resource and the world are
@@ -95,6 +110,21 @@ fn main() {
     world.insert_resource(DeltaTime(0.5));
     world.insert_resource(Score(0));
     assert_eq!(world.expect_resource::<DeltaTime>().0, 0.5);
+
+    // Host scopes: the free-function form takes the resource out of any
+    // ResourceHost and hands the closure the host itself, so a system can
+    // mutate engine state, world state, and the resource in one pass.
+    let mut engine = Engine {
+        world: DynWorld::new(),
+        frames: 0,
+    };
+    engine.world.insert_resource(Score(0));
+    freecs::dynamic::resource_scope(&mut engine, |engine, score: &mut Score| {
+        engine.frames += 1;
+        score.0 += 1;
+    });
+    assert_eq!(engine.frames, 1);
+    assert_eq!(engine.world.expect_resource::<Score>().0, 1);
 
     // step() ends a frame: it expires old events and opens the next
     // change-detection window, so the systems below read as "this frame".

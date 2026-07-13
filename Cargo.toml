@@ -12,6 +12,9 @@ license = "MIT"
 edition = "2024"
 rust-version = "1.90"
 
+[package.metadata.docs.rs]
+all-features = true
+
 [features]
 default = ["serde"]
 serde = ["dep:serde"]
