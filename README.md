@@ -1108,6 +1108,12 @@ The lifecycle log is verified against the macro multi-world's by the
 differential oracle: one seeded op stream drives both forms and requires
 entry-for-entry identical logs.
 
+`ChildOf` hierarchies cascade at the group level too:
+`ecs.despawn_recursive(root)` follows links across every member world and
+despawns through the group, so retirement broadcasts everywhere and each
+death lands in the lifecycle log. In a group, prefer it over the
+single-world form.
+
 ### Snapshots
 
 The `snapshot` feature makes dynamic worlds serializable. Components register

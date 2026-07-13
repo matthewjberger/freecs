@@ -876,7 +876,9 @@ impl DynWorld {
     /// Despawns an entity and every descendant reachable through
     /// [`ChildOf`] links, breadth-first over on-demand scans. Link cycles
     /// are tolerated, each entity despawns once. Returns the despawned
-    /// entities.
+    /// entities. In a [`DynEcs`] group, despawn through
+    /// [`DynEcs::despawn_recursive`] instead, so retirement broadcasts into
+    /// every member world.
     pub fn despawn_recursive(&mut self, root: Entity) -> Vec<Entity> {
         let mut pending = vec![root];
         let mut to_despawn: Vec<Entity> = Vec::new();
@@ -2234,6 +2236,28 @@ impl DynEcs {
             }
         }
         despawned
+    }
+
+    /// Despawns an entity and every descendant reachable through [`ChildOf`]
+    /// links in any member world, breadth-first over on-demand scans. This
+    /// is the grouped form of [`DynWorld::despawn_recursive`]: each entity
+    /// dies through the group, so retirement broadcasts into every member
+    /// world, group tags drop, and the lifecycle log records each death.
+    /// Link cycles are tolerated, each entity despawns once. Returns the
+    /// despawned entities.
+    pub fn despawn_recursive(&mut self, root: Entity) -> Vec<Entity> {
+        let mut pending = vec![root];
+        let mut to_despawn: Vec<Entity> = Vec::new();
+        while let Some(parent) = pending.pop() {
+            if to_despawn.contains(&parent) {
+                continue;
+            }
+            to_despawn.push(parent);
+            for world in &self.worlds {
+                pending.extend(world.children(parent));
+            }
+        }
+        self.despawn_entities(&to_despawn)
     }
 
     /// Registers a group-level tag and returns its index. Group tags have no
@@ -5680,6 +5704,43 @@ mod tests {
             let expected = if offset < 5 { 7.0 } else { 0.0 };
             assert_eq!(world.get_keyed(position, entity).unwrap().x, expected);
         }
+    }
+
+    #[test]
+    fn test_dyn_ecs_despawn_recursive_cascades_across_worlds() {
+        let mut ecs = DynEcs::new();
+        let core = ecs.add_world(ComponentRegistry::new());
+        let render = ecs.add_world(ComponentRegistry::new());
+
+        let root = ecs.spawn();
+        ecs.worlds[core].set(root, Position::default());
+
+        let child = ecs.spawn();
+        ecs.worlds[core].set(child, ChildOf(root));
+
+        let grandchild = ecs.spawn();
+        ecs.worlds[render].set(grandchild, ChildOf(child));
+
+        let bystander = ecs.spawn();
+        ecs.worlds[core].set(bystander, Position::default());
+
+        ecs.clear_structural_log();
+        let despawned = ecs.despawn_recursive(root);
+
+        assert_eq!(despawned.len(), 3);
+        assert!(!ecs.is_alive(root));
+        assert!(!ecs.is_alive(child));
+        assert!(!ecs.is_alive(grandchild));
+        assert!(ecs.is_alive(bystander));
+        assert!(ecs.worlds[core].get::<Position>(root).is_none());
+        assert!(ecs.worlds[render].get::<ChildOf>(grandchild).is_none());
+
+        let deaths = ecs
+            .structural_changes_since(0)
+            .iter()
+            .filter(|change| change.kind == StructuralChangeKind::Despawned)
+            .count();
+        assert_eq!(deaths, 3, "every cascade death lands in the lifecycle log");
     }
 
     #[test]
