@@ -64,24 +64,18 @@ fn main() {
                 );
             });
 
-        let mut collisions = Vec::new();
-        world.query::<&Position>().for_each(|entity, position| {
-            let player_position = Position {
-                x: position.x,
-                y: position.y,
-            };
-            collisions.push((entity, player_position));
-        });
-        for index in 0..collisions.len() {
-            for other in index + 1..collisions.len() {
-                let (entity_a, ref a) = collisions[index];
-                let (entity_b, ref b) = collisions[other];
+        let collisions: Vec<(freecs::Entity, freecs::Entity)> = world
+            .query_ref::<&Position>()
+            .iter_combinations()
+            .filter(|((_, a), (_, b))| {
                 let delta_x = a.x - b.x;
                 let delta_y = a.y - b.y;
-                if delta_x * delta_x + delta_y * delta_y < 4.0 {
-                    world.send(CollisionEvent { entity_a, entity_b });
-                }
-            }
+                delta_x * delta_x + delta_y * delta_y < 4.0
+            })
+            .map(|((entity_a, _), (entity_b, _))| (entity_a, entity_b))
+            .collect();
+        for (entity_a, entity_b) in collisions {
+            world.send(CollisionEvent { entity_a, entity_b });
         }
 
         for event in world.consume_events::<CollisionEvent>(&mut collision_cursor) {

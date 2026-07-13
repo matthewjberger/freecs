@@ -991,6 +991,52 @@ let selected_count = world
     .count();
 assert_eq!(selected_count, 1);
 
+// The added filter matches entities that gained the component since the
+// last step, by spawn or by component add; mutation does not retrigger it,
+// and the stamp rides along through table migrations.
+world
+    .query_ref::<&Position>()
+    .added::<Position>()
+    .iter()
+    .for_each(|(entity, _position)| println!("{entity} appeared this frame"));
+
+// single() is the exactly-one-match read, and iter_combinations() yields
+// each unordered pair of matches once, for pairwise logic like collision.
+if let Some((entity, (_position, velocity))) =
+    world.query_ref::<(&Position, &Velocity)>().single()
+{
+    println!("the one mover is {entity} at {}", velocity.x);
+}
+for ((entity_a, a), (entity_b, b)) in world.query_ref::<&Position>().iter_combinations() {
+    let _ = (entity_a, entity_b, a.x - b.x);
+}
+
+// Hierarchies are plain ChildOf links, pull-maintained: children() scans on
+// demand and despawn_recursive() follows the links breadth-first.
+use freecs::dynamic::ChildOf;
+let parent = world.spawn((Position::default(),));
+let child = world.spawn((Position::default(), ChildOf(parent)));
+assert_eq!(world.children(parent), vec![child]);
+world.despawn_recursive(parent);
+assert!(!world.is_alive(child));
+
+// Deferred spawns hand back the entity immediately, alive with no
+// components until apply_commands runs the queued bundle write.
+let reserved = world.queue_spawn((Position::default(),));
+world.apply_commands();
+assert!(world.get::<Position>(reserved).is_some());
+
+// Inspection for editors and tooling: what does this entity carry, and
+// which component is behind this name?
+for info in world.entity_components(reserved) {
+    let _ = (info.type_name, info.mask);
+}
+assert!(
+    world
+        .component_by_name(std::any::type_name::<Position>())
+        .is_some()
+);
+
 // One call clears every entity carrying any of the listed components.
 world.despawn_with_any::<(Position, Velocity)>();
 assert_eq!(world.entity_count(), 0);
@@ -998,7 +1044,7 @@ assert_eq!(world.entity_count(), 0);
 
 Three access tiers, from ergonomic to explicit:
 
-- **Typed**: `spawn(bundle)` / `spawn_bundles(bundle, count)`, `get::<T>` / `set` / `remove`, `query::<(&mut A, &B)>()` with `Option<&T>` elements, up to eight per tuple, and bare single elements (`query::<&mut A>()`), `query_ref` iterators on `&world`, marker-type tags (`add_tag_type::<T>`, `with_tag_type::<T>()`), `despawn_with_any::<(A, B)>()`, `resource_scope` / `resources_scope` over tuples, `send(event)` / `consume_events::<T>(&mut cursor)`, `insert_resource` / `resource::<T>()` / `expect_resource::<T>()`. `TypeId` lookups happen at registration and per typed call, never inside iteration loops.
+- **Typed**: `spawn(bundle)` / `spawn_bundles(bundle, count)` / `queue_spawn(bundle)` returning the handle before the command applies, `get::<T>` / `set` / `remove`, `query::<(&mut A, &B)>()` with `Option<&T>` elements, up to eight per tuple, and bare single elements (`query::<&mut A>()`), `changed::<T>()` and `added::<T>()` filters on both query forms, `query_ref` iterators on `&world` with `single()` and `iter_combinations()`, marker-type tags (`add_tag_type::<T>`, `with_tag_type::<T>()`), `despawn_with_any::<(A, B)>()`, `ChildOf` links with `children` / `despawn_recursive`, entity inspection (`entity_components`, `component_by_name`), `resource_scope` / `resources_scope` over tuples, `send(event)` / `consume_events::<T>(&mut cursor)`, `insert_resource` / `resource::<T>()` / `expect_resource::<T>()`. `TypeId` lookups happen at registration and per typed call, never inside iteration loops.
 - **Keyed**: `register::<T>()` returns a copyable `ComponentKey<T>` carrying the component's mask bit; `get_keyed` / `set_keyed` and mask-based `for_each` / `for_each_mut` skip the hash entirely.
 - **Raw tables**: `for_each_tables_mut(mask, 0, |table| ...)` with `table.columns_pair(a, b)` hoists concrete slices once per table for the tightest loops, no change stamping, same covenant as the static path.
 

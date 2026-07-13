@@ -15,7 +15,7 @@
 //! - **Structural Change Log**: Cursor-based log of spawns, despawns, component moves, and tag flips
 //! - **Multi-World**: Split components across multiple worlds for >64 component types
 //! - **Dynamic Worlds** (optional `dynamic` feature): register component types at
-//!   runtime with bevy-style bundles and typed queries, same storage underneath
+//!   runtime with bundle spawns and typed queries, same storage underneath
 //!
 //! The `ecs!` macro generates the entire ECS at compile time using only plain data structures, functions, and zero unsafe code.
 //!
@@ -1057,6 +1057,21 @@ impl<W> Schedule<W> {
             }),
         });
         self
+    }
+
+    /// Adds a system that runs only when the condition holds. The condition
+    /// reads the world at each pass; a false skips the system for that pass
+    /// without removing it from the schedule.
+    pub fn push_if<C, F>(&mut self, name: &'static str, condition: C, mut system: F) -> &mut Self
+    where
+        C: Fn(&W) -> bool + Send + 'static,
+        F: FnMut(&mut W) + Send + 'static,
+    {
+        self.push(name, move |world: &mut W| {
+            if condition(world) {
+                system(world);
+            }
+        })
     }
 
     pub fn insert_before<F>(&mut self, target: &str, name: &'static str, system: F) -> &mut Self
@@ -5625,6 +5640,30 @@ mod tests {
 
         assert!(channel.events_since(cursor_a).is_empty());
         assert!(channel.events_since(cursor_b).is_empty());
+    }
+
+    #[test]
+    fn test_schedule_push_if_gates_on_condition() {
+        let mut world = World::default();
+        world.spawn_entities(POSITION, 1);
+
+        let mut schedule = Schedule::new();
+        schedule.push_if(
+            "conditional",
+            |world: &World| world.entity_count() > 1,
+            |world: &mut World| {
+                let entity = world.get_all_entities()[0];
+                world.get_position_mut(entity).unwrap().x += 1.0;
+            },
+        );
+
+        schedule.run(&mut world);
+        let entity = world.get_all_entities()[0];
+        assert_eq!(world.get_position(entity).unwrap().x, 0.0);
+
+        world.spawn_entities(POSITION, 1);
+        schedule.run(&mut world);
+        assert_eq!(world.get_position(entity).unwrap().x, 1.0);
     }
 
     #[test]

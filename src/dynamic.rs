@@ -46,8 +46,11 @@
 //! Query tuples take up to eight elements of `&T`, `&mut T`, `Option<&T>`,
 //! or `Option<&mut T>`; optional elements yield `None` instead of narrowing
 //! the match, and single-component queries can skip the tuple entirely
-//! (`world.query::<&mut Position>()`). On a shared borrow,
-//! [`DynWorld::query_ref`] runs read-only tuples as a real [`Iterator`]:
+//! (`world.query::<&mut Position>()`). Both query forms filter by
+//! `changed::<T>()` (mutated since the last step) and `added::<T>()` (gained
+//! since the last step, surviving table migrations). On a shared borrow,
+//! [`DynWorld::query_ref`] runs read-only tuples as a real [`Iterator`],
+//! with `single()` and `iter_combinations()` on top:
 //!
 //! ```rust
 //! # use freecs::dynamic::DynWorld;
@@ -305,6 +308,13 @@ impl ComponentRegistry {
         Some(self.tag_key_for(tag_index))
     }
 
+    /// Finds a component by its registered type name, the full path
+    /// `std::any::type_name` reports at registration. Linear scan over the
+    /// schema; resolve once and hold the record when calling per frame.
+    pub fn component_by_name(&self, name: &str) -> Option<&ComponentInfo> {
+        self.components.iter().find(|info| info.type_name == name)
+    }
+
     fn tag_key_for(&self, tag_index: u32) -> TagKey {
         TagKey {
             tag_index,
@@ -347,14 +357,19 @@ impl ComponentRegistry {
     }
 }
 
-/// One erased column plus its change ticks. `data` always holds the `Vec<T>`
+/// One erased column plus its tick columns. `data` always holds the `Vec<T>`
 /// of the registered component; a hand-swapped wrong-type box panics on the
-/// next typed access rather than misbehaving.
+/// next typed access rather than misbehaving. `changed` restamps on every
+/// mutable access; `added` stamps when the component arrives on the entity
+/// and rides along through table migrations, which is what the `added`
+/// query filters compare against.
 pub struct ColumnSlot {
     pub component_index: u32,
     pub data: ErasedColumn,
     pub changed: Vec<u32>,
     pub peak_changed: u32,
+    pub added: Vec<u32>,
+    pub peak_added: u32,
 }
 
 /// An archetype table for dynamic worlds: entities plus one [`ColumnSlot`]
@@ -497,6 +512,7 @@ pub struct DynWorld {
     pub table_lookup: HashMap<u64, usize>,
     pub table_edges: Vec<ArchetypeEdges>,
     pub query_cache: HashMap<u64, Vec<usize>>,
+    pub added_scratch: Vec<bool>,
     pub current_tick: u32,
     pub last_tick: u32,
     pub structural_log: Vec<StructuralChange>,
@@ -552,6 +568,7 @@ impl DynWorld {
             table_lookup: HashMap::new(),
             table_edges: Vec::new(),
             query_cache: HashMap::new(),
+            added_scratch: Vec::new(),
             current_tick: 0,
             last_tick: 0,
             structural_log: Vec::new(),
@@ -604,6 +621,23 @@ impl DynWorld {
         self.registry.remaining_bits()
     }
 
+    /// The components an entity currently carries, as registry records with
+    /// their type names, masks, and vtables. Dead or rowless entities yield
+    /// nothing. This is the inspection surface for editors and tooling; pair
+    /// it with [`ComponentRegistry::component_by_name`] to go the other way.
+    pub fn entity_components(&self, entity: Entity) -> impl Iterator<Item = &ComponentInfo> + '_ {
+        let mask = self.component_mask(entity).unwrap_or(0);
+        self.registry
+            .components
+            .iter()
+            .filter(move |info| info.mask & mask != 0)
+    }
+
+    /// Delegates to [`ComponentRegistry::component_by_name`].
+    pub fn component_by_name(&self, name: &str) -> Option<&ComponentInfo> {
+        self.registry.component_by_name(name)
+    }
+
     fn check_key(&self, registry_id: u32) {
         debug_assert_eq!(
             registry_id, self.registry.registry_id,
@@ -651,6 +685,8 @@ impl DynWorld {
                     data: (info.new_column)(),
                     changed: Vec::new(),
                     peak_changed: self.current_tick,
+                    added: Vec::new(),
+                    peak_added: self.current_tick,
                 });
             }
         }
@@ -709,10 +745,13 @@ impl DynWorld {
                 let info = &self.registry.components[column.component_index as usize];
                 (info.push_default)(column.data.as_mut(), count);
                 column.changed.reserve(count);
+                column.added.reserve(count);
                 for _ in 0..count {
                     column.changed.push(current_tick);
+                    column.added.push(current_tick);
                 }
                 column.peak_changed = current_tick;
+                column.peak_added = current_tick;
             }
             for &entity in &entities {
                 table.entity_indices.push(entity);
@@ -760,6 +799,7 @@ impl DynWorld {
             let info = &self.registry.components[column.component_index as usize];
             (info.swap_remove)(column.data.as_mut(), array_index);
             column.changed.swap_remove(array_index);
+            column.added.swap_remove(array_index);
         }
         table.entity_indices.swap_remove(array_index);
 
@@ -822,6 +862,34 @@ impl DynWorld {
         self.despawn_entities(&entities)
     }
 
+    /// Direct children of a parent: every entity whose [`ChildOf`] link
+    /// points at it. A full scan of `ChildOf` carriers on each call, pull
+    /// not push; cache user-side when it measures hot.
+    pub fn children(&self, parent: Entity) -> Vec<Entity> {
+        self.query_ref::<&ChildOf>()
+            .iter()
+            .filter(|(_entity, child_of)| child_of.0 == parent)
+            .map(|(entity, _child_of)| entity)
+            .collect()
+    }
+
+    /// Despawns an entity and every descendant reachable through
+    /// [`ChildOf`] links, breadth-first over on-demand scans. Link cycles
+    /// are tolerated, each entity despawns once. Returns the despawned
+    /// entities.
+    pub fn despawn_recursive(&mut self, root: Entity) -> Vec<Entity> {
+        let mut pending = vec![root];
+        let mut to_despawn: Vec<Entity> = Vec::new();
+        while let Some(parent) = pending.pop() {
+            if to_despawn.contains(&parent) {
+                continue;
+            }
+            to_despawn.push(parent);
+            pending.extend(self.children(parent));
+        }
+        self.despawn_entities(&to_despawn)
+    }
+
     /// Despawns through an external allocator, the grouped-worlds form used
     /// by [`DynEcs`].
     pub fn despawn_entities_in(
@@ -871,9 +939,12 @@ impl DynWorld {
                     from_index,
                     destination.columns[destination_position].data.as_mut(),
                 );
+                let carried_added = source.columns[source_position].added[from_index];
                 let destination_column = &mut destination.columns[destination_position];
                 destination_column.changed.push(tick);
                 destination_column.peak_changed = tick;
+                destination_column.added.push(carried_added);
+                destination_column.peak_added = tick;
             }
 
             let mut gained = destination.mask & !source.mask;
@@ -887,6 +958,8 @@ impl DynWorld {
                 (info.push_default)(destination_column.data.as_mut(), 1);
                 destination_column.changed.push(tick);
                 destination_column.peak_changed = tick;
+                destination_column.added.push(tick);
+                destination_column.peak_added = tick;
             }
 
             destination.entity_indices.push(entity);
@@ -960,6 +1033,8 @@ impl DynWorld {
                 (info.push_default)(column.data.as_mut(), 1);
                 column.changed.push(current_tick);
                 column.peak_changed = current_tick;
+                column.added.push(current_tick);
+                column.peak_added = current_tick;
             }
             table.entity_indices.push(entity);
         }
@@ -1803,6 +1878,26 @@ impl DynWorld {
             })));
     }
 
+    /// Queues a bundle spawn and returns the entity handle immediately, so
+    /// other queued commands and systems can reference it before it has
+    /// rows. The handle is allocated now, alive with no components, and
+    /// gains the bundle's components when
+    /// [`apply_commands`](Self::apply_commands) runs.
+    pub fn queue_spawn<B: Bundle + Send + 'static>(&mut self, bundle: B) -> Entity {
+        let entity = self.allocator.allocate();
+        self.queue(move |world| {
+            if !world.is_alive(entity) {
+                return;
+            }
+            let mask = B::component_mask(world);
+            if !world.contains_entity(entity) {
+                world.insert_row(entity, mask);
+            }
+            bundle.write(world, entity);
+        });
+        entity
+    }
+
     /// Queues an arbitrary deferred mutation.
     pub fn queue(&mut self, command: impl FnOnce(&mut DynWorld) + Send + 'static) {
         self.command_buffer
@@ -1926,6 +2021,7 @@ impl DynWorld {
             include,
             exclude: 0,
             changed_mask: 0,
+            added_mask: 0,
             include_tag_sets: [None; 4],
             exclude_tag_sets: [None; 4],
             marker: PhantomData,
@@ -1944,6 +2040,7 @@ impl DynWorld {
             include: 0,
             exclude: 0,
             changed_mask: 0,
+            added_mask: 0,
             include_tag_sets: [None; 4],
             exclude_tag_sets: [None; 4],
             dead: false,
@@ -2385,6 +2482,8 @@ mod snapshot {
                     column.data = (codec.decode_column)(payload)?;
                     column.changed = vec![snapshot.current_tick; table_snapshot.entities.len()];
                     column.peak_changed = snapshot.current_tick;
+                    column.added = vec![snapshot.current_tick; table_snapshot.entities.len()];
+                    column.peak_added = snapshot.current_tick;
                 }
 
                 for (array_index, &entity) in table_snapshot.entities.iter().enumerate() {
@@ -2552,11 +2651,17 @@ impl<T: Send + Sync + Default + 'static> QueryElement for &mut T {
         current_tick: u32,
     ) -> Self::Fetch<'table> {
         let slot = slot.expect("required query element column missing");
+        let ColumnSlot {
+            data,
+            changed,
+            peak_changed,
+            ..
+        } = slot;
         (
-            column_vec_mut::<T>(slot.data.as_mut()).as_mut_slice(),
-            slot.changed.as_mut_slice(),
+            column_vec_mut::<T>(data.as_mut()).as_mut_slice(),
+            changed.as_mut_slice(),
             current_tick,
-            &mut slot.peak_changed,
+            peak_changed,
         )
     }
 
@@ -2651,11 +2756,12 @@ pub trait ReadQueryElement: QueryElement {
     fn lookup_mask(world: &DynWorld) -> Option<u64>;
     fn read_fetch<'table>(slot: Option<&'table ColumnSlot>) -> Self::ReadFetch<'table>;
     fn read_changed_newer(fetch: Self::ReadFetch<'_>, index: usize, since_tick: u32) -> bool;
+    fn read_added_newer(fetch: Self::ReadFetch<'_>, index: usize, since_tick: u32) -> bool;
     fn read_item<'table>(fetch: Self::ReadFetch<'table>, index: usize) -> Self::Item<'table>;
 }
 
 impl<T: Send + Sync + Default + 'static> ReadQueryElement for &T {
-    type ReadFetch<'table> = (&'table [T], &'table [u32]);
+    type ReadFetch<'table> = (&'table [T], &'table [u32], &'table [u32]);
 
     fn lookup_mask(world: &DynWorld) -> Option<u64> {
         world.lookup_key::<T>().map(|key| key.mask)
@@ -2666,11 +2772,16 @@ impl<T: Send + Sync + Default + 'static> ReadQueryElement for &T {
         (
             column_vec::<T>(slot.data.as_ref()).as_slice(),
             slot.changed.as_slice(),
+            slot.added.as_slice(),
         )
     }
 
     fn read_changed_newer(fetch: Self::ReadFetch<'_>, index: usize, since_tick: u32) -> bool {
         tick_is_newer(fetch.1[index], since_tick)
+    }
+
+    fn read_added_newer(fetch: Self::ReadFetch<'_>, index: usize, since_tick: u32) -> bool {
+        tick_is_newer(fetch.2[index], since_tick)
     }
 
     fn read_item<'table>(fetch: Self::ReadFetch<'table>, index: usize) -> Self::Item<'table> {
@@ -2679,7 +2790,7 @@ impl<T: Send + Sync + Default + 'static> ReadQueryElement for &T {
 }
 
 impl<T: Send + Sync + Default + 'static> ReadQueryElement for Option<&T> {
-    type ReadFetch<'table> = Option<(&'table [T], &'table [u32])>;
+    type ReadFetch<'table> = Option<(&'table [T], &'table [u32], &'table [u32])>;
 
     fn lookup_mask(world: &DynWorld) -> Option<u64> {
         world.lookup_key::<T>().map(|key| key.mask)
@@ -2691,6 +2802,10 @@ impl<T: Send + Sync + Default + 'static> ReadQueryElement for Option<&T> {
 
     fn read_changed_newer(fetch: Self::ReadFetch<'_>, index: usize, since_tick: u32) -> bool {
         fetch.is_some_and(|fetch| tick_is_newer(fetch.1[index], since_tick))
+    }
+
+    fn read_added_newer(fetch: Self::ReadFetch<'_>, index: usize, since_tick: u32) -> bool {
+        fetch.is_some_and(|fetch| tick_is_newer(fetch.2[index], since_tick))
     }
 
     fn read_item<'table>(fetch: Self::ReadFetch<'table>, index: usize) -> Self::Item<'table> {
@@ -2741,6 +2856,13 @@ pub trait ReadQueryTuple: QueryTuple {
         index: usize,
         element_masks: &[u64; 8],
         changed_mask: u64,
+        since_tick: u32,
+    ) -> bool;
+    fn read_added_newer(
+        fetch: Self::ReadFetch<'_>,
+        index: usize,
+        element_masks: &[u64; 8],
+        added_mask: u64,
         since_tick: u32,
     ) -> bool;
     fn read_item<'table>(fetch: Self::ReadFetch<'table>, index: usize) -> Self::Item<'table>;
@@ -3008,6 +3130,19 @@ macro_rules! impl_bare_element_read_query {
                         )
                 }
 
+                fn read_added_newer(
+                    fetch: Self::ReadFetch<'_>,
+                    index: usize,
+                    element_masks: &[u64; 8],
+                    added_mask: u64,
+                    since_tick: u32,
+                ) -> bool {
+                    added_mask & element_masks[0] != 0
+                        && <$element as ReadQueryElement>::read_added_newer(
+                            fetch, index, since_tick,
+                        )
+                }
+
                 fn read_item<'table>(
                     fetch: Self::ReadFetch<'table>,
                     index: usize,
@@ -3065,6 +3200,24 @@ macro_rules! impl_read_query_tuple {
                 newer
             }
 
+            fn read_added_newer(
+                fetch: Self::ReadFetch<'_>,
+                index: usize,
+                element_masks: &[u64; 8],
+                added_mask: u64,
+                since_tick: u32,
+            ) -> bool {
+                let mut newer = false;
+                $(
+                    if added_mask & element_masks[$position] != 0
+                        && $element::read_added_newer(fetch.$position, index, since_tick)
+                    {
+                        newer = true;
+                    }
+                )+
+                newer
+            }
+
             fn read_item<'table>(
                 fetch: Self::ReadFetch<'table>,
                 index: usize,
@@ -3104,6 +3257,7 @@ pub struct DynQuery<'world, Q: QueryTuple> {
     pub include: u64,
     pub exclude: u64,
     pub changed_mask: u64,
+    pub added_mask: u64,
     pub include_tag_sets: [Option<&'world SparseTagSet>; 4],
     pub exclude_tag_sets: [Option<&'world SparseTagSet>; 4],
     pub marker: PhantomData<Q>,
@@ -3206,11 +3360,21 @@ impl<'world, Q: QueryTuple> DynQuery<'world, Q> {
         self
     }
 
+    /// Only visit entities that gained `T` since the last step, whether by
+    /// spawn or by a component add; mutating `T` does not retrigger this, and
+    /// the added stamp rides along through table migrations. `T` must be one
+    /// of the tuple's components.
+    pub fn added<T: Send + Sync + Default + 'static>(mut self) -> Self {
+        let mask = self.world.component_key::<T>().mask;
+        self.added_mask |= mask;
+        self
+    }
+
     pub fn for_each(self, mut f: impl for<'item> FnMut(Entity, Q::Item<'item>)) {
         let element_masks = Q::element_masks(self.world);
         let tuple_mask = element_masks.iter().fold(0, |mask, element| mask | element);
         assert_eq!(
-            self.changed_mask & !tuple_mask,
+            (self.changed_mask | self.added_mask) & !tuple_mask,
             0,
             "changed filters must name components present in the query tuple"
         );
@@ -3224,10 +3388,12 @@ impl<'world, Q: QueryTuple> DynQuery<'world, Q> {
         let since_tick = self.world.last_tick;
         let current_tick = self.world.current_tick;
         let changed_mask = self.changed_mask;
+        let added_mask = self.added_mask;
 
         let has_row_filters = tag_include != 0
             || tag_exclude != 0
             || changed_mask != 0
+            || added_mask != 0
             || self.include_tag_sets.iter().any(Option::is_some)
             || self.exclude_tag_sets.iter().any(Option::is_some);
 
@@ -3237,12 +3403,28 @@ impl<'world, Q: QueryTuple> DynQuery<'world, Q> {
             self.world.tables.iter().map(|table| table.mask),
             component_include,
         );
+        let added_scratch = &mut self.world.added_scratch;
         let tables = &mut self.world.tables;
 
         for &table_index in table_indices {
             let table = &mut tables[table_index];
             if table.mask & component_exclude != 0 {
                 continue;
+            }
+
+            if added_mask != 0 {
+                added_scratch.clear();
+                added_scratch.resize(table.entity_indices.len(), false);
+                for column in &table.columns {
+                    if added_mask & (1u64 << column.component_index) == 0 {
+                        continue;
+                    }
+                    for (row, &added_tick) in column.added.iter().enumerate() {
+                        if tick_is_newer(added_tick, since_tick) {
+                            added_scratch[row] = true;
+                        }
+                    }
+                }
             }
 
             let table_mask = table.mask;
@@ -3269,6 +3451,9 @@ impl<'world, Q: QueryTuple> DynQuery<'world, Q> {
                             since_tick,
                         )
                     {
+                        continue;
+                    }
+                    if added_mask != 0 && !added_scratch[index] {
                         continue;
                     }
                     visited = true;
@@ -3299,6 +3484,7 @@ pub struct DynQueryRef<'world, Q: ReadQueryTuple> {
     pub include: u64,
     pub exclude: u64,
     pub changed_mask: u64,
+    pub added_mask: u64,
     pub include_tag_sets: [Option<&'world SparseTagSet>; 4],
     pub exclude_tag_sets: [Option<&'world SparseTagSet>; 4],
     pub dead: bool,
@@ -3378,6 +3564,17 @@ impl<'world, Q: ReadQueryTuple> DynQueryRef<'world, Q> {
         self
     }
 
+    /// Only visit entities that gained `T` since the last step, whether by
+    /// spawn or by a component add; mutating `T` does not retrigger this.
+    /// `T` must be one of the tuple's components.
+    pub fn added<T: Send + Sync + Default + 'static>(mut self) -> Self {
+        match self.world.lookup_key::<T>() {
+            Some(key) => self.added_mask |= key.mask,
+            None => self.dead = true,
+        }
+        self
+    }
+
     /// Runs the query as an iterator of `(Entity, items)`. Items borrow the
     /// world, not the iterator, so they survive collection.
     pub fn iter(self) -> DynQueryRefIter<'world, Q> {
@@ -3395,9 +3592,9 @@ impl<'world, Q: ReadQueryTuple> DynQueryRef<'world, Q> {
         if !done {
             let tuple_mask = element_masks.iter().fold(0, |mask, element| mask | element);
             assert_eq!(
-                self.changed_mask & !tuple_mask,
+                (self.changed_mask | self.added_mask) & !tuple_mask,
                 0,
-                "changed filters must name components present in the query tuple"
+                "changed and added filters must name components present in the query tuple"
             );
         }
 
@@ -3431,6 +3628,7 @@ impl<'world, Q: ReadQueryTuple> DynQueryRef<'world, Q> {
             include_tag_sets: self.include_tag_sets,
             exclude_tag_sets: self.exclude_tag_sets,
             changed_mask: self.changed_mask,
+            added_mask: self.added_mask,
             since_tick: self.world.last_tick,
             cached_tables,
             table_index: 0,
@@ -3438,6 +3636,61 @@ impl<'world, Q: ReadQueryTuple> DynQueryRef<'world, Q> {
             current: None,
             done,
         }
+    }
+
+    /// The exactly-one match: `Some` when precisely one entity matches,
+    /// `None` for zero or several. The get-the-player call; take the entity
+    /// and go back through `get_mut` when you need to write.
+    pub fn single(self) -> Option<(Entity, Q::Item<'world>)> {
+        let mut matches = self.iter();
+        let first = matches.next()?;
+        if matches.next().is_some() {
+            return None;
+        }
+        Some(first)
+    }
+
+    /// Every unordered pair of distinct matches, for pairwise logic like
+    /// collision tests. Items are shared borrows of the world, so pairs are
+    /// `Copy` and this is a real [`Iterator`]. Matches are collected once up
+    /// front, one `(Entity, item)` per match.
+    pub fn iter_combinations(self) -> DynQueryCombinations<'world, Q>
+    where
+        Q::Item<'world>: Copy,
+    {
+        DynQueryCombinations {
+            items: self.iter().collect(),
+            first: 0,
+            second: 1,
+        }
+    }
+}
+
+/// The iterator behind [`DynQueryRef::iter_combinations`]: yields each
+/// unordered pair of distinct matches exactly once, in match order.
+pub struct DynQueryCombinations<'world, Q: ReadQueryTuple> {
+    pub items: Vec<(Entity, Q::Item<'world>)>,
+    pub first: usize,
+    pub second: usize,
+}
+
+impl<'world, Q: ReadQueryTuple> Iterator for DynQueryCombinations<'world, Q>
+where
+    Q::Item<'world>: Copy,
+{
+    type Item = ((Entity, Q::Item<'world>), (Entity, Q::Item<'world>));
+
+    fn next(&mut self) -> Option<Self::Item> {
+        while self.second >= self.items.len() {
+            if self.first + 2 >= self.items.len() {
+                return None;
+            }
+            self.first += 1;
+            self.second = self.first + 1;
+        }
+        let pair = (self.items[self.first], self.items[self.second]);
+        self.second += 1;
+        Some(pair)
     }
 }
 
@@ -3456,6 +3709,7 @@ pub struct DynQueryRefIter<'world, Q: ReadQueryTuple> {
     pub include_tag_sets: [Option<&'world SparseTagSet>; 4],
     pub exclude_tag_sets: [Option<&'world SparseTagSet>; 4],
     pub changed_mask: u64,
+    pub added_mask: u64,
     pub since_tick: u32,
     pub cached_tables: Option<&'world [usize]>,
     pub table_index: usize,
@@ -3491,6 +3745,17 @@ impl<'world, Q: ReadQueryTuple> Iterator for DynQueryRefIter<'world, Q> {
                             index,
                             &self.element_masks,
                             self.changed_mask,
+                            self.since_tick,
+                        )
+                    {
+                        continue;
+                    }
+                    if self.added_mask != 0
+                        && !Q::read_added_newer(
+                            fetch,
+                            index,
+                            &self.element_masks,
+                            self.added_mask,
                             self.since_tick,
                         )
                     {
@@ -3589,6 +3854,14 @@ impl_bundle!(A, B, C, D, E);
 impl_bundle!(A, B, C, D, E, F);
 impl_bundle!(A, B, C, D, E, F, G);
 impl_bundle!(A, B, C, D, E, F, G, H);
+
+/// A parent link for entity hierarchies: plain data, pull-maintained, no
+/// hooks. Attach with `world.set(child, ChildOf(parent))`;
+/// [`DynWorld::children`] and [`DynWorld::despawn_recursive`] scan it on
+/// demand, and a link to a despawned parent is just a link nothing resolves.
+#[derive(Default, Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct ChildOf(pub Entity);
 
 /// A tuple of resource types taken out of the world together by
 /// [`DynWorld::resources_scope`]. Implemented for tuples of up to eight
@@ -4547,6 +4820,188 @@ mod tests {
         world.register_tag();
         world.tag_key::<Health>();
         assert_eq!(world.remaining_bits(), 60);
+    }
+
+    #[test]
+    fn test_added_filter_matches_spawns_and_component_adds_only() {
+        let mut world = DynWorld::new();
+        let velocity = world.register::<Velocity>();
+        let veteran = world.spawn((Position::default(),));
+
+        world.step();
+        let fresh = world.spawn((Position::default(),));
+        world.add_components(veteran, velocity.mask);
+        let mut added_positions = Vec::new();
+        world
+            .query::<&Position>()
+            .added::<Position>()
+            .for_each(|entity, _position| added_positions.push(entity));
+        assert_eq!(
+            added_positions,
+            vec![fresh],
+            "a migration must carry the original added tick"
+        );
+
+        let mut added_velocities = Vec::new();
+        world
+            .query::<&Velocity>()
+            .added::<Velocity>()
+            .for_each(|entity, _velocity| added_velocities.push(entity));
+        assert_eq!(added_velocities, vec![veteran]);
+
+        world.step();
+        world.get_mut::<Position>(fresh).unwrap().x = 5.0;
+        let added_now: Vec<Entity> = world
+            .query_ref::<&Position>()
+            .added::<Position>()
+            .iter()
+            .map(|(entity, _position)| entity)
+            .collect();
+        assert!(
+            added_now.is_empty(),
+            "mutation must not retrigger the added filter"
+        );
+        let changed_now: Vec<Entity> = world
+            .query_ref::<&Position>()
+            .changed::<Position>()
+            .iter()
+            .map(|(entity, _position)| entity)
+            .collect();
+        assert_eq!(changed_now, vec![fresh]);
+    }
+
+    #[test]
+    #[should_panic(expected = "added filters must name components")]
+    fn test_added_filter_rejects_types_outside_tuple() {
+        let mut world = DynWorld::new();
+        world.register::<Velocity>();
+        world.spawn((Position::default(),));
+        world
+            .query_ref::<&Position>()
+            .added::<Velocity>()
+            .iter()
+            .count();
+    }
+
+    #[test]
+    fn test_queue_spawn_returns_live_handle_before_apply() {
+        let mut world = DynWorld::new();
+
+        let entity = world.queue_spawn((Position { x: 3.0, y: 0.0 }, Velocity::default()));
+        assert!(world.is_alive(entity));
+        assert!(world.get::<Position>(entity).is_none());
+
+        world.queue_set(entity, Health { value: 50.0 });
+        world.apply_commands();
+
+        assert_eq!(world.get::<Position>(entity).unwrap().x, 3.0);
+        assert_eq!(world.get::<Health>(entity).unwrap().value, 50.0);
+    }
+
+    #[test]
+    fn test_entity_components_and_component_by_name() {
+        let mut world = DynWorld::new();
+        let entity = world.spawn((Position::default(), Velocity::default()));
+        world.register::<Health>();
+
+        let mut names: Vec<&str> = world
+            .entity_components(entity)
+            .map(|info| info.type_name)
+            .collect();
+        names.sort_unstable();
+        assert_eq!(names.len(), 2);
+        assert!(names[0].ends_with("Position"));
+        assert!(names[1].ends_with("Velocity"));
+
+        let position_name = std::any::type_name::<Position>();
+        let info = world.component_by_name(position_name).unwrap();
+        assert_eq!(info.mask, world.lookup_key::<Position>().unwrap().mask);
+        assert!(world.component_by_name("no::such::Component").is_none());
+
+        let dead = world.spawn((Position::default(),));
+        world.despawn_entities(&[dead]);
+        assert_eq!(world.entity_components(dead).count(), 0);
+    }
+
+    #[test]
+    fn test_iter_combinations_yields_each_pair_once() {
+        let mut world = DynWorld::new();
+        let first = world.spawn((Position { x: 1.0, y: 0.0 },));
+        let second = world.spawn((Position { x: 2.0, y: 0.0 },));
+        let third = world.spawn((Position { x: 3.0, y: 0.0 },));
+
+        let pairs: Vec<(Entity, Entity)> = world
+            .query_ref::<&Position>()
+            .iter_combinations()
+            .map(|((entity_a, _), (entity_b, _))| (entity_a, entity_b))
+            .collect();
+        assert_eq!(
+            pairs,
+            vec![(first, second), (first, third), (second, third)]
+        );
+
+        let total: f32 = world
+            .query_ref::<&Position>()
+            .iter_combinations()
+            .map(|((_, a), (_, b))| a.x + b.x)
+            .sum();
+        assert_eq!(total, 12.0);
+
+        world.despawn_entities(&[second, third]);
+        assert_eq!(
+            world.query_ref::<&Position>().iter_combinations().count(),
+            0
+        );
+    }
+
+    #[test]
+    fn test_single_matches_exactly_one() {
+        struct Player;
+
+        let mut world = DynWorld::new();
+        assert!(world.query_ref::<&Position>().single().is_none());
+
+        let player = world.spawn((Position { x: 7.0, y: 0.0 },));
+        world.add_tag_type::<Player>(player);
+        let (entity, position) = world.query_ref::<&Position>().single().unwrap();
+        assert_eq!(entity, player);
+        assert_eq!(position.x, 7.0);
+
+        world.spawn((Position::default(),));
+        assert!(world.query_ref::<&Position>().single().is_none());
+        assert!(
+            world
+                .query_ref::<&Position>()
+                .with_tag_type::<Player>()
+                .single()
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn test_despawn_recursive_follows_child_links() {
+        let mut world = DynWorld::new();
+        let root = world.spawn((Position::default(),));
+        let child = world.spawn((Position::default(), ChildOf(root)));
+        let grandchild = world.spawn((Position::default(), ChildOf(child)));
+        let bystander = world.spawn((Position::default(),));
+
+        assert_eq!(world.children(root), vec![child]);
+        assert_eq!(world.children(child), vec![grandchild]);
+
+        let despawned = world.despawn_recursive(root);
+        assert_eq!(despawned.len(), 3);
+        assert!(!world.is_alive(root));
+        assert!(!world.is_alive(child));
+        assert!(!world.is_alive(grandchild));
+        assert!(world.is_alive(bystander));
+
+        let cycle_a = world.spawn((ChildOf(bystander),));
+        let cycle_b = world.spawn((ChildOf(cycle_a),));
+        world.set(cycle_a, ChildOf(cycle_b));
+        let despawned = world.despawn_recursive(cycle_a);
+        assert_eq!(despawned.len(), 2, "link cycles must terminate");
+        assert!(world.is_alive(bystander));
     }
 
     #[test]
