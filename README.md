@@ -1368,6 +1368,13 @@ if let Some(mask) = named_mask {
 }
 ```
 
+With the `snapshot` feature, serde-registered components also move as
+values: `set_component_by_name` / `get_component_by_name` exchange one
+component as codec bytes resolved by type name (grouped worlds route the
+name to the owning member), so an editor protocol reads and writes any
+component over the wire with no per-type dispatch. Writes add the
+component when absent and stamp change ticks like any `set`.
+
 Three access tiers, from ergonomic to explicit:
 
 - **Typed**: `spawn(bundle)` / `spawn_bundles(bundle, count)` / `queue_spawn(bundle)` returning the handle before the command applies, `get::<T>` / `set` / `remove`, `query::<(&mut A, &B)>()` with `Option<&T>` elements, up to eight per tuple, and bare single elements (`query::<&mut A>()`), `changed::<T>()` and `added::<T>()` filters on both query forms, `query_ref` iterators on `&world` with `single()` and `iter_combinations()`, marker-type tags (`add_tag_type::<T>`, `with_tag_type::<T>()`), `despawn_with_any::<(A, B)>()`, `ChildOf` links with `children` / `despawn_recursive`, entity inspection (`entity_components`, `component_by_name`), `resource_scope` / `resources_scope` over tuples, `send(event)` / `consume_events::<T>(&mut cursor)`, `insert_resource` / `resource::<T>()` / `expect_resource::<T>()`. `TypeId` lookups happen at registration and per typed call, never inside iteration loops.
@@ -1421,7 +1428,9 @@ Mutable elements in two different worlds panic; mutate your own state and
 read theirs, or co-locate the types in one schema when a hot loop needs
 slice speed for everything (registries compose, so two parts sharing a
 member world is a declaration choice, not a framework feature). A tuple
-that resolves to one world degenerates to a plain scan:
+that resolves to one world degenerates to a plain scan. Joins filter by
+group marker tags (`with_tag_type` / `without_tag_type`) and by
+driver-world `changed` / `added` windows:
 
 ```rust
 ecs.query_join::<(&mut Position, &Burning)>()

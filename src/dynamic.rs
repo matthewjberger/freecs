@@ -266,6 +266,8 @@ impl ComponentRegistry {
         self.register_codec::<T>(ComponentCodec {
             encode_column: encode_column_postcard::<T>,
             decode_column: decode_column_postcard::<T>,
+            encode_value: encode_value_postcard::<T>,
+            apply_value: apply_value_postcard::<T>,
         })
     }
 
@@ -2365,6 +2367,10 @@ impl DynEcs {
     pub fn query_join<Q: QueryTuple>(&mut self) -> DynJoin<'_, Q> {
         DynJoin {
             ecs: self,
+            include_tag_types: [None; 4],
+            exclude_tag_types: [None; 4],
+            changed_lookups: [None; 4],
+            added_lookups: [None; 4],
             marker: PhantomData,
         }
     }
@@ -2689,10 +2695,41 @@ mod snapshot {
     /// like the rest of the registry's vtable. The built-in pair encodes the
     /// whole `Vec<T>` with postcard; any byte format works as long as encode
     /// and decode agree.
+    /// Encodes one entity's component as codec bytes; `None` when absent.
+    pub type EncodeValueFn = fn(&DynWorld, Entity) -> Option<Result<Vec<u8>, SnapshotError>>;
+
     #[derive(Clone, Copy)]
     pub struct ComponentCodec {
         pub encode_column: fn(&(dyn Any + Send + Sync)) -> Result<Vec<u8>, SnapshotError>,
         pub decode_column: fn(&[u8]) -> Result<ErasedColumn, SnapshotError>,
+        pub encode_value: EncodeValueFn,
+        pub apply_value: fn(&mut DynWorld, Entity, &[u8]) -> Result<(), SnapshotError>,
+    }
+
+    pub(super) fn encode_value_postcard<T>(
+        world: &DynWorld,
+        entity: Entity,
+    ) -> Option<Result<Vec<u8>, SnapshotError>>
+    where
+        T: serde::Serialize + Send + Sync + Default + 'static,
+    {
+        world.get::<T>(entity).map(|value| {
+            postcard::to_allocvec(value).map_err(|error| SnapshotError::Codec(error.to_string()))
+        })
+    }
+
+    pub(super) fn apply_value_postcard<T>(
+        world: &mut DynWorld,
+        entity: Entity,
+        bytes: &[u8],
+    ) -> Result<(), SnapshotError>
+    where
+        T: serde::de::DeserializeOwned + Send + Sync + Default + 'static,
+    {
+        let value: T =
+            postcard::from_bytes(bytes).map_err(|error| SnapshotError::Codec(error.to_string()))?;
+        world.set(entity, value);
+        Ok(())
     }
 
     pub(super) fn encode_column_postcard<T>(
@@ -2722,6 +2759,8 @@ mod snapshot {
         SchemaMismatch { expected: String, found: String },
         /// A column failed to encode or decode.
         Codec(String),
+        /// No registered component carries the requested type name.
+        UnknownComponent(String),
     }
 
     impl std::fmt::Display for SnapshotError {
@@ -2735,6 +2774,9 @@ mod snapshot {
                     "registry schema mismatch: snapshot has {expected}, registry has {found}"
                 ),
                 SnapshotError::Codec(message) => write!(formatter, "codec error: {message}"),
+                SnapshotError::UnknownComponent(name) => {
+                    write!(formatter, "no registered component is named {name}")
+                }
             }
         }
     }
@@ -2797,6 +2839,44 @@ mod snapshot {
     }
 
     impl DynWorld {
+        fn value_codec(&self, name: &str) -> Result<&ComponentCodec, SnapshotError> {
+            let info = self
+                .registry
+                .component_by_name(name)
+                .ok_or_else(|| SnapshotError::UnknownComponent(name.to_string()))?;
+            self.registry.codecs[info.mask.trailing_zeros() as usize]
+                .as_ref()
+                .ok_or(SnapshotError::MissingCodec(info.type_name))
+        }
+
+        /// Sets one component on an entity from codec bytes, resolved by
+        /// registered type name, adding the component when the entity lacks
+        /// it and stamping change ticks like any `set`. The wire format is
+        /// whatever the component's codec chose, postcard for
+        /// `register_serde` components; together with
+        /// [`Self::get_component_by_name`] this is the value-level door for
+        /// editors and protocols, no per-component dispatch required.
+        pub fn set_component_by_name(
+            &mut self,
+            entity: Entity,
+            name: &str,
+            bytes: &[u8],
+        ) -> Result<(), SnapshotError> {
+            let apply = self.value_codec(name)?.apply_value;
+            apply(self, entity, bytes)
+        }
+
+        /// One component's codec bytes for an entity, resolved by registered
+        /// type name. `Ok(None)` when the entity does not carry it.
+        pub fn get_component_by_name(
+            &self,
+            entity: Entity,
+            name: &str,
+        ) -> Result<Option<Vec<u8>>, SnapshotError> {
+            let encode = self.value_codec(name)?.encode_value;
+            encode(self, entity).transpose()
+        }
+
         /// Captures the world. Fails with [`SnapshotError::MissingCodec`] if
         /// any component stored in a table was registered without a codec.
         pub fn snapshot(&self) -> Result<DynWorldSnapshot, SnapshotError> {
@@ -2919,6 +2999,37 @@ mod snapshot {
     }
 
     impl DynEcs {
+        /// [`DynWorld::set_component_by_name`] routed to the member world
+        /// whose registry carries the name.
+        pub fn set_component_by_name(
+            &mut self,
+            entity: Entity,
+            name: &str,
+            bytes: &[u8],
+        ) -> Result<(), SnapshotError> {
+            let index = self
+                .worlds
+                .iter()
+                .position(|world| world.registry.component_by_name(name).is_some())
+                .ok_or_else(|| SnapshotError::UnknownComponent(name.to_string()))?;
+            self.worlds[index].set_component_by_name(entity, name, bytes)
+        }
+
+        /// [`DynWorld::get_component_by_name`] routed to the member world
+        /// whose registry carries the name.
+        pub fn get_component_by_name(
+            &self,
+            entity: Entity,
+            name: &str,
+        ) -> Result<Option<Vec<u8>>, SnapshotError> {
+            let index = self
+                .worlds
+                .iter()
+                .position(|world| world.registry.component_by_name(name).is_some())
+                .ok_or_else(|| SnapshotError::UnknownComponent(name.to_string()))?;
+            self.worlds[index].get_component_by_name(entity, name)
+        }
+
         pub fn snapshot(&self) -> Result<DynEcsSnapshot, SnapshotError> {
             let mut worlds = Vec::with_capacity(self.worlds.len());
             for world in &self.worlds {
@@ -2984,7 +3095,9 @@ pub use snapshot::{
 };
 
 #[cfg(feature = "snapshot")]
-use snapshot::{decode_column_postcard, encode_column_postcard};
+use snapshot::{
+    apply_value_postcard, decode_column_postcard, encode_column_postcard, encode_value_postcard,
+};
 
 mod sealed {
     pub trait SealedElement {}
@@ -3270,6 +3383,16 @@ impl<T: Send + Sync + Default + 'static> ReadQueryElement for Option<&T> {
 /// `Option<&T>`, and `Option<&mut T>` up to eight elements; all component
 /// types in one tuple must be distinct. Only the non-optional elements
 /// constrain which entities the query visits.
+/// The row filters one cross-world join carries: group tag sets to
+/// include and exclude, and driver-world changed/added masks. Plain data,
+/// resolved by [`DynJoin::for_each`] before the worlds are split.
+pub struct JoinFilters<'sets> {
+    pub include_sets: [Option<&'sets SparseTagSet>; 4],
+    pub exclude_sets: [Option<&'sets SparseTagSet>; 4],
+    pub changed_mask: u64,
+    pub added_mask: u64,
+}
+
 /// One query-tuple element's routing facts for a cross-world join: which
 /// member world holds its type, whether the element narrows the match, and
 /// whether it writes (writers must share one world, the driver).
@@ -3291,6 +3414,7 @@ pub trait QueryTuple: sealed::SealedQueryTuple {
     fn join_for_each<F: for<'item> FnMut(Entity, Self::Item<'item>)>(
         driver: &mut DynWorld,
         element_worlds: &[Option<&DynWorld>; 8],
+        filters: &JoinFilters<'_>,
         f: F,
     );
     fn fetch<'table>(
@@ -3450,6 +3574,7 @@ macro_rules! impl_query_tuple {
             fn join_for_each<FN: for<'item> FnMut(Entity, Self::Item<'item>)>(
                 driver: &mut DynWorld,
                 element_worlds: &[Option<&DynWorld>; 8],
+                filters: &JoinFilters<'_>,
                 mut f: FN,
             ) {
                 let mut element_masks = [0u64; 8];
@@ -3462,6 +3587,7 @@ macro_rules! impl_query_tuple {
                         }
                     }
                 )+
+                let since_tick = driver.last_tick;
                 let current_tick = driver.current_tick;
                 let table_indices = archetype_cached_tables(
                     &mut driver.query_cache,
@@ -3486,6 +3612,22 @@ macro_rules! impl_query_tuple {
                             None
                         },
                     )+];
+                    let added_scratch: Vec<bool> = if filters.added_mask != 0 {
+                        let mut scratch = vec![false; entity_indices.len()];
+                        for column in columns.iter() {
+                            if filters.added_mask & (1u64 << column.component_index) == 0 {
+                                continue;
+                            }
+                            for (row, &added_tick) in column.added.iter().enumerate() {
+                                if tick_is_newer(added_tick, since_tick) {
+                                    scratch[row] = true;
+                                }
+                            }
+                        }
+                        scratch
+                    } else {
+                        Vec::new()
+                    };
                     let [$($element,)+] = distribute_slots(columns, positions);
                     $(
                         let mut $element = if element_worlds[$position].is_none() {
@@ -3496,6 +3638,29 @@ macro_rules! impl_query_tuple {
                     )+
                     let mut visited = false;
                     'rows: for (row_index, &entity) in entity_indices.iter().enumerate() {
+                        if !tag_sets_match(&filters.include_sets, &filters.exclude_sets, entity) {
+                            continue 'rows;
+                        }
+                        if filters.added_mask != 0 && !added_scratch[row_index] {
+                            continue 'rows;
+                        }
+                        if filters.changed_mask != 0 {
+                            let mut newer = false;
+                            $(
+                                if !newer
+                                    && filters.changed_mask & element_masks[$position] != 0
+                                    && let Some(fetch) = &$element
+                                    && <$element as QueryElement>::changed_newer(
+                                        fetch, row_index, since_tick,
+                                    )
+                                {
+                                    newer = true;
+                                }
+                            )+
+                            if !newer {
+                                continue 'rows;
+                            }
+                        }
                         $crate::paste::paste! {
                             $(
                                 let [<foreign_ $position>] = match element_worlds[$position] {
@@ -3647,6 +3812,7 @@ macro_rules! impl_bare_element_query {
                 fn join_for_each<FN: for<'item> FnMut(Entity, Self::Item<'item>)>(
                     driver: &mut DynWorld,
                     element_worlds: &[Option<&DynWorld>; 8],
+                    filters: &JoinFilters<'_>,
                     mut f: FN,
                 ) {
                     let mut element_masks = [0u64; 8];
@@ -3657,6 +3823,7 @@ macro_rules! impl_bare_element_query {
                             local_include |= element_masks[0];
                         }
                     }
+                    let since_tick = driver.last_tick;
                     let current_tick = driver.current_tick;
                     let table_indices = archetype_cached_tables(
                         &mut driver.query_cache,
@@ -3679,6 +3846,22 @@ macro_rules! impl_bare_element_query {
                         } else {
                             None
                         }];
+                        let added_scratch: Vec<bool> = if filters.added_mask != 0 {
+                            let mut scratch = vec![false; entity_indices.len()];
+                            for column in columns.iter() {
+                                if filters.added_mask & (1u64 << column.component_index) == 0 {
+                                    continue;
+                                }
+                                for (row, &added_tick) in column.added.iter().enumerate() {
+                                    if tick_is_newer(added_tick, since_tick) {
+                                        scratch[row] = true;
+                                    }
+                                }
+                            }
+                            scratch
+                        } else {
+                            Vec::new()
+                        };
                         let [slot] = distribute_slots(columns, positions);
                         let mut fetch = if element_worlds[0].is_none() {
                             Some(<$element as QueryElement>::fetch(slot, current_tick))
@@ -3687,6 +3870,28 @@ macro_rules! impl_bare_element_query {
                         };
                         let mut visited = false;
                         'rows: for (row_index, &entity) in entity_indices.iter().enumerate() {
+                            if !tag_sets_match(
+                                &filters.include_sets,
+                                &filters.exclude_sets,
+                                entity,
+                            ) {
+                                continue 'rows;
+                            }
+                            if filters.added_mask != 0 && !added_scratch[row_index] {
+                                continue 'rows;
+                            }
+                            if filters.changed_mask != 0 {
+                                let newer = filters.changed_mask & element_masks[0] != 0
+                                    && match &fetch {
+                                        Some(fetch) => <$element as QueryElement>::changed_newer(
+                                            fetch, row_index, since_tick,
+                                        ),
+                                        None => false,
+                                    };
+                                if !newer {
+                                    continue 'rows;
+                                }
+                            }
                             let item = match &mut fetch {
                                 Some(fetch) => <$element as QueryElement>::item(fetch, row_index),
                                 None => {
@@ -4647,13 +4852,64 @@ impl_bundle!(A, B, C, D, E, F, G);
 impl_bundle!(A, B, C, D, E, F, G, H);
 
 /// A cross-world typed query in progress, from [`DynEcs::query_join`].
-/// The fields are plain data like every query builder in this crate.
+/// The fields are plain data like every query builder in this crate. Tag
+/// filters name group marker tags; `changed`/`added` filters name
+/// driver-world components and panic when the type routes elsewhere, since
+/// only the driver's ticks are walked in place.
+/// Resolves one filter type's mask against the join's driver world.
+pub type JoinMaskLookup = fn(&DynWorld) -> Option<u64>;
+
 pub struct DynJoin<'ecs, Q: QueryTuple> {
     pub ecs: &'ecs mut DynEcs,
+    pub include_tag_types: [Option<TypeId>; 4],
+    pub exclude_tag_types: [Option<TypeId>; 4],
+    pub changed_lookups: [Option<JoinMaskLookup>; 4],
+    pub added_lookups: [Option<JoinMaskLookup>; 4],
     pub marker: PhantomData<Q>,
 }
 
+fn push_join_slot<T: Copy>(slots: &mut [Option<T>; 4], value: T) {
+    for slot in slots.iter_mut() {
+        if slot.is_none() {
+            *slot = Some(value);
+            return;
+        }
+    }
+    panic!("a join filter family holds at most four entries");
+}
+
+fn join_mask_of<T: Send + Sync + Default + 'static>(world: &DynWorld) -> Option<u64> {
+    world.lookup_key::<T>().map(|key| key.mask)
+}
+
 impl<Q: QueryTuple> DynJoin<'_, Q> {
+    /// Only visit entities carrying the marker type `T`'s group tag. A tag
+    /// nothing has used yet matches nothing.
+    pub fn with_tag_type<T: 'static>(mut self) -> Self {
+        push_join_slot(&mut self.include_tag_types, TypeId::of::<T>());
+        self
+    }
+
+    /// Skip entities carrying the marker type `T`'s group tag.
+    pub fn without_tag_type<T: 'static>(mut self) -> Self {
+        push_join_slot(&mut self.exclude_tag_types, TypeId::of::<T>());
+        self
+    }
+
+    /// Only visit entities whose `T` changed since the driver world's last
+    /// step. `T` must be one of the tuple's driver-world components.
+    pub fn changed<T: Send + Sync + Default + 'static>(mut self) -> Self {
+        push_join_slot(&mut self.changed_lookups, join_mask_of::<T>);
+        self
+    }
+
+    /// Only visit entities that gained `T` since the driver world's last
+    /// step. `T` must be one of the tuple's driver-world components.
+    pub fn added<T: Send + Sync + Default + 'static>(mut self) -> Self {
+        push_join_slot(&mut self.added_lookups, join_mask_of::<T>);
+        self
+    }
+
     /// Runs the join. Routing, the driver rule, and the borrow split are
     /// documented on [`DynEcs::query_join`].
     pub fn for_each(self, f: impl for<'item> FnMut(Entity, Q::Item<'item>)) {
@@ -4698,12 +4954,41 @@ impl<Q: QueryTuple> DynJoin<'_, Q> {
                 .expect("query_join requires at least one member world")
         });
 
+        let mut include_sets: [Option<&SparseTagSet>; 4] = [None; 4];
+        let mut exclude_sets: [Option<&SparseTagSet>; 4] = [None; 4];
+        for (slot, type_id) in include_sets.iter_mut().zip(self.include_tag_types.iter()) {
+            if let Some(type_id) = type_id {
+                match self.ecs.tag_type_indices.get(type_id) {
+                    Some(&index) => *slot = Some(&self.ecs.tags[index]),
+                    None => return,
+                }
+            }
+        }
+        for (slot, type_id) in exclude_sets.iter_mut().zip(self.exclude_tag_types.iter()) {
+            if let Some(type_id) = type_id
+                && let Some(&index) = self.ecs.tag_type_indices.get(type_id)
+            {
+                *slot = Some(&self.ecs.tags[index]);
+            }
+        }
+
         let (left, rest) = self.ecs.worlds.split_at_mut(driver);
         let (driver_world, right) = rest
             .split_first_mut()
             .expect("the driver index is within the member list");
         let left: &[DynWorld] = left;
         let right: &[DynWorld] = right;
+
+        let mut changed_mask = 0u64;
+        for lookup in self.changed_lookups.iter().flatten() {
+            changed_mask |= lookup(driver_world)
+                .expect("changed filters on query_join must name driver-world components");
+        }
+        let mut added_mask = 0u64;
+        for lookup in self.added_lookups.iter().flatten() {
+            added_mask |= lookup(driver_world)
+                .expect("added filters on query_join must name driver-world components");
+        }
 
         let mut element_worlds: [Option<&DynWorld>; 8] = [None; 8];
         for (position, route) in routes.iter().enumerate() {
@@ -4719,7 +5004,13 @@ impl<Q: QueryTuple> DynJoin<'_, Q> {
             }
         }
 
-        Q::join_for_each(driver_world, &element_worlds, f);
+        let filters = JoinFilters {
+            include_sets,
+            exclude_sets,
+            changed_mask,
+            added_mask,
+        };
+        Q::join_for_each(driver_world, &element_worlds, &filters, f);
     }
 }
 
@@ -6889,6 +7180,81 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "snapshot")]
+    #[test]
+    fn test_component_values_by_name() {
+        let mut registry = ComponentRegistry::new();
+        registry.register_serde::<Position>();
+        registry.register::<Velocity>();
+        let mut world = DynWorld::from_registry(registry);
+
+        let entity = world.spawn((Position { x: 1.0, y: 2.0 },));
+        let name = std::any::type_name::<Position>();
+
+        let bytes = world.get_component_by_name(entity, name).unwrap().unwrap();
+        let decoded: Position = postcard::from_bytes(&bytes).unwrap();
+        assert_eq!(decoded, Position { x: 1.0, y: 2.0 });
+
+        world.step();
+        let replacement = postcard::to_allocvec(&Position { x: 7.0, y: 8.0 }).unwrap();
+        world
+            .set_component_by_name(entity, name, &replacement)
+            .unwrap();
+        assert_eq!(world.get::<Position>(entity).unwrap().x, 7.0);
+        assert_eq!(
+            world
+                .query_entities_changed(world.lookup_key::<Position>().unwrap().mask)
+                .count(),
+            1,
+            "value writes stamp change ticks like any set"
+        );
+
+        let bare = world.spawn((Velocity::default(),));
+        world
+            .set_component_by_name(bare, name, &replacement)
+            .unwrap();
+        assert_eq!(
+            world.get::<Position>(bare).unwrap().x,
+            7.0,
+            "value writes add the component when absent"
+        );
+
+        assert!(matches!(
+            world.get_component_by_name(entity, "no::such::Type"),
+            Err(SnapshotError::UnknownComponent(_))
+        ));
+        assert!(matches!(
+            world.set_component_by_name(entity, std::any::type_name::<Velocity>(), &[]),
+            Err(SnapshotError::MissingCodec(_))
+        ));
+        let rowless = world.spawn((Velocity::default(),));
+        assert_eq!(
+            world.get_component_by_name(rowless, name).unwrap(),
+            None,
+            "an entity without the component reads as None"
+        );
+
+        let mut game_registry = ComponentRegistry::new();
+        game_registry.register_serde::<Health>();
+        let mut ecs = DynEcs::new();
+        let mut core_registry = ComponentRegistry::new();
+        core_registry.register_serde::<Position>();
+        ecs.add_world_at(0, core_registry);
+        ecs.add_world_at(1, game_registry);
+        let grouped = ecs.spawn_with((Position::default(), Health { value: 3.0 }));
+        let health_name = std::any::type_name::<Health>();
+        let health_bytes = postcard::to_allocvec(&Health { value: 42.0 }).unwrap();
+        ecs.set_component_by_name(grouped, health_name, &health_bytes)
+            .unwrap();
+        assert_eq!(ecs.get::<Health>(grouped).unwrap().value, 42.0);
+        assert!(
+            ecs.get_component_by_name(grouped, health_name)
+                .unwrap()
+                .is_some(),
+            "group value reads route by name"
+        );
+    }
+
     #[test]
     fn test_dyn_ecs_group_marker_tags() {
         struct Selected;
@@ -6950,6 +7316,76 @@ mod tests {
             ecs.worlds[0].remaining_bits() == 63,
             "group marker tags spend no member-world mask bits"
         );
+    }
+
+    #[test]
+    fn test_query_join_filters() {
+        struct Cursed;
+
+        let mut core_registry = ComponentRegistry::new();
+        core_registry.register::<Position>();
+        let mut game_registry = ComponentRegistry::new();
+        game_registry.register::<Health>();
+
+        let mut ecs = DynEcs::new();
+        ecs.add_world_at(0, core_registry);
+        ecs.add_world_at(1, game_registry);
+
+        let cursed = ecs.spawn_with((Position { x: 1.0, y: 0.0 }, Health { value: 1.0 }));
+        let plain = ecs.spawn_with((Position { x: 2.0, y: 0.0 }, Health { value: 2.0 }));
+        ecs.add_tag_type::<Cursed>(cursed);
+
+        let mut tagged = Vec::new();
+        ecs.query_join::<(&Position, &Health)>()
+            .with_tag_type::<Cursed>()
+            .for_each(|entity, (_position, _health)| tagged.push(entity));
+        assert_eq!(tagged, vec![cursed]);
+
+        let mut untagged = Vec::new();
+        ecs.query_join::<(&Position, &Health)>()
+            .without_tag_type::<Cursed>()
+            .for_each(|entity, (_position, _health)| untagged.push(entity));
+        assert_eq!(untagged, vec![plain]);
+
+        struct NeverUsed;
+        let mut none = Vec::new();
+        ecs.query_join::<(&Position, &Health)>()
+            .with_tag_type::<NeverUsed>()
+            .for_each(|entity, (_position, _health)| none.push(entity));
+        assert!(none.is_empty(), "an unused include tag matches nothing");
+
+        ecs.worlds[0].step();
+        ecs.get_mut::<Position>(plain).unwrap().x = 9.0;
+        let mut changed = Vec::new();
+        ecs.query_join::<(&mut Position, &Health)>()
+            .changed::<Position>()
+            .for_each(|entity, (_position, _health)| changed.push(entity));
+        assert_eq!(changed, vec![plain]);
+
+        ecs.worlds[0].step();
+        let fresh = ecs.spawn_with((Position { x: 5.0, y: 0.0 }, Health { value: 5.0 }));
+        let mut appeared = Vec::new();
+        ecs.query_join::<(&Position, &Health)>()
+            .added::<Position>()
+            .for_each(|entity, (_position, _health)| appeared.push(entity));
+        assert_eq!(appeared, vec![fresh]);
+    }
+
+    #[test]
+    #[should_panic(expected = "must name driver-world components")]
+    fn test_query_join_changed_rejects_foreign_types() {
+        let mut core_registry = ComponentRegistry::new();
+        core_registry.register::<Position>();
+        let mut game_registry = ComponentRegistry::new();
+        game_registry.register::<Health>();
+
+        let mut ecs = DynEcs::new();
+        ecs.add_world_at(0, core_registry);
+        ecs.add_world_at(1, game_registry);
+
+        ecs.query_join::<(&mut Position, &Health)>()
+            .changed::<Health>()
+            .for_each(|_entity, (_position, _health)| {});
     }
 
     #[test]
