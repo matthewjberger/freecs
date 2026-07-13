@@ -932,6 +932,15 @@ behind `Box<dyn Any + Send + Sync>`, never as raw bytes, and structural
 changes dispatch through a per-type record of plain function pointers that is
 itself public data.
 
+Everything in this section is also one runnable program,
+`examples/tour.rs`, with a comment on each block mapping it back to the
+subsection that explains it. It compiles on every CI run, so it cannot
+drift from the API:
+
+```sh
+cargo run --example tour --features dynamic
+```
+
 The examples below share these component types:
 
 ```rust
