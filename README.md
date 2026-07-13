@@ -1432,6 +1432,8 @@ natural home for entity-scoped markers in a grouped world: they spend no
 member world's mask bits, need no world index to touch, land in the group
 structural log, and drop on group despawn. `ecs.tag_set_type::<T>()` hands
 the set to any per-world typed query via `with_tag_set`/`without_tag_set`.
+Marker memberships survive snapshots: the group persists each tag's type
+name and re-binds the marker to its set on first use after a load.
 
 Tuples that span member worlds run through `ecs.query_join`: one world
 drives the iteration at full slice speed (the world holding every mutable
@@ -1465,8 +1467,9 @@ freecs::dynamic_worlds! {
 }
 ```
 
-Since a component type lives in exactly one member world, the group routes
-typed access itself: `ecs.get::<T>()`, `set`, `get_mut`, `has`, `remove`,
+Since a component type lives in exactly one member world (enforced when a
+member is added, and diagnosed with both world indices if a later lazy
+registration creates a duplicate), the group routes typed access itself: `ecs.get::<T>()`, `set`, `get_mut`, `has`, `remove`,
 `query`, and `query_ref` resolve the owning world per type (first member in
 index order, cached in the public `type_routes` map), and
 `ecs.spawn_with(bundle)` spawns one group entity with each component routed

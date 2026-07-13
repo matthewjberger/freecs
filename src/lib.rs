@@ -498,6 +498,10 @@ macro_rules! dynamic_schema {
     (@consts $bit:expr;) => {};
     (@consts $bit:expr; $const:ident $(, $rest:ident)*) => {
         pub const $const: u64 = $bit;
+        const _: () = assert!(
+            $const != 0,
+            "dynamic_schema! supports at most 64 components per world"
+        );
         $crate::dynamic_schema!(@consts $bit << 1; $($rest),*);
     };
     (
@@ -599,7 +603,10 @@ macro_rules! dynamic_worlds {
 /// `has_<name>` per component, `add_<name>` / `remove_<name>` /
 /// `has_<name>` / `query_<name>` per tag. The wrapper must expose the named
 /// world and keys fields. Accessors run at keyed speed and stamp change
-/// ticks exactly like the generated macro world's.
+/// ticks exactly like the generated macro world's. Component and tag names
+/// share one method namespace (`remove_` and `has_` exist for both), so an
+/// identifier may appear in only one of the two blocks; reusing one is a
+/// duplicate-method compile error.
 ///
 /// ```rust
 /// use freecs::dynamic::DynWorld;
@@ -1447,18 +1454,20 @@ impl<W> Stages<W> {
     /// declared stage list when the stage does not exist, so a part pushing
     /// into a missing stage fails at wiring time, not silently.
     pub fn stage_mut(&mut self, name: &str) -> &mut Schedule<W> {
-        let declared: Vec<&'static str> = self
-            .stages
-            .iter()
-            .map(|(stage_name, _)| *stage_name)
-            .collect();
         match self
             .stages
-            .iter_mut()
-            .find(|(stage_name, _)| *stage_name == name)
+            .iter()
+            .position(|(stage_name, _)| *stage_name == name)
         {
-            Some((_, schedule)) => schedule,
-            None => panic!("no stage named {name:?}; declared stages are {declared:?}"),
+            Some(index) => &mut self.stages[index].1,
+            None => {
+                let declared: Vec<&'static str> = self
+                    .stages
+                    .iter()
+                    .map(|(stage_name, _)| *stage_name)
+                    .collect();
+                panic!("no stage named {name:?}; declared stages are {declared:?}")
+            }
         }
     }
 

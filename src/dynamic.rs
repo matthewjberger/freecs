@@ -124,6 +124,10 @@ fn column_push_default<T: Send + Sync + Default + 'static>(
     }
 }
 
+fn column_len_of<T: Send + Sync + Default + 'static>(column: &(dyn Any + Send + Sync)) -> usize {
+    column_vec::<T>(column).len()
+}
+
 fn column_swap_remove<T: Send + Sync + Default + 'static>(
     column: &mut (dyn Any + Send + Sync),
     index: usize,
@@ -151,6 +155,7 @@ pub struct ComponentInfo {
     pub push_default: fn(&mut (dyn Any + Send + Sync), usize),
     pub swap_remove: fn(&mut (dyn Any + Send + Sync), usize),
     pub move_row: fn(&mut (dyn Any + Send + Sync), usize, &mut (dyn Any + Send + Sync)),
+    pub column_len: fn(&(dyn Any + Send + Sync)) -> usize,
 }
 
 /// A typed handle to a registered component: the component's index, its mask
@@ -246,6 +251,7 @@ impl ComponentRegistry {
             push_default: column_push_default::<T>,
             swap_remove: column_swap_remove::<T>,
             move_row: column_move_row::<T>,
+            column_len: column_len_of::<T>,
         });
         self.components_by_type
             .insert(TypeId::of::<T>(), component_index);
@@ -2187,6 +2193,7 @@ pub struct DynEcs {
     pub structural_sequence: u64,
     pub type_routes: HashMap<TypeId, usize>,
     pub tag_type_indices: HashMap<TypeId, usize>,
+    pub tag_type_names: Vec<Option<String>>,
     pub resources: ResourceMap,
     pub events: EventBus,
 }
@@ -2241,6 +2248,15 @@ impl DynEcs {
     /// Grouped worlds insert rows for live handles they have never stored,
     /// which is what lets an entity gain components per world lazily.
     pub fn add_world(&mut self, registry: ComponentRegistry) -> usize {
+        for info in &registry.components {
+            for (index, world) in self.worlds.iter().enumerate() {
+                assert!(
+                    world.registry.component_by_name(info.type_name).is_none(),
+                    "{} is already registered in member world {index};                      a component type must live in exactly one member world",
+                    info.type_name
+                );
+            }
+        }
         let mut world = DynWorld::from_registry(registry);
         world.insert_missing_rows = true;
         self.worlds.push(world);
@@ -2274,10 +2290,11 @@ impl DynEcs {
         if let Some(&index) = self.type_routes.get(&TypeId::of::<T>()) {
             return Some(index);
         }
-        let index = self
-            .worlds
-            .iter()
-            .position(|world| world.lookup_key::<T>().is_some())?;
+        let index = route_world_scan(
+            &self.worlds,
+            |world| world.lookup_key::<T>().is_some(),
+            std::any::type_name::<T>(),
+        )?;
         self.type_routes.insert(TypeId::of::<T>(), index);
         Some(index)
     }
@@ -2286,9 +2303,11 @@ impl DynEcs {
         if let Some(&index) = self.type_routes.get(&TypeId::of::<T>()) {
             return Some(index);
         }
-        self.worlds
-            .iter()
-            .position(|world| world.lookup_key::<T>().is_some())
+        route_world_scan(
+            &self.worlds,
+            |world| world.lookup_key::<T>().is_some(),
+            std::any::type_name::<T>(),
+        )
     }
 
     /// Reads `T` from whichever member world holds it, no world index
@@ -2392,7 +2411,9 @@ impl DynEcs {
     /// Advances the group frame: expires group events past their two-frame
     /// window and steps every member world, so one call at frame end drives
     /// group-level and world-level event lifetimes and change windows
-    /// together.
+    /// together. This call replaces per-member stepping; call either this
+    /// or the members' own `step`s each frame, never both, or change
+    /// windows and event expiry advance twice per frame.
     pub fn step(&mut self) {
         self.events.update();
         for world in &mut self.worlds {
@@ -2602,6 +2623,7 @@ impl DynEcs {
     /// mask bit; they filter queries by set reference.
     pub fn register_tag(&mut self) -> usize {
         self.tags.push(SparseTagSet::default());
+        self.tag_type_names.push(None);
         self.tags.len() - 1
     }
 
@@ -2635,15 +2657,34 @@ impl DynEcs {
         if let Some(&index) = self.tag_type_indices.get(&TypeId::of::<T>()) {
             return index;
         }
-        let index = self.register_tag();
+        let name = std::any::type_name::<T>();
+        let index = match self.scan_tag_type_names(name) {
+            Some(index) => index,
+            None => {
+                let index = self.register_tag();
+                self.tag_type_names[index] = Some(name.to_string());
+                index
+            }
+        };
         self.tag_type_indices.insert(TypeId::of::<T>(), index);
         index
     }
 
     /// The group tag index for marker type `T` if it has been used, without
-    /// registering it.
+    /// registering it. Falls back to the persisted type names, so marker
+    /// tags restored by [`DynEcs::from_snapshot`] resolve here before the
+    /// `TypeId` map is rebuilt.
     pub fn lookup_tag_type<T: 'static>(&self) -> Option<usize> {
-        self.tag_type_indices.get(&TypeId::of::<T>()).copied()
+        if let Some(&index) = self.tag_type_indices.get(&TypeId::of::<T>()) {
+            return Some(index);
+        }
+        self.scan_tag_type_names(std::any::type_name::<T>())
+    }
+
+    fn scan_tag_type_names(&self, name: &str) -> Option<usize> {
+        self.tag_type_names
+            .iter()
+            .position(|stored| stored.as_deref() == Some(name))
     }
 
     /// Adds the marker type `T`'s group tag to an entity, registering the
@@ -2761,6 +2802,8 @@ mod snapshot {
         Codec(String),
         /// No registered component carries the requested type name.
         UnknownComponent(String),
+        /// A value write named an entity that is not alive.
+        DeadEntity,
     }
 
     impl std::fmt::Display for SnapshotError {
@@ -2776,6 +2819,9 @@ mod snapshot {
                 SnapshotError::Codec(message) => write!(formatter, "codec error: {message}"),
                 SnapshotError::UnknownComponent(name) => {
                     write!(formatter, "no registered component is named {name}")
+                }
+                SnapshotError::DeadEntity => {
+                    write!(formatter, "the entity is not alive")
                 }
             }
         }
@@ -2814,6 +2860,7 @@ mod snapshot {
         pub allocator: EntityAllocator,
         pub worlds: Vec<DynWorldSnapshot>,
         pub tags: Vec<Vec<Entity>>,
+        pub tag_type_names: Vec<Option<String>>,
     }
 
     /// Rebuilds the retirement stamps a despawn broadcast would have left,
@@ -2862,6 +2909,9 @@ mod snapshot {
             name: &str,
             bytes: &[u8],
         ) -> Result<(), SnapshotError> {
+            if !self.insert_missing_rows && !self.is_alive(entity) {
+                return Err(SnapshotError::DeadEntity);
+            }
             let apply = self.value_codec(name)?.apply_value;
             apply(self, entity, bytes)
         }
@@ -2968,6 +3018,14 @@ mod snapshot {
                         SnapshotError::Codec("missing column payload".to_string())
                     })?;
                     column.data = (codec.decode_column)(payload)?;
+                    let decoded_rows = (info.column_len)(column.data.as_ref());
+                    if decoded_rows != table_snapshot.entities.len() {
+                        return Err(SnapshotError::Codec(format!(
+                            "column {} decoded {decoded_rows} rows for {} entities",
+                            info.type_name,
+                            table_snapshot.entities.len()
+                        )));
+                    }
                     column.changed = vec![snapshot.current_tick; table_snapshot.entities.len()];
                     column.peak_changed = snapshot.current_tick;
                     column.added = vec![snapshot.current_tick; table_snapshot.entities.len()];
@@ -3007,6 +3065,9 @@ mod snapshot {
             name: &str,
             bytes: &[u8],
         ) -> Result<(), SnapshotError> {
+            if !self.is_alive(entity) {
+                return Err(SnapshotError::DeadEntity);
+            }
             let index = self
                 .worlds
                 .iter()
@@ -3047,6 +3108,7 @@ mod snapshot {
                     .iter()
                     .map(|tag_set| tag_set.iter().collect())
                     .collect(),
+                tag_type_names: self.tag_type_names.clone(),
             })
         }
 
@@ -3080,6 +3142,9 @@ mod snapshot {
             }
             for tag_entities in &snapshot.tags {
                 let tag_index = ecs.register_tag();
+                if let Some(name) = snapshot.tag_type_names.get(tag_index) {
+                    ecs.tag_type_names[tag_index] = name.clone();
+                }
                 for &entity in tag_entities {
                     ecs.tags[tag_index].insert(entity);
                 }
@@ -3383,14 +3448,36 @@ impl<T: Send + Sync + Default + 'static> ReadQueryElement for Option<&T> {
 /// `Option<&T>`, and `Option<&mut T>` up to eight elements; all component
 /// types in one tuple must be distinct. Only the non-optional elements
 /// constrain which entities the query visits.
+pub(crate) fn route_world_scan(
+    worlds: &[DynWorld],
+    registered: impl Fn(&DynWorld) -> bool,
+    type_name: &str,
+) -> Option<usize> {
+    let mut found: Option<usize> = None;
+    for (index, world) in worlds.iter().enumerate() {
+        if registered(world) {
+            match found {
+                None => found = Some(index),
+                Some(first) => panic!(
+                    "{type_name} is registered in member worlds {first} and {index}; \
+                     a component type must live in exactly one member world"
+                ),
+            }
+        }
+    }
+    found
+}
+
 /// The row filters one cross-world join carries: group tag sets to
-/// include and exclude, and driver-world changed/added masks. Plain data,
-/// resolved by [`DynJoin::for_each`] before the worlds are split.
+/// include and exclude, and driver-world changed/added mask lookups. The
+/// lookups resolve inside the join, after the tuple's driver-local
+/// elements have registered, so a lazily-registered tuple element is a
+/// valid filter target.
 pub struct JoinFilters<'sets> {
     pub include_sets: [Option<&'sets SparseTagSet>; 4],
     pub exclude_sets: [Option<&'sets SparseTagSet>; 4],
-    pub changed_mask: u64,
-    pub added_mask: u64,
+    pub changed_lookups: [Option<JoinMaskLookup>; 4],
+    pub added_lookups: [Option<JoinMaskLookup>; 4],
 }
 
 /// One query-tuple element's routing facts for a cross-world join: which
@@ -3559,9 +3646,11 @@ macro_rules! impl_query_tuple {
                 let mut routes = [None; 8];
                 $(
                     routes[$position] = Some(JoinRoute {
-                        world: worlds
-                            .iter()
-                            .position(|world| $element::route_registered(world)),
+                        world: route_world_scan(
+                            worlds,
+                            |world| $element::route_registered(world),
+                            std::any::type_name::<$element>(),
+                        ),
                         required: $element::REQUIRED,
                         mutable: $element::MUTABLE,
                         type_name: std::any::type_name::<$element>(),
@@ -3587,8 +3676,27 @@ macro_rules! impl_query_tuple {
                         }
                     }
                 )+
+                let mut changed_mask = 0u64;
+                for lookup in filters.changed_lookups.iter().flatten() {
+                    changed_mask |= lookup(driver)
+                        .expect("changed filters on query_join must name driver-world components");
+                }
+                let mut added_mask = 0u64;
+                for lookup in filters.added_lookups.iter().flatten() {
+                    added_mask |= lookup(driver)
+                        .expect("added filters on query_join must name driver-world components");
+                }
+                let local_tuple_mask = element_masks
+                    .iter()
+                    .fold(0, |mask, element| mask | element);
+                assert_eq!(
+                    (changed_mask | added_mask) & !local_tuple_mask,
+                    0,
+                    "changed and added filters must name components present in the query tuple"
+                );
                 let since_tick = driver.last_tick;
                 let current_tick = driver.current_tick;
+                let mut added_scratch = std::mem::take(&mut driver.added_scratch);
                 let table_indices = archetype_cached_tables(
                     &mut driver.query_cache,
                     driver.tables.iter().map(|table| table.mask),
@@ -3612,22 +3720,20 @@ macro_rules! impl_query_tuple {
                             None
                         },
                     )+];
-                    let added_scratch: Vec<bool> = if filters.added_mask != 0 {
-                        let mut scratch = vec![false; entity_indices.len()];
+                    if added_mask != 0 {
+                        added_scratch.clear();
+                        added_scratch.resize(entity_indices.len(), false);
                         for column in columns.iter() {
-                            if filters.added_mask & (1u64 << column.component_index) == 0 {
+                            if added_mask & (1u64 << column.component_index) == 0 {
                                 continue;
                             }
                             for (row, &added_tick) in column.added.iter().enumerate() {
                                 if tick_is_newer(added_tick, since_tick) {
-                                    scratch[row] = true;
+                                    added_scratch[row] = true;
                                 }
                             }
                         }
-                        scratch
-                    } else {
-                        Vec::new()
-                    };
+                    }
                     let [$($element,)+] = distribute_slots(columns, positions);
                     $(
                         let mut $element = if element_worlds[$position].is_none() {
@@ -3641,14 +3747,14 @@ macro_rules! impl_query_tuple {
                         if !tag_sets_match(&filters.include_sets, &filters.exclude_sets, entity) {
                             continue 'rows;
                         }
-                        if filters.added_mask != 0 && !added_scratch[row_index] {
+                        if added_mask != 0 && !added_scratch[row_index] {
                             continue 'rows;
                         }
-                        if filters.changed_mask != 0 {
+                        if changed_mask != 0 {
                             let mut newer = false;
                             $(
                                 if !newer
-                                    && filters.changed_mask & element_masks[$position] != 0
+                                    && changed_mask & element_masks[$position] != 0
                                     && let Some(fetch) = &$element
                                     && <$element as QueryElement>::changed_newer(
                                         fetch, row_index, since_tick,
@@ -3696,6 +3802,7 @@ macro_rules! impl_query_tuple {
                         )+
                     }
                 }
+                driver.added_scratch = added_scratch;
             }
 
             #[allow(non_snake_case)]
@@ -3797,11 +3904,11 @@ macro_rules! impl_bare_element_query {
                 fn join_routes(worlds: &[DynWorld]) -> [Option<JoinRoute>; 8] {
                     let mut routes = [None; 8];
                     routes[0] = Some(JoinRoute {
-                        world: worlds
-                            .iter()
-                            .position(|world| {
-                                <$element as QueryElement>::route_registered(world)
-                            }),
+                        world: route_world_scan(
+                            worlds,
+                            |world| <$element as QueryElement>::route_registered(world),
+                            std::any::type_name::<$element>(),
+                        ),
                         required: <$element as QueryElement>::REQUIRED,
                         mutable: <$element as QueryElement>::MUTABLE,
                         type_name: std::any::type_name::<$element>(),
@@ -3815,16 +3922,37 @@ macro_rules! impl_bare_element_query {
                     filters: &JoinFilters<'_>,
                     mut f: FN,
                 ) {
+                    debug_assert!(
+                        element_worlds[0].is_none(),
+                        "a single-element tuple always drives its own world"
+                    );
                     let mut element_masks = [0u64; 8];
-                    let mut local_include = 0u64;
-                    if element_worlds[0].is_none() {
-                        element_masks[0] = <$element as QueryElement>::component_mask(driver);
-                        if <$element as QueryElement>::REQUIRED {
-                            local_include |= element_masks[0];
-                        }
+                    element_masks[0] = <$element as QueryElement>::component_mask(driver);
+                    let local_include = if <$element as QueryElement>::REQUIRED {
+                        element_masks[0]
+                    } else {
+                        0
+                    };
+                    let mut changed_mask = 0u64;
+                    for lookup in filters.changed_lookups.iter().flatten() {
+                        changed_mask |= lookup(driver).expect(
+                            "changed filters on query_join must name driver-world components",
+                        );
                     }
+                    let mut added_mask = 0u64;
+                    for lookup in filters.added_lookups.iter().flatten() {
+                        added_mask |= lookup(driver).expect(
+                            "added filters on query_join must name driver-world components",
+                        );
+                    }
+                    assert_eq!(
+                        (changed_mask | added_mask) & !element_masks[0],
+                        0,
+                        "changed and added filters must name components present in the query tuple"
+                    );
                     let since_tick = driver.last_tick;
                     let current_tick = driver.current_tick;
+                    let mut added_scratch = std::mem::take(&mut driver.added_scratch);
                     let table_indices = archetype_cached_tables(
                         &mut driver.query_cache,
                         driver.tables.iter().map(|table| table.mask),
@@ -3839,35 +3967,27 @@ macro_rules! impl_bare_element_query {
                             columns,
                             ..
                         } = table;
-                        let positions = [if element_worlds[0].is_none()
-                            && table_mask & element_masks[0] != 0
-                        {
+                        let positions = [if table_mask & element_masks[0] != 0 {
                             Some(column_position(table_mask, element_masks[0]))
                         } else {
                             None
                         }];
-                        let added_scratch: Vec<bool> = if filters.added_mask != 0 {
-                            let mut scratch = vec![false; entity_indices.len()];
+                        if added_mask != 0 {
+                            added_scratch.clear();
+                            added_scratch.resize(entity_indices.len(), false);
                             for column in columns.iter() {
-                                if filters.added_mask & (1u64 << column.component_index) == 0 {
+                                if added_mask & (1u64 << column.component_index) == 0 {
                                     continue;
                                 }
                                 for (row, &added_tick) in column.added.iter().enumerate() {
                                     if tick_is_newer(added_tick, since_tick) {
-                                        scratch[row] = true;
+                                        added_scratch[row] = true;
                                     }
                                 }
                             }
-                            scratch
-                        } else {
-                            Vec::new()
-                        };
+                        }
                         let [slot] = distribute_slots(columns, positions);
-                        let mut fetch = if element_worlds[0].is_none() {
-                            Some(<$element as QueryElement>::fetch(slot, current_tick))
-                        } else {
-                            None
-                        };
+                        let mut fetch = <$element as QueryElement>::fetch(slot, current_tick);
                         let mut visited = false;
                         'rows: for (row_index, &entity) in entity_indices.iter().enumerate() {
                             if !tag_sets_match(
@@ -3877,39 +3997,25 @@ macro_rules! impl_bare_element_query {
                             ) {
                                 continue 'rows;
                             }
-                            if filters.added_mask != 0 && !added_scratch[row_index] {
+                            if added_mask != 0 && !added_scratch[row_index] {
                                 continue 'rows;
                             }
-                            if filters.changed_mask != 0 {
-                                let newer = filters.changed_mask & element_masks[0] != 0
-                                    && match &fetch {
-                                        Some(fetch) => <$element as QueryElement>::changed_newer(
-                                            fetch, row_index, since_tick,
-                                        ),
-                                        None => false,
-                                    };
-                                if !newer {
-                                    continue 'rows;
-                                }
+                            if changed_mask != 0
+                                && !<$element as QueryElement>::changed_newer(
+                                    &fetch, row_index, since_tick,
+                                )
+                            {
+                                continue 'rows;
                             }
-                            let item = match &mut fetch {
-                                Some(fetch) => <$element as QueryElement>::item(fetch, row_index),
-                                None => {
-                                    let world = element_worlds[0]
-                                        .expect("foreign positions carry their world");
-                                    match <$element as QueryElement>::foreign_item(world, entity) {
-                                        Some(item) => item,
-                                        None => continue 'rows,
-                                    }
-                                }
-                            };
+                            let item = <$element as QueryElement>::item(&mut fetch, row_index);
                             visited = true;
                             f(entity, item);
                         }
-                        if visited && let Some(fetch) = &mut fetch {
-                            <$element as QueryElement>::stamp_peaks(fetch);
+                        if visited {
+                            <$element as QueryElement>::stamp_peaks(&mut fetch);
                         }
                     }
+                    driver.added_scratch = added_scratch;
                 }
 
                 fn fetch<'table>(
@@ -4979,17 +5085,6 @@ impl<Q: QueryTuple> DynJoin<'_, Q> {
         let left: &[DynWorld] = left;
         let right: &[DynWorld] = right;
 
-        let mut changed_mask = 0u64;
-        for lookup in self.changed_lookups.iter().flatten() {
-            changed_mask |= lookup(driver_world)
-                .expect("changed filters on query_join must name driver-world components");
-        }
-        let mut added_mask = 0u64;
-        for lookup in self.added_lookups.iter().flatten() {
-            added_mask |= lookup(driver_world)
-                .expect("added filters on query_join must name driver-world components");
-        }
-
         let mut element_worlds: [Option<&DynWorld>; 8] = [None; 8];
         for (position, route) in routes.iter().enumerate() {
             if let Some(route) = route
@@ -5007,8 +5102,8 @@ impl<Q: QueryTuple> DynJoin<'_, Q> {
         let filters = JoinFilters {
             include_sets,
             exclude_sets,
-            changed_mask,
-            added_mask,
+            changed_lookups: self.changed_lookups,
+            added_lookups: self.added_lookups,
         };
         Q::join_for_each(driver_world, &element_worlds, &filters, f);
     }
@@ -7252,6 +7347,169 @@ mod tests {
                 .unwrap()
                 .is_some(),
             "group value reads route by name"
+        );
+    }
+
+    #[cfg(feature = "snapshot")]
+    #[test]
+    fn test_dyn_ecs_marker_tags_survive_snapshots() {
+        struct Selected;
+
+        let mut registry = ComponentRegistry::new();
+        registry.register_serde::<Position>();
+        let mut ecs = DynEcs::new();
+        ecs.add_world_at(0, registry);
+
+        let first = ecs.spawn_with((Position::default(),));
+        let second = ecs.spawn_with((Position::default(),));
+        ecs.add_tag_type::<Selected>(first);
+        let anonymous = ecs.register_tag();
+        ecs.add_tag(anonymous, second);
+
+        let snapshot = ecs.snapshot().unwrap();
+        let mut registry = ComponentRegistry::new();
+        registry.register_serde::<Position>();
+        let mut restored = DynEcs::from_snapshot(vec![registry], &snapshot).unwrap();
+
+        assert!(
+            restored.has_tag_type::<Selected>(first),
+            "marker membership resolves after a restore"
+        );
+        assert_eq!(
+            restored.query_tag_type::<Selected>().collect::<Vec<_>>(),
+            vec![first]
+        );
+        assert!(restored.tag_set_type::<Selected>().is_some());
+
+        let set_count = restored.tags.len();
+        restored.add_tag_type::<Selected>(second);
+        assert_eq!(
+            restored.tags.len(),
+            set_count,
+            "adding after a restore reuses the persisted set instead of splitting membership"
+        );
+        let mut members: Vec<Entity> = restored.query_tag_type::<Selected>().collect();
+        members.sort_unstable_by_key(|entity| entity.id);
+        assert_eq!(members, vec![first, second]);
+        assert!(restored.has_tag(anonymous, second));
+    }
+
+    #[test]
+    #[should_panic(expected = "must live in exactly one member world")]
+    fn test_dyn_ecs_add_world_rejects_duplicate_types() {
+        let mut first = ComponentRegistry::new();
+        first.register::<Position>();
+        let mut second = ComponentRegistry::new();
+        second.register::<Position>();
+
+        let mut ecs = DynEcs::new();
+        ecs.add_world(first);
+        ecs.add_world(second);
+    }
+
+    #[test]
+    #[should_panic(expected = "must live in exactly one member world")]
+    fn test_dyn_ecs_route_detects_post_add_duplicates() {
+        let mut ecs = DynEcs::new();
+        ecs.add_world(ComponentRegistry::new());
+        ecs.add_world(ComponentRegistry::new());
+        ecs.worlds[0].register::<Position>();
+        ecs.worlds[1].register::<Position>();
+
+        let entity = ecs.spawn();
+        let _ = ecs.get::<Position>(entity);
+    }
+
+    #[test]
+    #[should_panic(expected = "must name components present in the query tuple")]
+    fn test_query_join_filters_must_name_tuple_components() {
+        let mut core_registry = ComponentRegistry::new();
+        core_registry.register::<Position>();
+        core_registry.register::<Velocity>();
+        let mut game_registry = ComponentRegistry::new();
+        game_registry.register::<Health>();
+
+        let mut ecs = DynEcs::new();
+        ecs.add_world_at(0, core_registry);
+        ecs.add_world_at(1, game_registry);
+        ecs.spawn_with((Position::default(), Health::default()));
+
+        ecs.query_join::<(&mut Position, &Health)>()
+            .changed::<Velocity>()
+            .for_each(|_entity, (_position, _health)| {});
+    }
+
+    #[test]
+    fn test_query_join_changed_accepts_lazily_registered_elements() {
+        let mut core_registry = ComponentRegistry::new();
+        core_registry.register::<Position>();
+
+        let mut ecs = DynEcs::new();
+        ecs.add_world_at(0, core_registry);
+        ecs.spawn_with((Position::default(),));
+
+        let mut visited = 0;
+        ecs.query_join::<(&mut Position, Option<&mut Velocity>)>()
+            .changed::<Velocity>()
+            .for_each(|_entity, (_position, _velocity)| visited += 1);
+        assert_eq!(
+            visited, 0,
+            "a lazily-registered tuple element is a valid filter target and never panics"
+        );
+    }
+
+    #[cfg(feature = "snapshot")]
+    #[test]
+    fn test_set_component_by_name_rejects_dead_entities() {
+        let mut registry = ComponentRegistry::new();
+        registry.register_serde::<Position>();
+        let mut world = DynWorld::from_registry(registry);
+        let entity = world.spawn((Position::default(),));
+        world.despawn_entities(&[entity]);
+
+        let name = std::any::type_name::<Position>();
+        let bytes = postcard::to_allocvec(&Position::default()).unwrap();
+        assert!(matches!(
+            world.set_component_by_name(entity, name, &bytes),
+            Err(SnapshotError::DeadEntity)
+        ));
+
+        let mut registry = ComponentRegistry::new();
+        registry.register_serde::<Position>();
+        let mut ecs = DynEcs::new();
+        ecs.add_world_at(0, registry);
+        let grouped = ecs.spawn_with((Position::default(),));
+        ecs.despawn(grouped);
+        assert!(matches!(
+            ecs.set_component_by_name(grouped, name, &bytes),
+            Err(SnapshotError::DeadEntity)
+        ));
+
+        let live = ecs.spawn_with((Position::default(),));
+        assert!(
+            ecs.set_component_by_name(live, name, &bytes).is_ok(),
+            "grouped members still accept writes for live group handles"
+        );
+    }
+
+    #[cfg(feature = "snapshot")]
+    #[test]
+    fn test_from_snapshot_rejects_length_mismatched_columns() {
+        let mut registry = ComponentRegistry::new();
+        registry.register_serde::<Position>();
+        let mut world = DynWorld::from_registry(registry);
+        world.spawn((Position::default(),));
+        world.spawn((Position::default(),));
+
+        let mut snapshot = world.snapshot().unwrap();
+        let truncated: Vec<Position> = vec![Position::default()];
+        snapshot.tables[0].columns[0] = postcard::to_allocvec(&truncated).unwrap();
+
+        let mut registry = ComponentRegistry::new();
+        registry.register_serde::<Position>();
+        let result = DynWorld::from_snapshot(registry, &snapshot);
+        assert!(
+            matches!(result, Err(SnapshotError::Codec(message)) if message.contains("decoded 1 rows for 2 entities"))
         );
     }
 
