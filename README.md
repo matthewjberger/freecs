@@ -23,6 +23,42 @@ A high-performance, archetype-based Entity Component System (ECS) for Rust
 
 The `ecs!` macro generates the entire ECS at compile time using only plain data structures, functions, and zero unsafe code.
 
+## Table of Contents
+
+- [How it works (build it from scratch)](#how-it-works-build-it-from-scratch)
+- [Quick Start](#quick-start)
+- [Generated API](#generated-api)
+  - [Closure-Based Mutation](#closure-based-mutation)
+- [Systems](#systems)
+- [Events](#events)
+  - [Game Loop Integration](#game-loop-integration)
+  - [Event Lifetime](#event-lifetime)
+- [High-Performance Features](#high-performance-features)
+  - [Query Builder API](#query-builder-api)
+  - [Batch Spawning](#batch-spawning)
+  - [Single-Component Iteration](#single-component-iteration)
+  - [Parallel Iteration](#parallel-iteration)
+  - [Sparse Set Tags](#sparse-set-tags)
+  - [Command Buffers](#command-buffers)
+  - [Mask Hygiene](#mask-hygiene)
+  - [Change Detection](#change-detection)
+  - [Structural Change Log](#structural-change-log)
+  - [System Scheduling](#system-scheduling)
+- [Entity Builder](#entity-builder)
+- [Entity Liveness](#entity-liveness)
+- [Advanced Features](#advanced-features)
+  - [Per-Component Iteration](#per-component-iteration)
+  - [Low-Level Iteration](#low-level-iteration)
+  - [Tick Management](#tick-management)
+- [Conditional Compilation](#conditional-compilation)
+- [Cargo Features](#cargo-features)
+- [Dynamic Worlds](#dynamic-worlds)
+  - [Grouped dynamic worlds](#grouped-dynamic-worlds)
+  - [Snapshots](#snapshots)
+- [Multi-World ECS](#multi-world-ecs)
+- [Migrating from 2.x](#migrating-from-2x)
+- [License](#license)
+
 ## How it works (build it from scratch)
 
 If you want to understand the data layout under the macro, there is a three-part series that builds the same kernel by hand in around 1500 lines of Rust, motivating each design choice.

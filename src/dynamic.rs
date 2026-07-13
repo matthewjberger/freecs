@@ -2833,6 +2833,9 @@ impl<'world, Q: QueryTuple> DynQuery<'world, Q> {
     }
 
     /// Filter by the marker type `T`'s tag, registering it on first use.
+    /// Registration permanently consumes one of the world's 64 mask bits,
+    /// even when nothing carries the tag yet; on a shared borrow,
+    /// [`DynQueryRef::with_tag_type`] looks up without registering.
     pub fn with_tag_type<T: 'static>(mut self) -> Self {
         self.include |= self.world.tag_key::<T>().mask;
         self
@@ -2883,6 +2886,12 @@ impl<'world, Q: QueryTuple> DynQuery<'world, Q> {
         let current_tick = self.world.current_tick;
         let changed_mask = self.changed_mask;
 
+        let has_row_filters = tag_include != 0
+            || tag_exclude != 0
+            || changed_mask != 0
+            || self.include_tag_sets.iter().any(Option::is_some)
+            || self.exclude_tag_sets.iter().any(Option::is_some);
+
         let tags = &self.world.tags;
         let table_indices = archetype_cached_tables(
             &mut self.world.query_cache,
@@ -2900,12 +2909,6 @@ impl<'world, Q: QueryTuple> DynQuery<'world, Q> {
             let table_mask = table.mask;
             let entity_indices = &table.entity_indices;
             let mut fetch = Q::fetch(table_mask, &mut table.columns, &element_masks, current_tick);
-
-            let has_row_filters = tag_include != 0
-                || tag_exclude != 0
-                || changed_mask != 0
-                || self.include_tag_sets.iter().any(Option::is_some)
-                || self.exclude_tag_sets.iter().any(Option::is_some);
 
             if has_row_filters {
                 let mut visited = false;
@@ -3943,6 +3946,28 @@ mod tests {
                 ));
             }
         }
+    }
+
+    #[test]
+    fn test_filtered_mutable_query_keeps_changed_sets_exact() {
+        let mut world = DynWorld::new();
+        let position = world.register::<Position>();
+        let boss = world.register_tag();
+        let entities = world.spawn_entities(position.mask, 4);
+        world.add_tag(boss, entities[1]);
+        world.add_tag(boss, entities[3]);
+
+        world.step();
+        world
+            .query::<(&mut Position,)>()
+            .with_tag(boss)
+            .for_each(|_entity, (value,)| value.x += 1.0);
+
+        let changed: Vec<Entity> = world.query_entities_changed(position.mask).collect();
+        assert_eq!(changed, vec![entities[1], entities[3]]);
+
+        world.step();
+        assert_eq!(world.query_entities_changed(position.mask).count(), 0);
     }
 
     #[test]

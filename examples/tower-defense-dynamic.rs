@@ -1905,11 +1905,13 @@ fn tag_query_example_system(world: &DynWorld) {
     let _ = healer_enemy_count > 0 && tank_enemy_count > 2;
 
     if frost_tower_count > 0 {
-        for (_entity, (_tower,)) in world
+        let highest_frost_level = world
             .query_ref::<(&Tower,)>()
             .with_tag_type::<FrostTower>()
             .iter()
-        {}
+            .map(|(_entity, (tower,))| tower.level)
+            .max();
+        let _ = highest_frost_level;
     }
 }
 
