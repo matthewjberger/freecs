@@ -1105,6 +1105,10 @@ for ((entity_a, a), (entity_b, b)) in world.query_ref::<&Position>().iter_combin
 }
 ```
 
+In a `DynEcs` group, tuples whose components live in different member
+worlds run through `ecs.query_join` with the same filter vocabulary; see
+[Grouped dynamic worlds](#grouped-dynamic-worlds).
+
 Heavy passes go parallel with `par_for_each`, table-granular like the
 keyed tier's `par_for_each_mut`, with the same filters and stamping:
 
