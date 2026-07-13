@@ -54,7 +54,21 @@ ecs! {
         game_speed: f32,
         current_hp: u32,
         max_hp: u32,
+        event_cursors: EventCursors,
     }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct EventCursors {
+    pub enemy_spawned: u64,
+    pub enemy_died: u64,
+    pub enemy_reached_end: u64,
+    pub projectile_hit: u64,
+    pub tower_placed: u64,
+    pub tower_sold: u64,
+    pub tower_upgraded: u64,
+    pub wave_started: u64,
+    pub wave_completed: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
@@ -1877,7 +1891,10 @@ fn render_money_popups(world: &GameWorld) {
 }
 
 fn enemy_died_event_handler(world: &mut GameWorld) {
-    for event in world.collect_enemy_died() {
+    let mut cursor = world.resources.event_cursors.enemy_died;
+    let events = world.consume_enemy_died(&mut cursor).to_vec();
+    world.resources.event_cursors.enemy_died = cursor;
+    for event in events {
         world.resources.money += event.reward;
 
         for _ in 0..6 {
@@ -1898,7 +1915,10 @@ fn enemy_died_event_handler(world: &mut GameWorld) {
 }
 
 fn enemy_spawned_event_handler(world: &mut GameWorld) {
-    for event in world.collect_enemy_spawned() {
+    let mut cursor = world.resources.event_cursors.enemy_spawned;
+    let events = world.consume_enemy_spawned(&mut cursor).to_vec();
+    world.resources.event_cursors.enemy_spawned = cursor;
+    for event in events {
         let position = world.get_position(event.entity).map(|p| p.0);
         if let Some(pos) = position {
             for _ in 0..4 {
@@ -1911,7 +1931,10 @@ fn enemy_spawned_event_handler(world: &mut GameWorld) {
 }
 
 fn enemy_reached_end_event_handler(world: &mut GameWorld) {
-    for event in world.collect_enemy_reached_end() {
+    let mut cursor = world.resources.event_cursors.enemy_reached_end;
+    let events = world.consume_enemy_reached_end(&mut cursor).to_vec();
+    world.resources.event_cursors.enemy_reached_end = cursor;
+    for event in events {
         let position = world.get_position(event.entity).map(|p| p.0);
         if let Some(pos) = position {
             for _ in 0..8 {
@@ -1924,7 +1947,10 @@ fn enemy_reached_end_event_handler(world: &mut GameWorld) {
 }
 
 fn projectile_hit_event_handler(world: &mut GameWorld) {
-    for event in world.collect_projectile_hit() {
+    let mut cursor = world.resources.event_cursors.projectile_hit;
+    let events = world.consume_projectile_hit(&mut cursor).to_vec();
+    world.resources.event_cursors.projectile_hit = cursor;
+    for event in events {
         for _ in 0..3 {
             let velocity = Vec2::new(rand::gen_range(-25.0, 25.0), rand::gen_range(-25.0, 25.0));
             spawn_visual_effect(world, event.position, EffectType::Explosion, velocity, 0.3);
@@ -1933,7 +1959,10 @@ fn projectile_hit_event_handler(world: &mut GameWorld) {
 }
 
 fn tower_placed_event_handler(world: &mut GameWorld) {
-    for event in world.collect_tower_placed() {
+    let mut cursor = world.resources.event_cursors.tower_placed;
+    let events = world.consume_tower_placed(&mut cursor).to_vec();
+    world.resources.event_cursors.tower_placed = cursor;
+    for event in events {
         let pos = grid_to_base(event.grid_x, event.grid_y);
         for _ in 0..5 {
             let offset = Vec2::new(rand::gen_range(-15.0, 15.0), rand::gen_range(-15.0, 15.0));
@@ -1943,7 +1972,10 @@ fn tower_placed_event_handler(world: &mut GameWorld) {
 }
 
 fn tower_sold_event_handler(world: &mut GameWorld) {
-    for event in world.collect_tower_sold() {
+    let mut cursor = world.resources.event_cursors.tower_sold;
+    let events = world.consume_tower_sold(&mut cursor).to_vec();
+    world.resources.event_cursors.tower_sold = cursor;
+    for event in events {
         let pos = grid_to_base(event.grid_x, event.grid_y);
         for _ in 0..8 {
             let velocity = Vec2::new(rand::gen_range(-40.0, 40.0), rand::gen_range(-40.0, 40.0));
@@ -1953,7 +1985,10 @@ fn tower_sold_event_handler(world: &mut GameWorld) {
 }
 
 fn tower_upgraded_event_handler(world: &mut GameWorld) {
-    for event in world.collect_tower_upgraded() {
+    let mut cursor = world.resources.event_cursors.tower_upgraded;
+    let events = world.consume_tower_upgraded(&mut cursor).to_vec();
+    world.resources.event_cursors.tower_upgraded = cursor;
+    for event in events {
         let position = world.get_position(event.entity).map(|p| p.0);
         if let Some(pos) = position {
             for _ in 0..12 {
@@ -1967,14 +2002,20 @@ fn tower_upgraded_event_handler(world: &mut GameWorld) {
 }
 
 fn wave_started_event_handler(world: &mut GameWorld) {
-    for event in world.collect_wave_started() {
+    let mut cursor = world.resources.event_cursors.wave_started;
+    let events = world.consume_wave_started(&mut cursor).to_vec();
+    world.resources.event_cursors.wave_started = cursor;
+    for event in events {
         world.resources.wave_announce_timer = 2.0;
         world.resources.wave = event.wave;
     }
 }
 
 fn wave_completed_event_handler(world: &mut GameWorld) {
-    for event in world.collect_wave_completed() {
+    let mut cursor = world.resources.event_cursors.wave_completed;
+    let events = world.consume_wave_completed(&mut cursor).to_vec();
+    world.resources.event_cursors.wave_completed = cursor;
+    for event in events {
         let bonus = 20 + event.wave * 5;
         world.resources.money += bonus;
     }

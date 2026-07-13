@@ -356,6 +356,19 @@ struct SniperTower;
 struct PoisonTower;
 struct PathCell;
 
+#[derive(Default)]
+struct EventCursors {
+    enemy_spawned: u64,
+    enemy_died: u64,
+    enemy_reached_end: u64,
+    projectile_hit: u64,
+    tower_placed: u64,
+    tower_sold: u64,
+    tower_upgraded: u64,
+    wave_started: u64,
+    wave_completed: u64,
+}
+
 struct GameResources {
     money: u32,
     lives: u32,
@@ -370,6 +383,7 @@ struct GameResources {
     game_speed: f32,
     current_hp: u32,
     max_hp: u32,
+    event_cursors: EventCursors,
 }
 
 fn with_game<R>(world: &mut DynWorld, f: impl FnOnce(&mut DynWorld, &mut GameResources) -> R) -> R {
@@ -377,7 +391,7 @@ fn with_game<R>(world: &mut DynWorld, f: impl FnOnce(&mut DynWorld, &mut GameRes
 }
 
 fn scaled_frame_time(world: &DynWorld) -> f32 {
-    get_frame_time() * world.resource::<GameResources>().unwrap().game_speed
+    get_frame_time() * world.expect_resource::<GameResources>().game_speed
 }
 
 const GRID_SIZE: i32 = 12;
@@ -1449,7 +1463,7 @@ fn restart_game(world: &mut DynWorld, game: &mut GameResources) {
 }
 
 fn render_grid(world: &DynWorld) {
-    let game = world.resource::<GameResources>().unwrap();
+    let game = world.expect_resource::<GameResources>();
     let scale = get_scale();
     let offset = get_offset();
 
@@ -1524,7 +1538,7 @@ fn render_grid(world: &DynWorld) {
 }
 
 fn render_towers(world: &DynWorld) {
-    let game = world.resource::<GameResources>().unwrap();
+    let game = world.expect_resource::<GameResources>();
     let scale = get_scale();
     let offset = get_offset();
 
@@ -1784,7 +1798,10 @@ fn render_money_popups(world: &DynWorld) {
 
 fn enemy_died_event_handler(world: &mut DynWorld) {
     with_game(world, |world, game| {
-        for event in world.read_events::<EnemyDiedEvent>().to_vec() {
+        for event in world
+            .consume_events::<EnemyDiedEvent>(&mut game.event_cursors.enemy_died)
+            .to_vec()
+        {
             game.money += event.reward;
 
             for _ in 0..6 {
@@ -1807,77 +1824,110 @@ fn enemy_died_event_handler(world: &mut DynWorld) {
 }
 
 fn enemy_spawned_event_handler(world: &mut DynWorld) {
-    for event in world.read_events::<EnemySpawnedEvent>().to_vec() {
-        let position = world.get::<Position>(event.entity).map(|p| p.0);
-        if let Some(pos) = position {
-            for _ in 0..4 {
-                let velocity =
-                    Vec2::new(rand::gen_range(-30.0, 30.0), rand::gen_range(-30.0, 30.0));
-                spawn_visual_effect(world, pos, EffectType::DeathParticle, velocity, 0.5);
+    with_game(world, |world, game| {
+        for event in world
+            .consume_events::<EnemySpawnedEvent>(&mut game.event_cursors.enemy_spawned)
+            .to_vec()
+        {
+            let position = world.get::<Position>(event.entity).map(|p| p.0);
+            if let Some(pos) = position {
+                for _ in 0..4 {
+                    let velocity =
+                        Vec2::new(rand::gen_range(-30.0, 30.0), rand::gen_range(-30.0, 30.0));
+                    spawn_visual_effect(world, pos, EffectType::DeathParticle, velocity, 0.5);
+                }
             }
         }
-    }
+    });
 }
 
 fn enemy_reached_end_event_handler(world: &mut DynWorld) {
-    for event in world.read_events::<EnemyReachedEndEvent>().to_vec() {
-        let position = world.get::<Position>(event.entity).map(|p| p.0);
-        if let Some(pos) = position {
-            for _ in 0..8 {
-                let velocity =
-                    Vec2::new(rand::gen_range(-50.0, 50.0), rand::gen_range(-50.0, 50.0));
-                spawn_visual_effect(world, pos, EffectType::Explosion, velocity, 0.6);
+    with_game(world, |world, game| {
+        for event in world
+            .consume_events::<EnemyReachedEndEvent>(&mut game.event_cursors.enemy_reached_end)
+            .to_vec()
+        {
+            let position = world.get::<Position>(event.entity).map(|p| p.0);
+            if let Some(pos) = position {
+                for _ in 0..8 {
+                    let velocity =
+                        Vec2::new(rand::gen_range(-50.0, 50.0), rand::gen_range(-50.0, 50.0));
+                    spawn_visual_effect(world, pos, EffectType::Explosion, velocity, 0.6);
+                }
             }
         }
-    }
+    });
 }
 
 fn projectile_hit_event_handler(world: &mut DynWorld) {
-    for event in world.read_events::<ProjectileHitEvent>().to_vec() {
-        for _ in 0..3 {
-            let velocity = Vec2::new(rand::gen_range(-25.0, 25.0), rand::gen_range(-25.0, 25.0));
-            spawn_visual_effect(world, event.position, EffectType::Explosion, velocity, 0.3);
+    with_game(world, |world, game| {
+        for event in world
+            .consume_events::<ProjectileHitEvent>(&mut game.event_cursors.projectile_hit)
+            .to_vec()
+        {
+            for _ in 0..3 {
+                let velocity =
+                    Vec2::new(rand::gen_range(-25.0, 25.0), rand::gen_range(-25.0, 25.0));
+                spawn_visual_effect(world, event.position, EffectType::Explosion, velocity, 0.3);
+            }
         }
-    }
+    });
 }
 
 fn tower_placed_event_handler(world: &mut DynWorld) {
-    for event in world.read_events::<TowerPlacedEvent>().to_vec() {
-        let pos = grid_to_base(event.grid_x, event.grid_y);
-        for _ in 0..5 {
-            let offset = Vec2::new(rand::gen_range(-15.0, 15.0), rand::gen_range(-15.0, 15.0));
-            spawn_visual_effect(world, pos + offset, EffectType::Explosion, Vec2::ZERO, 0.4);
+    with_game(world, |world, game| {
+        for event in world
+            .consume_events::<TowerPlacedEvent>(&mut game.event_cursors.tower_placed)
+            .to_vec()
+        {
+            let pos = grid_to_base(event.grid_x, event.grid_y);
+            for _ in 0..5 {
+                let offset = Vec2::new(rand::gen_range(-15.0, 15.0), rand::gen_range(-15.0, 15.0));
+                spawn_visual_effect(world, pos + offset, EffectType::Explosion, Vec2::ZERO, 0.4);
+            }
         }
-    }
+    });
 }
 
 fn tower_sold_event_handler(world: &mut DynWorld) {
-    for event in world.read_events::<TowerSoldEvent>().to_vec() {
-        let pos = grid_to_base(event.grid_x, event.grid_y);
-        for _ in 0..8 {
-            let velocity = Vec2::new(rand::gen_range(-40.0, 40.0), rand::gen_range(-40.0, 40.0));
-            spawn_visual_effect(world, pos, EffectType::DeathParticle, velocity, 0.7);
+    with_game(world, |world, game| {
+        for event in world
+            .consume_events::<TowerSoldEvent>(&mut game.event_cursors.tower_sold)
+            .to_vec()
+        {
+            let pos = grid_to_base(event.grid_x, event.grid_y);
+            for _ in 0..8 {
+                let velocity =
+                    Vec2::new(rand::gen_range(-40.0, 40.0), rand::gen_range(-40.0, 40.0));
+                spawn_visual_effect(world, pos, EffectType::DeathParticle, velocity, 0.7);
+            }
         }
-    }
+    });
 }
 
 fn tower_upgraded_event_handler(world: &mut DynWorld) {
-    for event in world.read_events::<TowerUpgradedEvent>().to_vec() {
-        let position = world.get::<Position>(event.entity).map(|p| p.0);
-        if let Some(pos) = position {
-            for _ in 0..12 {
-                let angle = rand::gen_range(0.0, std::f32::consts::TAU);
-                let speed = rand::gen_range(20.0, 60.0);
-                let velocity = Vec2::new(angle.cos() * speed, angle.sin() * speed);
-                spawn_visual_effect(world, pos, EffectType::Explosion, velocity, 0.8);
+    with_game(world, |world, game| {
+        for event in world
+            .consume_events::<TowerUpgradedEvent>(&mut game.event_cursors.tower_upgraded)
+            .to_vec()
+        {
+            let position = world.get::<Position>(event.entity).map(|p| p.0);
+            if let Some(pos) = position {
+                for _ in 0..12 {
+                    let angle = rand::gen_range(0.0, std::f32::consts::TAU);
+                    let speed = rand::gen_range(20.0, 60.0);
+                    let velocity = Vec2::new(angle.cos() * speed, angle.sin() * speed);
+                    spawn_visual_effect(world, pos, EffectType::Explosion, velocity, 0.8);
+                }
             }
         }
-    }
+    });
 }
 
 fn wave_started_event_handler(world: &mut DynWorld) {
     with_game(world, |world, game| {
-        for event in world.read_events::<WaveStartedEvent>() {
+        for event in world.consume_events::<WaveStartedEvent>(&mut game.event_cursors.wave_started)
+        {
             game.wave_announce_timer = 2.0;
             game.wave = event.wave;
         }
@@ -1886,7 +1936,9 @@ fn wave_started_event_handler(world: &mut DynWorld) {
 
 fn wave_completed_event_handler(world: &mut DynWorld) {
     with_game(world, |world, game| {
-        for event in world.read_events::<WaveCompletedEvent>() {
+        for event in
+            world.consume_events::<WaveCompletedEvent>(&mut game.event_cursors.wave_completed)
+        {
             let bonus = 20 + event.wave * 5;
             game.money += bonus;
         }
@@ -1916,7 +1968,7 @@ fn tag_query_example_system(world: &DynWorld) {
 }
 
 fn render_ui(world: &DynWorld) {
-    let game = world.resource::<GameResources>().unwrap();
+    let game = world.expect_resource::<GameResources>();
 
     let money_text = format!("Money: ${}", game.money);
     draw_text(&money_text, 10.0, 30.0, 30.0, GREEN);
@@ -2127,6 +2179,7 @@ async fn main() {
         game_speed: 1.0,
         current_hp: 20,
         max_hp: 20,
+        event_cursors: EventCursors::default(),
     });
 
     initialize_grid(&mut world);
@@ -2167,20 +2220,20 @@ async fn main() {
 
         input_system(&mut world);
 
-        let game_state = world.resource::<GameResources>().unwrap().game_state;
+        let game_state = world.expect_resource::<GameResources>().game_state;
         if game_state != GameState::Paused {
             game_schedule.run(&mut world);
         }
 
         {
-            let game = world.resource_mut::<GameResources>().unwrap();
+            let game = world.expect_resource_mut::<GameResources>();
             if game.wave_announce_timer > 0.0 {
                 game.wave_announce_timer -= get_frame_time();
             }
         }
 
         let waiting =
-            world.resource::<GameResources>().unwrap().game_state == GameState::WaitingForWave;
+            world.expect_resource::<GameResources>().game_state == GameState::WaitingForWave;
         if is_key_pressed(KeyCode::Space) && waiting {
             with_game(&mut world, plan_wave);
         }

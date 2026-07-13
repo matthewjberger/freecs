@@ -959,6 +959,19 @@ impl<T> EventChannel<T> {
         &self.events[start..]
     }
 
+    /// The exactly-once read: yields every event sent after `cursor` and
+    /// advances the cursor past them, so calling this every frame delivers
+    /// each event to this consumer exactly once. Each consumer owns one
+    /// `u64` cursor; the buffer itself is untouched, so other consumers and
+    /// the two-frame expiry are unaffected. This is the spelling to reach
+    /// for by default; `read()` re-reads the whole buffer every call.
+    #[inline]
+    pub fn consume(&self, cursor: &mut u64) -> &[T] {
+        let events = self.events_since(*cursor);
+        *cursor = self.sequence();
+        events
+    }
+
     /// Returns an iterator over every buffered event, oldest first.
     pub fn read(&self) -> impl Iterator<Item = &T> {
         self.events.iter()
@@ -3149,6 +3162,16 @@ macro_rules! ecs_impl {
                         self.$event_name.events_since(cursor)
                     }
 
+                    /// The exactly-once read: yields events sent after the
+                    /// cursor and advances it past them, so a handler calling
+                    /// this every frame sees each event once. Events stay
+                    /// buffered for two frames, so `read_` and `collect_`
+                    /// re-deliver on the second frame; keep one `u64` cursor
+                    /// per consumer and reach for this by default.
+                    pub fn [<consume_ $event_name>](&self, cursor: &mut u64) -> &[$event_type] {
+                        self.$event_name.consume(cursor)
+                    }
+
                     pub fn [<sequence_ $event_name>](&self) -> u64 {
                         self.$event_name.sequence()
                     }
@@ -3746,6 +3769,16 @@ macro_rules! ecs_multi_impl {
 
                     pub fn [<read_ $event_name _since>](&self, cursor: u64) -> &[$event_type] {
                         self.$event_name.events_since(cursor)
+                    }
+
+                    /// The exactly-once read: yields events sent after the
+                    /// cursor and advances it past them, so a handler calling
+                    /// this every frame sees each event once. Events stay
+                    /// buffered for two frames, so `read_` and `collect_`
+                    /// re-deliver on the second frame; keep one `u64` cursor
+                    /// per consumer and reach for this by default.
+                    pub fn [<consume_ $event_name>](&self, cursor: &mut u64) -> &[$event_type] {
+                        self.$event_name.consume(cursor)
                     }
 
                     pub fn [<sequence_ $event_name>](&self) -> u64 {
@@ -5592,6 +5625,49 @@ mod tests {
 
         assert!(channel.events_since(cursor_a).is_empty());
         assert!(channel.events_since(cursor_b).is_empty());
+    }
+
+    #[test]
+    fn test_event_channel_consume_is_exactly_once() {
+        let mut channel: EventChannel<u32> = EventChannel::new();
+        channel.send(1);
+        channel.send(2);
+
+        let mut cursor_a = 0;
+        let mut cursor_b = 0;
+
+        assert_eq!(channel.consume(&mut cursor_a), &[1, 2]);
+        assert!(channel.consume(&mut cursor_a).is_empty());
+
+        channel.update();
+        channel.send(3);
+        assert_eq!(
+            channel.consume(&mut cursor_a),
+            &[3],
+            "the two-frame buffer must not re-deliver"
+        );
+
+        assert_eq!(channel.consume(&mut cursor_b), &[1, 2, 3]);
+    }
+
+    #[test]
+    fn test_generated_consume_event_is_exactly_once() {
+        let mut world = World::default();
+
+        world.send_ping(PingEvent { value: 1 });
+
+        let mut cursor = 0;
+        assert_eq!(world.consume_ping(&mut cursor).len(), 1);
+        assert!(world.consume_ping(&mut cursor).is_empty());
+
+        world.step();
+        assert!(
+            world.consume_ping(&mut cursor).is_empty(),
+            "collect_ would re-deliver here; consume_ must not"
+        );
+
+        world.send_ping(PingEvent { value: 2 });
+        assert_eq!(world.consume_ping(&mut cursor).len(), 1);
     }
 
     #[test]

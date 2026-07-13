@@ -57,6 +57,7 @@ The `ecs!` macro generates the entire ECS at compile time using only plain data 
 - [Dynamic Worlds](#dynamic-worlds)
   - [Grouped dynamic worlds](#grouped-dynamic-worlds)
   - [Snapshots](#snapshots)
+  - [Named accessors over the keyed tier](#named-accessors-over-the-keyed-tier)
 - [Multi-World ECS](#multi-world-ecs)
 - [License](#license)
 
@@ -410,19 +411,9 @@ pub fn query_global_transform(world: &World, entity: Entity) -> nalgebra_glm::Ma
 
 ## Events
 
-Events are stored in sequence-numbered channels, the same cursor scheme the structural change log uses. Two consumption styles are supported.
+Events are stored in sequence-numbered channels, the same cursor scheme the structural change log uses.
 
-**Frame-scoped** consumption reads whatever is buffered. Events stay visible for two frames, then `world.step()` expires them:
-
-```rust
-fn collision_handler_system(world: &mut World) {
-    for event in world.collect_collision() {
-        println!("Collision: {:?} and {:?}", event.entity_a, event.entity_b);
-    }
-}
-```
-
-**Cursor-based** consumption gives each consumer exactly-once delivery. Record the channel sequence after reading, and read everything newer next time. Two systems consuming the same channel never steal from or double-process each other, and a consumer that skips a frame catches up:
+The default consumption style is `consume_<event>`: each consumer owns one `u64` cursor, and every call yields the events sent since that consumer last looked, advancing the cursor past them. Calling it every frame delivers each event exactly once, two consumers never steal from or double-process each other, and a consumer that skips a frame catches up:
 
 ```rust
 struct RenderSync {
@@ -430,25 +421,29 @@ struct RenderSync {
 }
 
 fn render_sync_system(world: &mut World, sync: &mut RenderSync) {
-    for event in world.read_collision_since(sync.collision_cursor) {
+    for event in world.consume_collision(&mut sync.collision_cursor) {
         // Seen exactly once by this consumer
     }
-    sync.collision_cursor = world.sequence_collision();
 }
 ```
+
+The buffer-reading forms, `read_<event>()` and `collect_<event>()`, return everything still buffered. Events stay buffered for **two frames** before `world.step()` expires them, so a per-frame handler using these sees each event twice; they are for debugging, one-shot inspection, or frame setups you manage yourself. When in doubt, use `consume_`.
 
 Each event type gets these generated methods:
 
 - `send_<event>(event)` - Queue an event
-- `read_<event>()` - Iterator over all buffered events
-- `read_<event>_since(cursor)` - Slice of events sent after `cursor`
+- `consume_<event>(&mut cursor)` - Events sent since this cursor, advancing it; exactly-once per consumer, the default
+- `read_<event>_since(cursor)` - Slice of events sent after `cursor`, cursor untouched
 - `sequence_<event>()` - Sequence number of the newest event; record it as your cursor
 - `trim_<event>(up_to_sequence)` - Drop consumed events early (pass the minimum cursor across consumers)
-- `collect_<event>()` - Collect buffered events into a Vec
+- `read_<event>()` - Iterator over all buffered events (up to two frames' worth)
+- `collect_<event>()` - Collect buffered events into a Vec (up to two frames' worth)
 - `peek_<event>()` - Reference to the oldest buffered event
 - `update_<event>()` - Expire events older than one frame; `step()` already calls this per frame, so calling both halves event lifetime
 - `clear_<event>()` - Immediately drop all buffered events
 - `len_<event>()` / `is_empty_<event>()` - Buffered event count
+
+The dynamic world has the same pair: `consume_events::<T>(&mut cursor)` for exactly-once handling and `read_events::<T>()` for the raw buffer.
 
 Channels are bounded: a channel nobody consumes drops its oldest half at `EVENT_CHANNEL_CAPACITY` entries instead of leaking.
 
@@ -468,7 +463,7 @@ loop {
 
 ### Event Lifetime
 
-Events sent during frame N remain readable through frame N+1 and are dropped by the `step()` that ends frame N+1. This preserves the classic double-buffer property: a system scheduled before the sender still sees the event on the next frame. Cursor consumers are unaffected by expiry as long as they read at least every other frame; `read_<event>_since` with a cursor older than the buffer returns everything still buffered.
+Events sent during frame N remain readable through frame N+1 and are dropped by the `step()` that ends frame N+1. This preserves the classic double-buffer property: a system scheduled before the sender still sees the event on the next frame. It is also exactly why per-frame handlers must consume through cursors: the two-frame buffer means `read_`/`collect_` deliver the same event on both frames, and `consume_` is what turns the buffer into exactly-once delivery. Cursor consumers are unaffected by expiry as long as they read at least every other frame; a cursor older than the buffer yields everything still buffered.
 
 ## High-Performance Features
 
@@ -1003,7 +998,7 @@ assert_eq!(world.entity_count(), 0);
 
 Three access tiers, from ergonomic to explicit:
 
-- **Typed**: `spawn(bundle)`, `get::<T>` / `set` / `remove`, `query::<(&mut A, &B)>()` with `Option<&T>` elements and up to eight per tuple, `query_ref` iterators on `&world`, marker-type tags (`add_tag_type::<T>`, `with_tag_type::<T>()`), `despawn_with_any::<(A, B)>()`, `resource_scope` / `resources_scope` over tuples, `send(event)` / `read_events_since::<T>(cursor)`, `insert_resource` / `resource::<T>()`. `TypeId` lookups happen at registration and per typed call, never inside iteration loops.
+- **Typed**: `spawn(bundle)` / `spawn_bundles(bundle, count)`, `get::<T>` / `set` / `remove`, `query::<(&mut A, &B)>()` with `Option<&T>` elements, up to eight per tuple, and bare single elements (`query::<&mut A>()`), `query_ref` iterators on `&world`, marker-type tags (`add_tag_type::<T>`, `with_tag_type::<T>()`), `despawn_with_any::<(A, B)>()`, `resource_scope` / `resources_scope` over tuples, `send(event)` / `consume_events::<T>(&mut cursor)`, `insert_resource` / `resource::<T>()` / `expect_resource::<T>()`. `TypeId` lookups happen at registration and per typed call, never inside iteration loops.
 - **Keyed**: `register::<T>()` returns a copyable `ComponentKey<T>` carrying the component's mask bit; `get_keyed` / `set_keyed` and mask-based `for_each` / `for_each_mut` skip the hash entirely.
 - **Raw tables**: `for_each_tables_mut(mask, 0, |table| ...)` with `table.columns_pair(a, b)` hoists concrete slices once per table for the tightest loops, no change stamping, same covenant as the static path.
 
@@ -1089,7 +1084,62 @@ world that must agree on masks, and register deterministically if masks are
 ever serialized. Keys carry their registry id and are debug-checked against
 the world using them. Query tuples must not repeat a component type, and a
 wrong-type column swapped in by hand panics on the next typed access rather
-than misbehaving. The correctness story is the same suite the macro worlds
+than misbehaving.
+
+Components and tags share each world's 64 mask bits, components from bit 0 up
+and tags from bit 63 down, and lazy registration spends bits silently, so
+check `world.remaining_bits()` in a startup assertion rather than discovering
+the ceiling when registration 65 panics.
+
+### Named accessors over the keyed tier
+
+Heavy users who miss the macro's generated names (`get_position`,
+`set_velocity`) can have them back in about ten lines: wrap the world with a
+`Keys` struct resolved once at construction, and map names to the keyed tier
+with a local macro. The keyed accessors stamp change ticks identically to the
+macro's and skip the `TypeId` hash, so the wrappers run at keyed speed:
+
+```rust
+use freecs::dynamic::{ComponentKey, DynWorld};
+
+struct Keys {
+    position: ComponentKey<Position>,
+    velocity: ComponentKey<Velocity>,
+}
+
+struct GameWorld {
+    world: DynWorld,
+    keys: Keys,
+}
+
+macro_rules! named_accessors {
+    ($($name:ident: $type:ty),+ $(,)?) => {
+        freecs::paste::paste! {
+            impl GameWorld {
+                $(
+                    pub fn [<get_ $name>](&self, entity: freecs::Entity) -> Option<&$type> {
+                        self.world.get_keyed(self.keys.$name, entity)
+                    }
+
+                    pub fn [<get_ $name _mut>](&mut self, entity: freecs::Entity) -> Option<&mut $type> {
+                        self.world.get_mut_keyed(self.keys.$name, entity)
+                    }
+
+                    pub fn [<set_ $name>](&mut self, entity: freecs::Entity, value: $type) {
+                        self.world.set_keyed(self.keys.$name, entity, value);
+                    }
+                )+
+            }
+        }
+    };
+}
+
+named_accessors!(position: Position, velocity: Velocity);
+```
+
+The registration function that builds `Keys` becomes the single source of
+truth for the component set: define the type, add one line there and one to
+the macro invocation. The correctness story is the same suite the macro worlds
 earned: unit coverage, the three-oracle property tests, and a differential
 oracle that drives a macro world and a `DynWorld` with one seeded op stream
 and requires identical observable state at every step.

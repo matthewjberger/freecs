@@ -43,8 +43,9 @@ fn main() {
     println!("enemy:  {:?}", world.get::<Position>(enemy));
 
     println!("\n=== Typed queries, mutability from the tuple ===");
+    let mut collision_cursor = 0;
     for frame in 0..3 {
-        let delta_time = *world.resource::<f32>().unwrap();
+        let delta_time = *world.expect_resource::<f32>();
 
         world
             .query::<(&mut Position, &Velocity)>()
@@ -54,9 +55,9 @@ fn main() {
             });
 
         world
-            .query::<(&Position,)>()
+            .query::<&Position>()
             .changed::<Position>()
-            .for_each(|entity, (position,)| {
+            .for_each(|entity, position| {
                 println!(
                     "frame {frame}: redraw {entity}: ({:.1}, {:.1})",
                     position.x, position.y
@@ -64,15 +65,13 @@ fn main() {
             });
 
         let mut collisions = Vec::new();
-        world
-            .query::<(&Position,)>()
-            .for_each(|entity, (position,)| {
-                let player_position = Position {
-                    x: position.x,
-                    y: position.y,
-                };
-                collisions.push((entity, player_position));
-            });
+        world.query::<&Position>().for_each(|entity, position| {
+            let player_position = Position {
+                x: position.x,
+                y: position.y,
+            };
+            collisions.push((entity, player_position));
+        });
         for index in 0..collisions.len() {
             for other in index + 1..collisions.len() {
                 let (entity_a, ref a) = collisions[index];
@@ -85,15 +84,12 @@ fn main() {
             }
         }
 
-        let mut cursor = 0;
-        for event in world.read_events_since::<CollisionEvent>(cursor) {
+        for event in world.consume_events::<CollisionEvent>(&mut collision_cursor) {
             println!(
                 "frame {frame}: collision between {} and {}",
                 event.entity_a, event.entity_b
             );
         }
-        cursor = world.event_sequence::<CollisionEvent>();
-        world.trim_events::<CollisionEvent>(cursor);
 
         world.step();
     }
@@ -167,7 +163,7 @@ fn main() {
     println!(
         "player: {:?} after {} scoped frame(s)",
         world.get::<Position>(player),
-        world.resource::<u32>().unwrap()
+        world.expect_resource::<u32>()
     );
 
     println!("\n=== Deferred commands ===");

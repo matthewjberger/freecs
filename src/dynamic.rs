@@ -45,8 +45,9 @@
 //!
 //! Query tuples take up to eight elements of `&T`, `&mut T`, `Option<&T>`,
 //! or `Option<&mut T>`; optional elements yield `None` instead of narrowing
-//! the match. On a shared borrow, [`DynWorld::query_ref`] runs read-only
-//! tuples as a real [`Iterator`]:
+//! the match, and single-component queries can skip the tuple entirely
+//! (`world.query::<&mut Position>()`). On a shared borrow,
+//! [`DynWorld::query_ref`] runs read-only tuples as a real [`Iterator`]:
 //!
 //! ```rust
 //! # use freecs::dynamic::DynWorld;
@@ -69,6 +70,10 @@
 //! Tags can be named by marker types (`world.add_tag_type::<Selected>(entity)`,
 //! `.with_tag_type::<Selected>()`), registering lazily like components, or
 //! held as [`TagKey`] values; both forms are the same sparse sets underneath.
+//!
+//! Events buffer for two frames, so per-frame handlers consume through a
+//! cursor: `world.consume_events::<T>(&mut cursor)` yields each event exactly
+//! once per consumer, while `read_events` re-reads the whole buffer.
 //!
 //! Registration is a schema: mask bits are assigned in registration order, so
 //! anything serializing masks should register components deterministically,
@@ -315,6 +320,14 @@ impl ComponentRegistry {
             registry_id: self.registry_id,
             marker: PhantomData,
         }
+    }
+
+    /// How many of the 64 mask bits are still free. Components and tags
+    /// share the budget, components from bit 0 up and tags from bit 63 down,
+    /// so this is the number of registrations of either kind left before
+    /// `register` or `register_tag` panics.
+    pub fn remaining_bits(&self) -> u32 {
+        64 - self.components.len() as u32 - self.tag_count
     }
 
     pub fn all_components_mask(&self) -> u64 {
@@ -582,6 +595,13 @@ impl DynWorld {
     /// `None` for marker types this world has never seen.
     pub fn lookup_tag_key<T: 'static>(&self) -> Option<TagKey> {
         self.registry.lookup_tag_type::<T>()
+    }
+
+    /// How many of this world's 64 mask bits are still free for components
+    /// and tags combined. Lazy registration spends them silently, so budget
+    /// checks belong here rather than at the panic.
+    pub fn remaining_bits(&self) -> u32 {
+        self.registry.remaining_bits()
     }
 
     fn check_key(&self, registry_id: u32) {
@@ -1581,6 +1601,18 @@ impl DynWorld {
             .unwrap_or(&[])
     }
 
+    /// The exactly-once read: yields events sent after the cursor and
+    /// advances it past them, so a handler calling this every frame sees
+    /// each event once. Events stay buffered for two frames, so
+    /// [`read_events`](Self::read_events) re-delivers on the second frame;
+    /// keep one `u64` cursor per consumer and reach for this by default.
+    pub fn consume_events<T: Send + Sync + 'static>(&self, cursor: &mut u64) -> &[T] {
+        match self.event_channel::<T>() {
+            Some(channel) => channel.consume(cursor),
+            None => &[],
+        }
+    }
+
     pub fn event_sequence<T: Send + Sync + 'static>(&self) -> u64 {
         self.event_channel::<T>()
             .map(|channel| channel.sequence())
@@ -1619,6 +1651,27 @@ impl DynWorld {
         self.resources
             .get_mut(&TypeId::of::<T>())
             .and_then(|value| value.downcast_mut::<T>())
+    }
+
+    /// [`resource`](Self::resource) for resources that must exist: panics
+    /// with the type name instead of returning `Option`, so call sites for
+    /// engine-style singletons stay free of `unwrap`.
+    pub fn expect_resource<T: Send + Sync + 'static>(&self) -> &T {
+        self.resource::<T>().unwrap_or_else(|| {
+            panic!(
+                "expect_resource requires {} to be present",
+                std::any::type_name::<T>()
+            )
+        })
+    }
+
+    pub fn expect_resource_mut<T: Send + Sync + 'static>(&mut self) -> &mut T {
+        self.resource_mut::<T>().unwrap_or_else(|| {
+            panic!(
+                "expect_resource_mut requires {} to be present",
+                std::any::type_name::<T>()
+            )
+        })
     }
 
     pub fn remove_resource<T: Send + Sync + 'static>(&mut self) -> Option<T> {
@@ -1845,10 +1898,27 @@ impl DynWorld {
         entity
     }
 
-    /// Starts a typed query. Component types in the tuple register lazily,
-    /// borrow mutability comes from the tuple (`&T`, `&mut T`, and their
-    /// `Option` forms), and mutable elements stamp change ticks per visited
-    /// entity.
+    /// The typed bulk spawn: `count` entities each carrying a clone of the
+    /// bundle. For per-entity initialization at batch speed, use the keyed
+    /// [`spawn_batch`](Self::spawn_batch) instead.
+    pub fn spawn_bundles<B: Bundle + Clone>(&mut self, bundle: B, count: usize) -> Vec<Entity> {
+        let mask = B::component_mask(self);
+        let entities = self.spawn_entities(mask, count);
+        for &entity in &entities {
+            bundle.clone().write(self, entity);
+        }
+        entities
+    }
+
+    /// Starts a typed query. Component types register lazily, borrow
+    /// mutability comes from the tuple (`&T`, `&mut T`, and their `Option`
+    /// forms), and mutable elements stamp change ticks per visited entity.
+    /// Single-component queries can skip the tuple: `query::<&mut Position>()`.
+    ///
+    /// This method takes `&mut self` even for all-shared tuples, because
+    /// lazy registration and the query cache mutate the world; when you only
+    /// have `&world`, use [`query_ref`](Self::query_ref), which is also the
+    /// form that returns a real iterator.
     pub fn query<Q: QueryTuple>(&mut self) -> DynQuery<'_, Q> {
         let include = Q::component_mask(self);
         DynQuery {
@@ -2822,6 +2892,134 @@ impl_query_tuple!(
     (G, 6),
     (H, 7)
 );
+
+macro_rules! impl_bare_element_query {
+    ($($element:ty),+) => {
+        $(
+            impl<'element, T: Send + Sync + Default + 'static> sealed::SealedQueryTuple
+                for $element
+            {
+            }
+
+            impl<'element, T: Send + Sync + Default + 'static> QueryTuple for $element {
+                type Fetch<'table> = <$element as QueryElement>::Fetch<'table>;
+                type Item<'item> = <$element as QueryElement>::Item<'item>;
+
+                fn component_mask(world: &mut DynWorld) -> u64 {
+                    let elements = [(
+                        <$element as QueryElement>::component_mask(world),
+                        <$element as QueryElement>::REQUIRED,
+                    )];
+                    required_mask(&elements)
+                }
+
+                fn element_masks(world: &mut DynWorld) -> [u64; 8] {
+                    let mut masks = [0u64; 8];
+                    masks[0] = <$element as QueryElement>::component_mask(world);
+                    masks
+                }
+
+                fn fetch<'table>(
+                    table_mask: u64,
+                    columns: &'table mut [ColumnSlot],
+                    element_masks: &[u64; 8],
+                    current_tick: u32,
+                ) -> Self::Fetch<'table> {
+                    let position = if table_mask & element_masks[0] != 0 {
+                        Some(column_position(table_mask, element_masks[0]))
+                    } else {
+                        None
+                    };
+                    let [slot] = distribute_slots(columns, [position]);
+                    <$element as QueryElement>::fetch(slot, current_tick)
+                }
+
+                fn changed_newer(
+                    fetch: &Self::Fetch<'_>,
+                    index: usize,
+                    element_masks: &[u64; 8],
+                    changed_mask: u64,
+                    since_tick: u32,
+                ) -> bool {
+                    changed_mask & element_masks[0] != 0
+                        && <$element as QueryElement>::changed_newer(fetch, index, since_tick)
+                }
+
+                fn item<'fetch>(
+                    fetch: &'fetch mut Self::Fetch<'_>,
+                    index: usize,
+                ) -> Self::Item<'fetch> {
+                    <$element as QueryElement>::item(fetch, index)
+                }
+
+                fn stamp_peaks(fetch: &mut Self::Fetch<'_>) {
+                    <$element as QueryElement>::stamp_peaks(fetch);
+                }
+            }
+        )+
+    };
+}
+
+impl_bare_element_query!(
+    &'element T,
+    &'element mut T,
+    Option<&'element T>,
+    Option<&'element mut T>
+);
+
+macro_rules! impl_bare_element_read_query {
+    ($($element:ty),+) => {
+        $(
+            impl<'element, T: Send + Sync + Default + 'static> ReadQueryTuple for $element {
+                type ReadFetch<'table> = <$element as ReadQueryElement>::ReadFetch<'table>;
+
+                fn lookup_masks(world: &DynWorld) -> Option<([u64; 8], u64)> {
+                    let elements = [(
+                        <$element as ReadQueryElement>::lookup_mask(world),
+                        <$element as QueryElement>::REQUIRED,
+                    )];
+                    lookup_masks_from(&elements)
+                }
+
+                fn read_fetch<'table>(
+                    table_mask: u64,
+                    columns: &'table [ColumnSlot],
+                    element_masks: &[u64; 8],
+                ) -> Self::ReadFetch<'table> {
+                    <$element as ReadQueryElement>::read_fetch(
+                        if table_mask & element_masks[0] != 0 {
+                            Some(&columns[column_position(table_mask, element_masks[0])])
+                        } else {
+                            None
+                        },
+                    )
+                }
+
+                fn read_changed_newer(
+                    fetch: Self::ReadFetch<'_>,
+                    index: usize,
+                    element_masks: &[u64; 8],
+                    changed_mask: u64,
+                    since_tick: u32,
+                ) -> bool {
+                    changed_mask & element_masks[0] != 0
+                        && <$element as ReadQueryElement>::read_changed_newer(
+                            fetch, index, since_tick,
+                        )
+                }
+
+                fn read_item<'table>(
+                    fetch: Self::ReadFetch<'table>,
+                    index: usize,
+                ) -> Self::Item<'table> {
+                    <$element as ReadQueryElement>::read_item(fetch, index)
+                }
+            }
+        )+
+    };
+}
+
+impl_bare_element_read_query!(&'element T, Option<&'element T>);
 
 macro_rules! impl_read_query_tuple {
     ($(($element:ident, $position:tt)),+) => {
@@ -4208,6 +4406,147 @@ mod tests {
 
         assert!(result.is_err());
         assert_eq!(world.resource::<Score>().unwrap().value, 7);
+    }
+
+    #[test]
+    fn test_consume_events_delivers_exactly_once_per_cursor() {
+        let mut world = DynWorld::new();
+        world.send(PingEvent { value: 1 });
+        world.send(PingEvent { value: 2 });
+
+        let mut first_cursor = 0;
+        let mut second_cursor = 0;
+
+        let values: Vec<u32> = world
+            .consume_events::<PingEvent>(&mut first_cursor)
+            .iter()
+            .map(|event| event.value)
+            .collect();
+        assert_eq!(values, vec![1, 2]);
+        assert!(
+            world
+                .consume_events::<PingEvent>(&mut first_cursor)
+                .is_empty()
+        );
+
+        world.step();
+        world.send(PingEvent { value: 3 });
+
+        let next: Vec<u32> = world
+            .consume_events::<PingEvent>(&mut first_cursor)
+            .iter()
+            .map(|event| event.value)
+            .collect();
+        assert_eq!(next, vec![3], "the two-frame buffer must not re-deliver");
+
+        let all: Vec<u32> = world
+            .consume_events::<PingEvent>(&mut second_cursor)
+            .iter()
+            .map(|event| event.value)
+            .collect();
+        assert_eq!(
+            all,
+            vec![1, 2, 3],
+            "independent consumers own their cursors"
+        );
+
+        struct NeverSent;
+        let mut untouched = 0;
+        assert!(world.consume_events::<NeverSent>(&mut untouched).is_empty());
+        assert_eq!(untouched, 0);
+    }
+
+    #[test]
+    fn test_expect_resource_returns_and_panics_with_type_name() {
+        struct Score(u32);
+
+        let mut world = DynWorld::new();
+        world.insert_resource(Score(5));
+
+        assert_eq!(world.expect_resource::<Score>().0, 5);
+        world.expect_resource_mut::<Score>().0 += 1;
+        assert_eq!(world.expect_resource::<Score>().0, 6);
+    }
+
+    #[test]
+    #[should_panic(expected = "expect_resource requires")]
+    fn test_expect_resource_panics_on_missing_resource() {
+        struct Missing;
+
+        let world = DynWorld::new();
+        world.expect_resource::<Missing>();
+    }
+
+    #[test]
+    fn test_spawn_bundles_clones_per_entity() {
+        let mut world = DynWorld::new();
+        let entities = world.spawn_bundles(
+            (Position { x: 4.0, y: 0.0 }, Velocity { x: 1.0, y: 0.0 }),
+            3,
+        );
+
+        assert_eq!(entities.len(), 3);
+        for &entity in &entities {
+            assert_eq!(world.get::<Position>(entity).unwrap().x, 4.0);
+            assert_eq!(world.get::<Velocity>(entity).unwrap().x, 1.0);
+        }
+    }
+
+    #[test]
+    fn test_bare_element_queries_match_single_tuples() {
+        let mut world = DynWorld::new();
+        let plain = world.spawn((Position { x: 1.0, y: 0.0 },));
+        let moving = world.spawn((Position { x: 2.0, y: 0.0 }, Velocity { x: 5.0, y: 0.0 }));
+
+        world
+            .query::<&mut Position>()
+            .for_each(|_entity, position| position.x += 10.0);
+        assert_eq!(world.get::<Position>(plain).unwrap().x, 11.0);
+        assert_eq!(world.get::<Position>(moving).unwrap().x, 12.0);
+
+        let mut velocities = Vec::new();
+        world
+            .query::<Option<&Velocity>>()
+            .for_each(|entity, velocity| {
+                velocities.push((entity, velocity.map(|velocity| velocity.x)));
+            });
+        velocities.sort_by_key(|(entity, _)| entity.id);
+        assert_eq!(velocities, vec![(plain, None), (moving, Some(5.0))]);
+
+        let total: f32 = world
+            .query_ref::<&Position>()
+            .iter()
+            .map(|(_entity, position)| position.x)
+            .sum();
+        assert_eq!(total, 23.0);
+
+        let with_velocity: Vec<Entity> = world
+            .query_ref::<Option<&Velocity>>()
+            .iter()
+            .filter(|(_entity, velocity)| velocity.is_some())
+            .map(|(entity, _)| entity)
+            .collect();
+        assert_eq!(with_velocity, vec![moving]);
+
+        world.step();
+        world.get_mut::<Position>(plain).unwrap().x = 0.0;
+        let mut changed = Vec::new();
+        world
+            .query::<&Position>()
+            .changed::<Position>()
+            .for_each(|entity, _position| changed.push(entity));
+        assert_eq!(changed, vec![plain]);
+    }
+
+    #[test]
+    fn test_remaining_bits_counts_components_and_tags() {
+        let mut world = DynWorld::new();
+        assert_eq!(world.remaining_bits(), 64);
+        world.register::<Position>();
+        world.register::<Velocity>();
+        world.register_tag();
+        world.tag_key::<Health>();
+        assert_eq!(world.remaining_bits(), 60);
     }
 
     #[test]
