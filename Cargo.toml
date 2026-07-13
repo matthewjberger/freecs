@@ -33,6 +33,10 @@ rand = "0.9.2"
 criterion = { version = "0.7.0", features = ["html_reports"] }
 
 [[example]]
+name = "tour"
+required-features = ["dynamic"]
+
+[[example]]
 name = "dynamic"
 required-features = ["dynamic"]
 
