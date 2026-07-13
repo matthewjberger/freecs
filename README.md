@@ -1098,6 +1098,17 @@ for ((entity_a, a), (entity_b, b)) in world.query_ref::<&Position>().iter_combin
 }
 ```
 
+Heavy passes go parallel with `par_for_each`, table-granular like the
+keyed tier's `par_for_each_mut`, with the same filters and stamping:
+
+```rust
+world
+    .query::<(&mut Position, &Velocity)>()
+    .par_for_each(|_entity, (position, velocity)| {
+        position.x += velocity.x;
+    });
+```
+
 #### Writing systems
 
 Systems are plain functions over `&mut DynWorld` or `&DynWorld`; the borrow
@@ -1453,56 +1464,48 @@ the ceiling when registration 65 panics.
 
 ### Named accessors over the keyed tier
 
-Heavy users who miss the macro's generated names (`get_position`,
-`set_velocity`) can have them back in about ten lines: wrap the world with a
-`Keys` struct resolved once at construction, and map names to the keyed tier
-with a local macro. The keyed accessors stamp change ticks identically to the
-macro's and skip the `TypeId` hash, so the wrappers run at keyed speed:
+Heavy users who miss the macro world's generated names (`get_position`,
+`set_velocity`, `add_boss`) get them back from `dynamic_accessors!`: it
+generates a keys struct, a `resolve` constructor registering everything in
+declaration order, and the named methods on your wrapper type, all over the
+keyed tier, so they skip the `TypeId` hash and stamp change ticks exactly
+like the macro world's accessors:
 
 ```rust
-use freecs::dynamic::{ComponentKey, DynWorld};
+use freecs::dynamic::DynWorld;
 
-struct Keys {
-    position: ComponentKey<Position>,
-    velocity: ComponentKey<Velocity>,
-}
+struct Boss;
 
-struct GameWorld {
+struct Game {
     world: DynWorld,
-    keys: Keys,
+    keys: GameKeys,
 }
 
-macro_rules! named_accessors {
-    ($($name:ident: $type:ty),+ $(,)?) => {
-        freecs::paste::paste! {
-            impl GameWorld {
-                $(
-                    pub fn [<get_ $name>](&self, entity: freecs::Entity) -> Option<&$type> {
-                        self.world.get_keyed(self.keys.$name, entity)
-                    }
-
-                    pub fn [<get_ $name _mut>](&mut self, entity: freecs::Entity) -> Option<&mut $type> {
-                        self.world.get_mut_keyed(self.keys.$name, entity)
-                    }
-
-                    pub fn [<set_ $name>](&mut self, entity: freecs::Entity, value: $type) {
-                        self.world.set_keyed(self.keys.$name, entity, value);
-                    }
-                )+
-            }
-        }
-    };
+freecs::dynamic_accessors! {
+    pub struct GameKeys for Game { world, keys }
+    components {
+        position: Position,
+        velocity: Velocity,
+    }
+    tags {
+        boss: Boss,
+    }
 }
 
-named_accessors!(position: Position, velocity: Velocity);
+let mut world = DynWorld::new();
+let keys = GameKeys::resolve(&mut world);
+let mut game = Game { world, keys };
+
+let entity = game.world.spawn((Position::default(),));
+game.set_position(entity, Position { x: 1.0, y: 0.0 });
+game.add_boss(entity);
+assert!(game.has_boss(entity));
 ```
 
-The registration function that builds `Keys` becomes the single source of
-truth for the component set: define the type, add one line there and one to
-the macro invocation. The correctness story is the same suite the macro worlds
-earned: unit coverage, the three-oracle property tests, and a differential
-oracle that drives a macro world and a `DynWorld` with one seeded op stream
-and requires identical observable state at every step.
+Per component: `get_` / `get_<name>_mut` / `set_` / `remove_` / `has_`.
+Per tag: `add_` / `remove_` / `has_` / `query_`. Combine with
+`dynamic_schema!` when the same declaration also needs mask constants and a
+shared registry.
 
 ## Multi-World ECS
 

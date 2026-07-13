@@ -3496,6 +3496,124 @@ impl<'world, Q: QueryTuple> DynQuery<'world, Q> {
             }
         }
     }
+
+    /// The parallel form of [`for_each`](Self::for_each): matching tables
+    /// run concurrently while rows within a table stay sequential, so
+    /// parallelism is table-granular like [`DynWorld::par_for_each_mut`].
+    /// Same filter set and stamping semantics; the closure is `Fn` because
+    /// tables run on worker threads, and the `added` filter builds one
+    /// scratch buffer per table task.
+    #[cfg(not(target_family = "wasm"))]
+    pub fn par_for_each<F>(self, f: F)
+    where
+        F: for<'item> Fn(Entity, Q::Item<'item>) + Send + Sync,
+    {
+        use crate::rayon::prelude::*;
+
+        let element_masks = Q::element_masks(self.world);
+        let tuple_mask = element_masks.iter().fold(0, |mask, element| mask | element);
+        assert_eq!(
+            (self.changed_mask | self.added_mask) & !tuple_mask,
+            0,
+            "changed and added filters must name components present in the query tuple"
+        );
+
+        let Some((component_include, component_exclude, tag_include, tag_exclude)) =
+            self.world.split_masks(self.include, self.exclude)
+        else {
+            return;
+        };
+
+        let since_tick = self.world.last_tick;
+        let current_tick = self.world.current_tick;
+        let changed_mask = self.changed_mask;
+        let added_mask = self.added_mask;
+        let include_tag_sets = self.include_tag_sets;
+        let exclude_tag_sets = self.exclude_tag_sets;
+
+        let has_row_filters = tag_include != 0
+            || tag_exclude != 0
+            || changed_mask != 0
+            || added_mask != 0
+            || include_tag_sets.iter().any(Option::is_some)
+            || exclude_tag_sets.iter().any(Option::is_some);
+
+        let tags = &self.world.tags;
+        self.world
+            .tables
+            .par_iter_mut()
+            .filter(|table| {
+                table.mask & component_include == component_include
+                    && table.mask & component_exclude == 0
+                    && !table.entity_indices.is_empty()
+            })
+            .for_each(|table| {
+                let added_scratch: Vec<bool> = if added_mask != 0 {
+                    let mut scratch = vec![false; table.entity_indices.len()];
+                    for column in &table.columns {
+                        if added_mask & (1u64 << column.component_index) == 0 {
+                            continue;
+                        }
+                        for (row, &added_tick) in column.added.iter().enumerate() {
+                            if tick_is_newer(added_tick, since_tick) {
+                                scratch[row] = true;
+                            }
+                        }
+                    }
+                    scratch
+                } else {
+                    Vec::new()
+                };
+
+                let table_mask = table.mask;
+                let DynComponentArrays {
+                    entity_indices,
+                    columns,
+                    ..
+                } = table;
+                let mut fetch = Q::fetch(table_mask, columns, &element_masks, current_tick);
+
+                if has_row_filters {
+                    let mut visited = false;
+                    for (index, &entity) in entity_indices.iter().enumerate() {
+                        if (tag_include != 0 || tag_exclude != 0)
+                            && !tags_match(tags, entity, tag_include, tag_exclude)
+                        {
+                            continue;
+                        }
+                        if !tag_sets_match(&include_tag_sets, &exclude_tag_sets, entity) {
+                            continue;
+                        }
+                        if changed_mask != 0
+                            && !Q::changed_newer(
+                                &fetch,
+                                index,
+                                &element_masks,
+                                changed_mask,
+                                since_tick,
+                            )
+                        {
+                            continue;
+                        }
+                        if added_mask != 0 && !added_scratch[index] {
+                            continue;
+                        }
+                        visited = true;
+                        f(entity, Q::item(&mut fetch, index));
+                    }
+                    if visited {
+                        Q::stamp_peaks(&mut fetch);
+                    }
+                } else {
+                    for (index, &entity) in entity_indices.iter().enumerate() {
+                        f(entity, Q::item(&mut fetch, index));
+                    }
+                    if !entity_indices.is_empty() {
+                        Q::stamp_peaks(&mut fetch);
+                    }
+                }
+            });
+    }
 }
 
 /// A read-only typed query in progress, from [`DynWorld::query_ref`].
@@ -5132,6 +5250,68 @@ mod tests {
                 .single()
                 .is_some()
         );
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    #[test]
+    fn test_typed_par_for_each_matches_sequential() {
+        let mut world = DynWorld::new();
+        let boss = world.register_tag();
+        let position = world.register::<Position>();
+        let velocity = world.register::<Velocity>();
+        let entities = world.spawn_entities(position.mask, 100);
+        world.spawn_entities(velocity.mask | position.mask, 50);
+        for &entity in entities.iter().take(10) {
+            world.add_tag(boss, entity);
+        }
+
+        world.step();
+        world
+            .query::<(&mut Position, Option<&Velocity>)>()
+            .par_for_each(|_entity, (position_value, velocity)| {
+                position_value.x += 1.0 + velocity.map_or(0.0, |velocity| velocity.x);
+            });
+
+        let mut total = 0.0;
+        world
+            .query_ref::<&Position>()
+            .iter()
+            .for_each(|(_entity, position_value)| total += position_value.x);
+        assert_eq!(total, 150.0);
+
+        assert_eq!(
+            world.query_entities_changed(position.mask).count(),
+            150,
+            "parallel mutable elements stamp change ticks"
+        );
+
+        world.step();
+        let counted = std::sync::atomic::AtomicUsize::new(0);
+        world
+            .query::<&Position>()
+            .with_tag(boss)
+            .par_for_each(|_entity, _position| {
+                counted.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            });
+        assert_eq!(counted.load(std::sync::atomic::Ordering::Relaxed), 10);
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    #[test]
+    fn test_typed_par_for_each_added_filter() {
+        let mut world = DynWorld::new();
+        world.spawn((Position::default(),));
+        world.step();
+        let fresh = world.spawn((Position::default(),));
+
+        let seen = std::sync::Mutex::new(Vec::new());
+        world
+            .query::<&Position>()
+            .added::<Position>()
+            .par_for_each(|entity, _position| {
+                seen.lock().unwrap().push(entity);
+            });
+        assert_eq!(*seen.lock().unwrap(), vec![fresh]);
     }
 
     #[test]

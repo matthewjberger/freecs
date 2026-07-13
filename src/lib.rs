@@ -542,6 +542,122 @@ macro_rules! dynamic_schema {
     };
 }
 
+/// Generates the macro-world accessor ergonomics over the keyed tier: a
+/// keys struct holding one [`dynamic::ComponentKey`] or
+/// [`dynamic::TagKey`] per entry, a `resolve` constructor registering them
+/// in declaration order, and named methods on your wrapper type —
+/// `get_<name>` / `get_<name>_mut` / `set_<name>` / `remove_<name>` /
+/// `has_<name>` per component, `add_<name>` / `remove_<name>` /
+/// `has_<name>` / `query_<name>` per tag. The wrapper must expose the named
+/// world and keys fields. Accessors run at keyed speed and stamp change
+/// ticks exactly like the generated macro world's.
+///
+/// ```rust
+/// use freecs::dynamic::DynWorld;
+///
+/// #[derive(Default, Clone, Debug)]
+/// struct Position { x: f32 }
+///
+/// struct Boss;
+///
+/// struct Game {
+///     world: DynWorld,
+///     keys: GameKeys,
+/// }
+///
+/// freecs::dynamic_accessors! {
+///     pub struct GameKeys for Game { world, keys }
+///     components {
+///         position: Position,
+///     }
+///     tags {
+///         boss: Boss,
+///     }
+/// }
+///
+/// let mut world = DynWorld::new();
+/// let keys = GameKeys::resolve(&mut world);
+/// let mut game = Game { world, keys };
+///
+/// let entity = game.world.spawn((Position { x: 1.0 },));
+/// game.set_position(entity, Position { x: 2.0 });
+/// game.add_boss(entity);
+/// assert_eq!(game.get_position(entity).unwrap().x, 2.0);
+/// assert!(game.has_boss(entity));
+/// assert_eq!(game.query_boss().count(), 1);
+/// ```
+#[cfg(feature = "dynamic")]
+#[macro_export]
+macro_rules! dynamic_accessors {
+    (
+        $vis:vis struct $keys:ident for $wrapper:ident { $world_field:ident, $keys_field:ident }
+        components {
+            $($component:ident: $component_type:ty,)*
+        }
+        tags {
+            $($tag:ident: $tag_type:ty,)*
+        }
+    ) => {
+        $vis struct $keys {
+            $(pub $component: $crate::dynamic::ComponentKey<$component_type>,)*
+            $(pub $tag: $crate::dynamic::TagKey,)*
+        }
+
+        impl $keys {
+            $vis fn resolve(world: &mut $crate::dynamic::DynWorld) -> Self {
+                Self {
+                    $($component: world.register::<$component_type>(),)*
+                    $($tag: world.tag_key::<$tag_type>(),)*
+                }
+            }
+        }
+
+        $crate::paste::paste! {
+            impl $wrapper {
+                $(
+                    $vis fn [<get_ $component>](&self, entity: $crate::Entity) -> Option<&$component_type> {
+                        self.$world_field.get_keyed(self.$keys_field.$component, entity)
+                    }
+
+                    $vis fn [<get_ $component _mut>](&mut self, entity: $crate::Entity) -> Option<&mut $component_type> {
+                        self.$world_field.get_mut_keyed(self.$keys_field.$component, entity)
+                    }
+
+                    $vis fn [<set_ $component>](&mut self, entity: $crate::Entity, value: $component_type) {
+                        self.$world_field.set_keyed(self.$keys_field.$component, entity, value);
+                    }
+
+                    $vis fn [<remove_ $component>](&mut self, entity: $crate::Entity) -> bool {
+                        self.$world_field.remove_components(entity, self.$keys_field.$component.mask)
+                    }
+
+                    $vis fn [<has_ $component>](&self, entity: $crate::Entity) -> bool {
+                        self.$world_field.entity_has_components(entity, self.$keys_field.$component.mask)
+                    }
+                )*
+
+                $(
+                    $vis fn [<add_ $tag>](&mut self, entity: $crate::Entity) {
+                        self.$world_field.add_tag(self.$keys_field.$tag, entity);
+                    }
+
+                    $vis fn [<remove_ $tag>](&mut self, entity: $crate::Entity) -> bool {
+                        self.$world_field.remove_tag(self.$keys_field.$tag, entity)
+                    }
+
+                    $vis fn [<has_ $tag>](&self, entity: $crate::Entity) -> bool {
+                        self.$world_field.has_tag(self.$keys_field.$tag, entity)
+                    }
+
+                    $vis fn [<query_ $tag>](&self) -> impl Iterator<Item = $crate::Entity> + '_ {
+                        self.$world_field.query_tag(self.$keys_field.$tag)
+                    }
+                )*
+            }
+        }
+    };
+}
+
 #[cfg(not(target_family = "wasm"))]
 pub use rayon;
 
