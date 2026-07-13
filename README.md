@@ -961,22 +961,33 @@ assert_eq!(health.mask, 0b100);
 assert!(world.remaining_bits() > 32);
 ```
 
-For several worlds that must agree on masks, or for snapshots, build one
-`ComponentRegistry` up front and construct worlds from it:
+For several worlds that must agree on masks, or for snapshots, declare the
+schema in one place with `dynamic_schema!`: it generates the mask constants
+in declaration order, the registration function building a
+`ComponentRegistry` in that exact order, and an assertion per component
+that the two agree. Declare every component on every build configuration
+and only ever append, so masks stay identical across feature sets and saves
+stay loadable. Runtime components keep registering after the declared base;
+the schema is a floor, not a ceiling:
 
 ```rust
-use freecs::dynamic::{ComponentRegistry, DynWorld};
+use freecs::dynamic::DynWorld;
 
-fn build_registry() -> ComponentRegistry {
-    let mut registry = ComponentRegistry::new();
-    registry.register::<Position>();
-    registry.register::<Velocity>();
-    registry.register::<Health>();
-    registry
+freecs::dynamic_schema! {
+    pub fn register_components {
+        position: Position => POSITION,
+        velocity: Velocity => VELOCITY,
+        health: Health => HEALTH,
+    }
 }
 
-let world = DynWorld::from_registry(build_registry());
+let world = DynWorld::from_registry(register_components());
+assert_eq!(HEALTH, 0b100);
 ```
+
+Prefix the function with `serde` (`dynamic_schema! { serde pub fn ... }`)
+to register every component with a snapshot codec, so the same declaration
+is the save-format schema.
 
 #### Spawning and despawning
 
@@ -1231,6 +1242,29 @@ assert!(!world.is_alive(child));
 
 In a `DynEcs` group, use `ecs.despawn_recursive(root)` instead so the
 cascade despawns through the group.
+
+Hierarchy-heavy consumers keep a `HierarchyIndex`, a consumer-owned map
+synced by pull from the structural log and change ticks, so lookups stop
+scanning and each sync costs what changed:
+
+```rust
+use freecs::dynamic::{ChildOf, HierarchyIndex};
+
+let mut world = DynWorld::new();
+let mut hierarchy = HierarchyIndex::new();
+
+let parent = world.spawn((Position::default(),));
+let child = world.spawn((Position::default(), ChildOf(parent)));
+
+hierarchy.sync(&mut world); // once a frame, or before reading
+assert_eq!(hierarchy.children(parent), &[child]);
+assert_eq!(hierarchy.descendants(parent), vec![child]);
+hierarchy.despawn_recursive(&mut world, parent);
+```
+
+Every link write that stamps change ticks is picked up: spawns, `set`,
+migrations, and raw-tier writes followed by `mark_changed`. Reads reflect
+the last sync.
 
 #### Deferred commands
 

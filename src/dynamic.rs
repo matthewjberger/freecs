@@ -3882,10 +3882,142 @@ impl_bundle!(A, B, C, D, E, F, G, H);
 /// A parent link for entity hierarchies: plain data, pull-maintained, no
 /// hooks. Attach with `world.set(child, ChildOf(parent))`;
 /// [`DynWorld::children`] and [`DynWorld::despawn_recursive`] scan it on
-/// demand, and a link to a despawned parent is just a link nothing resolves.
+/// demand, [`HierarchyIndex`] answers from a synced map, and a link to a
+/// despawned parent is just a link nothing resolves.
 #[derive(Default, Clone, Copy, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ChildOf(pub Entity);
+
+/// A maintained child index over [`ChildOf`] links, for hierarchy-heavy
+/// consumers: [`DynWorld::children`] scans every link carrier on demand,
+/// while this answers from maps kept current by [`sync`](Self::sync).
+///
+/// Plain data owned by the consumer, no hooks: `sync` consumes the world's
+/// structural log and change ticks, so every link write that stamps ticks
+/// is picked up — spawns, `set`, migrations, and raw-tier writes followed
+/// by [`DynWorld::mark_changed`] — and each sync costs proportional to what
+/// changed since the last one. Reads reflect the last sync. In a
+/// [`DynEcs`] group, sync against the member world holding the links and
+/// despawn through the group using [`descendants`](Self::descendants).
+pub struct HierarchyIndex {
+    pub children: HashMap<Entity, Vec<Entity>>,
+    pub parent_of: HashMap<Entity, Entity>,
+    pub structural_cursor: u64,
+    pub tick_cursor: u32,
+}
+
+impl Default for HierarchyIndex {
+    fn default() -> Self {
+        Self {
+            children: HashMap::new(),
+            parent_of: HashMap::new(),
+            structural_cursor: 0,
+            tick_cursor: u32::MAX,
+        }
+    }
+}
+
+impl HierarchyIndex {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Brings the index up to date with the world, then fences the change
+    /// window with [`DynWorld::increment_tick`] so writes made after this
+    /// call land in the next sync. Despawns and `ChildOf` removals unlink
+    /// through the structural log; new and rewritten links relink from the
+    /// component's current value.
+    pub fn sync(&mut self, world: &mut DynWorld) {
+        let child_mask = world
+            .lookup_key::<ChildOf>()
+            .map(|key| key.mask)
+            .unwrap_or(0);
+
+        let unlinks: Vec<Entity> = world
+            .structural_changes_since(self.structural_cursor)
+            .iter()
+            .filter(|change| match change.kind {
+                StructuralChangeKind::Despawned => true,
+                StructuralChangeKind::ComponentsRemoved => change.mask & child_mask != 0,
+                _ => false,
+            })
+            .map(|change| change.entity)
+            .collect();
+        for entity in unlinks {
+            self.unlink(entity);
+        }
+
+        if child_mask != 0 {
+            let relinks: Vec<Entity> = world
+                .query_entities_changed_since(child_mask, self.tick_cursor)
+                .collect();
+            for entity in relinks {
+                if let Some(child_of) = world.get::<ChildOf>(entity) {
+                    self.relink(entity, child_of.0);
+                }
+            }
+        }
+
+        self.structural_cursor = world.structural_sequence();
+        self.tick_cursor = world.current_tick();
+        world.increment_tick();
+    }
+
+    fn unlink(&mut self, entity: Entity) {
+        if let Some(parent) = self.parent_of.remove(&entity)
+            && let Some(siblings) = self.children.get_mut(&parent)
+        {
+            siblings.retain(|&child| child != entity);
+            if siblings.is_empty() {
+                self.children.remove(&parent);
+            }
+        }
+    }
+
+    fn relink(&mut self, entity: Entity, parent: Entity) {
+        if self.parent_of.get(&entity) == Some(&parent) {
+            return;
+        }
+        self.unlink(entity);
+        self.parent_of.insert(entity, parent);
+        self.children.entry(parent).or_default().push(entity);
+    }
+
+    /// Children of a parent as of the last sync.
+    pub fn children(&self, parent: Entity) -> &[Entity] {
+        self.children.get(&parent).map(Vec::as_slice).unwrap_or(&[])
+    }
+
+    /// Every entity reachable from the root through child edges as of the
+    /// last sync, breadth-first, root excluded. Link cycles are tolerated.
+    pub fn descendants(&self, root: Entity) -> Vec<Entity> {
+        let mut pending = vec![root];
+        let mut visited: Vec<Entity> = Vec::new();
+        while let Some(parent) = pending.pop() {
+            for &child in self.children(parent) {
+                if child != root && !visited.contains(&child) {
+                    visited.push(child);
+                    pending.push(child);
+                }
+            }
+        }
+        visited
+    }
+
+    /// Despawns the root and its indexed descendants in one pass, eagerly
+    /// unlinking them so the index is consistent before the next sync.
+    /// Answers from the index, not a scan, so sync first if links changed
+    /// since the last one. Returns the despawned entities.
+    pub fn despawn_recursive(&mut self, world: &mut DynWorld, root: Entity) -> Vec<Entity> {
+        let mut targets = self.descendants(root);
+        targets.insert(0, root);
+        for &entity in &targets {
+            self.unlink(entity);
+            self.children.remove(&entity);
+        }
+        world.despawn_entities(&targets)
+    }
+}
 
 /// A tuple of resource types taken out of the world together by
 /// [`DynWorld::resources_scope`]. Implemented for tuples of up to eight
@@ -5000,6 +5132,150 @@ mod tests {
                 .single()
                 .is_some()
         );
+    }
+
+    #[test]
+    fn test_hierarchy_index_links_relinks_and_unlinks() {
+        let mut world = DynWorld::new();
+        let mut index = HierarchyIndex::new();
+
+        let parent_a = world.spawn((Position::default(),));
+        let parent_b = world.spawn((Position::default(),));
+        let child = world.spawn((Position::default(), ChildOf(parent_a)));
+
+        index.sync(&mut world);
+        assert_eq!(index.children(parent_a), &[child]);
+        assert_eq!(index.parent_of.get(&child), Some(&parent_a));
+
+        world.set(child, ChildOf(parent_b));
+        index.sync(&mut world);
+        assert!(index.children(parent_a).is_empty());
+        assert_eq!(index.children(parent_b), &[child]);
+
+        world.remove::<ChildOf>(child);
+        index.sync(&mut world);
+        assert!(index.children(parent_b).is_empty());
+        assert!(index.parent_of.is_empty());
+
+        world.set(child, ChildOf(parent_b));
+        index.sync(&mut world);
+        world.despawn_entities(&[child]);
+        index.sync(&mut world);
+        assert!(index.children(parent_b).is_empty());
+
+        index.sync(&mut world);
+        assert!(index.parent_of.is_empty(), "an idle sync changes nothing");
+    }
+
+    #[test]
+    fn test_hierarchy_index_matches_scan_oracle() {
+        for seed in [11u64, 1111, 111111] {
+            let mut rng = Lcg(seed);
+            let mut world = DynWorld::new();
+            let mut index = HierarchyIndex::new();
+            let mut handles: Vec<Entity> = Vec::new();
+
+            for _ in 0..1200 {
+                match rng.next() % 10 {
+                    0..=2 => {
+                        handles.push(world.spawn((Position::default(),)));
+                    }
+                    3..=4 => {
+                        if handles.len() >= 2 {
+                            let child = handles[rng.next() as usize % handles.len()];
+                            let parent = handles[rng.next() as usize % handles.len()];
+                            if child != parent {
+                                world.set(child, ChildOf(parent));
+                            }
+                        }
+                    }
+                    5 => {
+                        if !handles.is_empty() {
+                            let entity = handles[rng.next() as usize % handles.len()];
+                            world.remove::<ChildOf>(entity);
+                        }
+                    }
+                    6 => {
+                        if !handles.is_empty() {
+                            let victim = handles.remove(rng.next() as usize % handles.len());
+                            world.despawn_entities(&[victim]);
+                        }
+                    }
+                    _ => {
+                        index.sync(&mut world);
+                    }
+                }
+            }
+
+            index.sync(&mut world);
+            for &parent in &handles {
+                let mut indexed: Vec<Entity> = index.children(parent).to_vec();
+                let mut scanned = world.children(parent);
+                indexed.sort_unstable_by_key(|entity| entity.id);
+                scanned.sort_unstable_by_key(|entity| entity.id);
+                assert_eq!(
+                    indexed, scanned,
+                    "index diverged from scan with seed {seed}"
+                );
+            }
+            for (&child, &parent) in &index.parent_of {
+                assert_eq!(
+                    world.get::<ChildOf>(child).map(|link| link.0),
+                    Some(parent),
+                    "stale upward link with seed {seed}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_hierarchy_index_raw_writes_need_mark_changed() {
+        let mut world = DynWorld::new();
+        let mut index = HierarchyIndex::new();
+
+        let parent_a = world.spawn((Position::default(),));
+        let parent_b = world.spawn((Position::default(),));
+        let child = world.spawn((ChildOf(parent_a),));
+        index.sync(&mut world);
+
+        let child_of = world.register::<ChildOf>();
+        world.for_each_tables_mut(child_of.mask, 0, |table| {
+            for link in table.column_mut(child_of) {
+                link.0 = parent_b;
+            }
+        });
+        index.sync(&mut world);
+        assert_eq!(
+            index.children(parent_a),
+            &[child],
+            "an unstamped raw write is invisible by covenant"
+        );
+
+        world.mark_changed(child, child_of.mask);
+        index.sync(&mut world);
+        assert_eq!(index.children(parent_b), &[child]);
+    }
+
+    #[test]
+    fn test_hierarchy_index_despawn_recursive() {
+        let mut world = DynWorld::new();
+        let mut index = HierarchyIndex::new();
+
+        let root = world.spawn((Position::default(),));
+        let child = world.spawn((ChildOf(root),));
+        let grandchild = world.spawn((ChildOf(child),));
+        let bystander = world.spawn((Position::default(),));
+        index.sync(&mut world);
+
+        assert_eq!(index.descendants(root), vec![child, grandchild]);
+        let despawned = index.despawn_recursive(&mut world, root);
+        assert_eq!(despawned.len(), 3);
+        assert!(index.children(root).is_empty());
+        assert!(index.parent_of.is_empty());
+        assert!(world.is_alive(bystander));
+
+        index.sync(&mut world);
+        assert!(index.parent_of.is_empty());
     }
 
     #[test]

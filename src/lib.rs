@@ -459,6 +459,89 @@ pub use paste;
 #[cfg(feature = "dynamic")]
 pub mod dynamic;
 
+/// Declares a dynamic world's schema in one place: the mask constants (bits
+/// assigned in declaration order, which is the registration order and
+/// therefore the snapshot schema) and the registration function that builds
+/// a [`dynamic::ComponentRegistry`] in that exact order, asserting each
+/// key's mask against its constant. Declare every component on every build
+/// configuration, and only ever append, so masks stay identical across
+/// feature sets and saves stay loadable.
+///
+/// The leading field name documents intent and keeps the shape drop-in
+/// compatible with `ecs!` component blocks; only the type and constant are
+/// used. Prefix the function with `serde` to register every component with
+/// a snapshot codec (requires the `snapshot` feature and serde derives on
+/// the components).
+///
+/// ```rust
+/// #[derive(Default, Clone, Debug)]
+/// struct Position { x: f32, y: f32 }
+///
+/// #[derive(Default, Clone, Debug)]
+/// struct Velocity { x: f32, y: f32 }
+///
+/// freecs::dynamic_schema! {
+///     pub fn register_components {
+///         position: Position => POSITION,
+///         velocity: Velocity => VELOCITY,
+///     }
+/// }
+///
+/// let world = freecs::dynamic::DynWorld::from_registry(register_components());
+/// assert_eq!(POSITION, 1);
+/// assert_eq!(VELOCITY, 2);
+/// assert_eq!(world.remaining_bits(), 62);
+/// ```
+#[cfg(feature = "dynamic")]
+#[macro_export]
+macro_rules! dynamic_schema {
+    (@consts $bit:expr;) => {};
+    (@consts $bit:expr; $const:ident $(, $rest:ident)*) => {
+        pub const $const: u64 = $bit;
+        $crate::dynamic_schema!(@consts $bit << 1; $($rest),*);
+    };
+    (
+        $vis:vis fn $register_fn:ident {
+            $($field:ident: $ty:ty => $const:ident,)+
+        }
+    ) => {
+        $crate::dynamic_schema!(@consts 1u64; $($const),+);
+
+        $vis fn $register_fn() -> $crate::dynamic::ComponentRegistry {
+            let mut registry = $crate::dynamic::ComponentRegistry::new();
+            $(
+                let key = registry.register::<$ty>();
+                assert_eq!(
+                    key.mask,
+                    $const,
+                    "schema declaration order must match registration order"
+                );
+            )+
+            registry
+        }
+    };
+    (
+        serde $vis:vis fn $register_fn:ident {
+            $($field:ident: $ty:ty => $const:ident,)+
+        }
+    ) => {
+        $crate::dynamic_schema!(@consts 1u64; $($const),+);
+
+        $vis fn $register_fn() -> $crate::dynamic::ComponentRegistry {
+            let mut registry = $crate::dynamic::ComponentRegistry::new();
+            $(
+                let key = registry.register_serde::<$ty>();
+                assert_eq!(
+                    key.mask,
+                    $const,
+                    "schema declaration order must match registration order"
+                );
+            )+
+            registry
+        }
+    };
+}
+
 #[cfg(not(target_family = "wasm"))]
 pub use rayon;
 
@@ -5640,6 +5723,64 @@ mod tests {
 
         assert!(channel.events_since(cursor_a).is_empty());
         assert!(channel.events_since(cursor_b).is_empty());
+    }
+
+    #[cfg(feature = "dynamic")]
+    mod dynamic_schema_tests {
+        #[derive(Default, Clone, Debug)]
+        #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+        struct SchemaPosition {
+            _x: f32,
+        }
+
+        #[derive(Default, Clone, Debug)]
+        #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+        struct SchemaVelocity {
+            _x: f32,
+        }
+
+        crate::dynamic_schema! {
+            fn register_schema {
+                position: SchemaPosition => SCHEMA_POSITION,
+                velocity: SchemaVelocity => SCHEMA_VELOCITY,
+            }
+        }
+
+        #[test]
+        fn test_dynamic_schema_declares_consts_and_registry_in_order() {
+            assert_eq!(SCHEMA_POSITION, 1);
+            assert_eq!(SCHEMA_VELOCITY, 2);
+
+            let registry = register_schema();
+            assert_eq!(registry.components.len(), 2);
+            assert_eq!(registry.remaining_bits(), 62);
+
+            let mut world = crate::dynamic::DynWorld::from_registry(register_schema());
+            let key = world.register::<SchemaVelocity>();
+            assert_eq!(key.mask, SCHEMA_VELOCITY);
+        }
+
+        #[cfg(feature = "snapshot")]
+        crate::dynamic_schema! {
+            serde fn register_schema_serde {
+                position: SchemaPosition => SERDE_SCHEMA_POSITION,
+                velocity: SchemaVelocity => SERDE_SCHEMA_VELOCITY,
+            }
+        }
+
+        #[cfg(feature = "snapshot")]
+        #[test]
+        fn test_dynamic_schema_serde_mode_registers_codecs() {
+            let mut world = crate::dynamic::DynWorld::from_registry(register_schema_serde());
+            world.spawn((SchemaPosition { _x: 1.0 }, SchemaVelocity { _x: 2.0 }));
+
+            let snapshot = world.snapshot().unwrap();
+            let restored =
+                crate::dynamic::DynWorld::from_snapshot(register_schema_serde(), &snapshot)
+                    .unwrap();
+            assert_eq!(restored.entity_count(), 1);
+            assert_eq!(SERDE_SCHEMA_POSITION, 1);
+        }
     }
 
     #[test]
