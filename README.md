@@ -18,7 +18,7 @@ A high-performance, archetype-based Entity Component System (ECS) for Rust
 - Sequence-numbered event channels with exactly-once cursor consumption
 - Structural change log covering spawns, despawns, component moves, and tag flips
 - Multi-world support for >64 component types with shared entity allocator
-- Optional dynamic worlds (`dynamic` feature): register component types at runtime with bundle spawns and typed queries, same storage underneath, still zero unsafe
+- Two first-class entry points: the `ecs!` macro fixes the component set at compile time and generates named accessors, while dynamic worlds (`dynamic` feature) register components at runtime with bundle spawns, typed queries, and marker tags, over the same storage and with the same guarantees
 - Plain public data all the way down: tables, allocator, tag sets, and logs are inspectable structs and vecs
 
 The `ecs!` macro generates the entire ECS at compile time using only plain data structures, functions, and zero unsafe code.
@@ -27,6 +27,8 @@ The `ecs!` macro generates the entire ECS at compile time using only plain data 
 
 - [How it works (build it from scratch)](#how-it-works-build-it-from-scratch)
 - [Quick Start](#quick-start)
+  - [Static: the `ecs!` macro](#static-the-ecs-macro)
+  - [Dynamic: `DynWorld`](#dynamic-dynworld)
 - [Generated API](#generated-api)
   - [Closure-Based Mutation](#closure-based-mutation)
 - [Systems](#systems)
@@ -78,7 +80,15 @@ Add this to your `Cargo.toml`:
 freecs = "3"
 ```
 
-And in `main.rs`:
+freecs has two first-class entry points over the same archetype storage. The
+`ecs!` macro fixes your component set at compile time and generates a named
+accessor for everything, which is the fastest path to a working game. The
+dynamic world registers component types at runtime for programs that cannot
+know their schema up front, editors, plugin hosts, data-driven prefabs, and
+its typed queries compile to the same slice loops. Pick whichever fits, or
+run both side by side.
+
+### Static: the `ecs!` macro
 
 ```rust
 use freecs::{ecs, Entity};
@@ -247,6 +257,81 @@ mod systems {
     }
 }
 ```
+
+### Dynamic: `DynWorld`
+
+Enable the feature:
+
+```toml
+[dependencies]
+freecs = { version = "3", features = ["dynamic"] }
+```
+
+The same game shape with runtime registration, no macro and no masks:
+
+```rust
+use freecs::dynamic::DynWorld;
+
+#[derive(Default, Clone, Debug)]
+struct Position { x: f32, y: f32 }
+
+#[derive(Default, Clone, Debug)]
+struct Velocity { x: f32, y: f32 }
+
+#[derive(Default, Clone, Debug)]
+struct Health { value: f32 }
+
+struct Player;
+
+struct DeltaTime(f32);
+struct Score(u32);
+
+fn main() {
+    let mut world = DynWorld::new();
+    world.insert_resource(DeltaTime(0.016));
+    world.insert_resource(Score(0));
+
+    // Types register lazily on first use; tuples spawn as bundles.
+    let player = world.spawn((
+        Position { x: 0.0, y: 0.0 },
+        Velocity { x: 1.0, y: 2.0 },
+        Health { value: 100.0 },
+    ));
+    world.add_tag_type::<Player>(player);
+
+    // Typed queries take mutability from the tuple; Option elements match
+    // entities with or without the component.
+    world.resources_scope(|world, (delta_time, score): &mut (DeltaTime, Score)| {
+        world
+            .query::<(&mut Position, &Velocity, Option<&mut Health>)>()
+            .for_each(|_entity, (position, velocity, health)| {
+                position.x += velocity.x * delta_time.0;
+                position.y += velocity.y * delta_time.0;
+                if let Some(health) = health {
+                    health.value *= 0.98;
+                }
+            });
+        score.0 += 1;
+    });
+
+    // Read-only queries on &world are real iterators.
+    let player_positions: Vec<_> = world
+        .query_ref::<(&Position,)>()
+        .with_tag_type::<Player>()
+        .iter()
+        .map(|(entity, (position,))| (entity, position.x, position.y))
+        .collect();
+    println!("{player_positions:?}");
+
+    world.step();
+}
+```
+
+Everything else in this README's static sections has a dynamic counterpart;
+the [Dynamic Worlds](#dynamic-worlds) section covers the full API, the three
+access tiers, and measured performance against the macro path. The repository
+ships the same complete tower defense game written both ways
+(`examples/tower-defense.rs` and `examples/tower-defense-dynamic.rs`).
 
 ## Generated API
 
@@ -889,6 +974,17 @@ world.resource_scope(|world, kills: &mut u32| {
     *kills += world.query_ref::<(&Position,)>().iter().count() as u32;
 });
 
+// resources_scope is the tuple form, for systems that touch several
+// resources and the world in one pass. Everything is taken together,
+// put back together, and restored even if the closure panics.
+world.insert_resource(0.016f32);
+world.resources_scope(|world, (kills, delta_time): &mut (u32, f32)| {
+    world
+        .query::<(&mut Position,)>()
+        .for_each(|_entity, (position,)| position.x += *delta_time);
+    *kills += 1;
+});
+
 // Tags can be named by marker types instead of keys; they register lazily
 // like components and stay sparse sets underneath.
 struct Selected;
@@ -908,7 +1004,7 @@ assert_eq!(world.entity_count(), 0);
 
 Three access tiers, from ergonomic to explicit:
 
-- **Typed**: `spawn(bundle)`, `get::<T>` / `set` / `remove`, `query::<(&mut A, &B)>()` with `Option<&T>` elements and up to eight per tuple, `query_ref` iterators on `&world`, marker-type tags (`add_tag_type::<T>`, `with_tag_type::<T>()`), `despawn_with_any::<(A, B)>()`, `resource_scope`, `send(event)` / `read_events_since::<T>(cursor)`, `insert_resource` / `resource::<T>()`. `TypeId` lookups happen at registration and per typed call, never inside iteration loops.
+- **Typed**: `spawn(bundle)`, `get::<T>` / `set` / `remove`, `query::<(&mut A, &B)>()` with `Option<&T>` elements and up to eight per tuple, `query_ref` iterators on `&world`, marker-type tags (`add_tag_type::<T>`, `with_tag_type::<T>()`), `despawn_with_any::<(A, B)>()`, `resource_scope` / `resources_scope` over tuples, `send(event)` / `read_events_since::<T>(cursor)`, `insert_resource` / `resource::<T>()`. `TypeId` lookups happen at registration and per typed call, never inside iteration loops.
 - **Keyed**: `register::<T>()` returns a copyable `ComponentKey<T>` carrying the component's mask bit; `get_keyed` / `set_keyed` and mask-based `for_each` / `for_each_mut` skip the hash entirely.
 - **Raw tables**: `for_each_tables_mut(mask, 0, |table| ...)` with `table.columns_pair(a, b)` hoists concrete slices once per table for the tightest loops, no change stamping, same covenant as the static path.
 

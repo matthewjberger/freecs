@@ -1633,17 +1633,65 @@ impl DynWorld {
     /// the take/put pattern for systems that mutate both a resource and the
     /// world in one pass; the resource is absent from the world inside the
     /// closure and is reinserted even when the closure panics, before the
-    /// panic resumes. Panics if `R` is not present.
+    /// panic resumes. Panics if `R` is not present. For several resources at
+    /// once, use [`resources_scope`](Self::resources_scope).
     pub fn resource_scope<R: Send + Sync + 'static, T>(
         &mut self,
         f: impl FnOnce(&mut DynWorld, &mut R) -> T,
     ) -> T {
-        let mut resource = self
-            .remove_resource::<R>()
-            .expect("resource_scope requires the resource to be present");
+        let mut resource = self.remove_resource::<R>().unwrap_or_else(|| {
+            panic!(
+                "resource_scope requires {} to be present",
+                std::any::type_name::<R>()
+            )
+        });
         let result =
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(self, &mut resource)));
         self.insert_resource(resource);
+        match result {
+            Ok(value) => value,
+            Err(panic) => std::panic::resume_unwind(panic),
+        }
+    }
+
+    /// The tuple form of [`resource_scope`](Self::resource_scope): takes
+    /// every resource in the tuple out of the world, runs the closure with
+    /// the world and the tuple as independent borrows, and puts them all
+    /// back, even when the closure panics. Destructure the tuple in the
+    /// closure parameter. Panics before touching anything if a resource is
+    /// missing or a type repeats.
+    ///
+    /// ```rust
+    /// # use freecs::dynamic::DynWorld;
+    /// # #[derive(Default, Clone, Debug, PartialEq)]
+    /// # struct Position { x: f32, y: f32 }
+    /// struct DeltaTime(f32);
+    /// struct Score(u32);
+    ///
+    /// let mut world = DynWorld::new();
+    /// world.insert_resource(DeltaTime(0.5));
+    /// world.insert_resource(Score(0));
+    /// # world.spawn((Position { x: 1.0, y: 0.0 },));
+    ///
+    /// world.resources_scope(|world, (delta_time, score): &mut (DeltaTime, Score)| {
+    ///     score.0 += world
+    ///         .query_ref::<(&Position,)>()
+    ///         .iter()
+    ///         .filter(|(_entity, (position,))| position.x * delta_time.0 > 0.25)
+    ///         .count() as u32;
+    /// });
+    ///
+    /// assert_eq!(world.resource::<Score>().unwrap().0, 1);
+    /// assert_eq!(world.resource::<DeltaTime>().unwrap().0, 0.5);
+    /// ```
+    pub fn resources_scope<B: ResourceBundle, T>(
+        &mut self,
+        f: impl FnOnce(&mut DynWorld, &mut B) -> T,
+    ) -> T {
+        let mut bundle = B::take(self);
+        let result =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(self, &mut bundle)));
+        bundle.put(self);
         match result {
             Ok(value) => value,
             Err(panic) => std::panic::resume_unwind(panic),
@@ -2278,6 +2326,7 @@ mod sealed {
     pub trait SealedElement {}
     pub trait SealedQueryTuple {}
     pub trait SealedBundle {}
+    pub trait SealedResourceBundle {}
 }
 
 /// One element of a typed query tuple: `&T`, `&mut T`, `Option<&T>`, or
@@ -3248,6 +3297,57 @@ impl_bundle!(A, B, C, D, E, F);
 impl_bundle!(A, B, C, D, E, F, G);
 impl_bundle!(A, B, C, D, E, F, G, H);
 
+/// A tuple of resource types taken out of the world together by
+/// [`DynWorld::resources_scope`]. Implemented for tuples of up to eight
+/// distinct resource types; presence and distinctness are checked before
+/// anything is removed, so a failed take leaves the world untouched.
+pub trait ResourceBundle: sealed::SealedResourceBundle + Sized {
+    fn take(world: &mut DynWorld) -> Self;
+    fn put(self, world: &mut DynWorld);
+}
+
+macro_rules! impl_resource_bundle {
+    ($($element:ident),+) => {
+        impl<$($element: Send + Sync + 'static),+> sealed::SealedResourceBundle for ($($element,)+) {}
+
+        impl<$($element: Send + Sync + 'static),+> ResourceBundle for ($($element,)+) {
+            fn take(world: &mut DynWorld) -> Self {
+                let elements = [$((TypeId::of::<$element>(), std::any::type_name::<$element>()),)+];
+                for (index, (type_id, name)) in elements.iter().enumerate() {
+                    assert!(
+                        !elements[..index].iter().any(|(seen, _)| seen == type_id),
+                        "resource scopes must not repeat a resource type: {name}"
+                    );
+                    assert!(
+                        world.resources.contains_key(type_id),
+                        "resources_scope requires {name} to be present"
+                    );
+                }
+                ($(
+                    world
+                        .remove_resource::<$element>()
+                        .expect("presence was checked before any removal"),
+                )+)
+            }
+
+            #[allow(non_snake_case)]
+            fn put(self, world: &mut DynWorld) {
+                let ($($element,)+) = self;
+                $(world.insert_resource($element);)+
+            }
+        }
+    };
+}
+
+impl_resource_bundle!(A);
+impl_resource_bundle!(A, B);
+impl_resource_bundle!(A, B, C);
+impl_resource_bundle!(A, B, C, D);
+impl_resource_bundle!(A, B, C, D, E);
+impl_resource_bundle!(A, B, C, D, E, F);
+impl_resource_bundle!(A, B, C, D, E, F, G);
+impl_resource_bundle!(A, B, C, D, E, F, G, H);
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4035,7 +4135,89 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "resource_scope requires the resource to be present")]
+    fn test_resources_scope_takes_tuple_and_restores() {
+        struct DeltaTime(f32);
+        struct Score(u32);
+
+        let mut world = DynWorld::new();
+        world.insert_resource(DeltaTime(0.25));
+        world.insert_resource(Score(10));
+
+        let spawned =
+            world.resources_scope(|world, (delta_time, score): &mut (DeltaTime, Score)| {
+                assert!(world.resource::<DeltaTime>().is_none());
+                assert!(world.resource::<Score>().is_none());
+                delta_time.0 *= 2.0;
+                score.0 += 1;
+                world.spawn((Position { x: 3.0, y: 0.0 },))
+            });
+
+        assert_eq!(world.resource::<DeltaTime>().unwrap().0, 0.5);
+        assert_eq!(world.resource::<Score>().unwrap().0, 11);
+        assert_eq!(world.get::<Position>(spawned).unwrap().x, 3.0);
+    }
+
+    #[test]
+    fn test_resources_scope_preserves_tuple_on_panic() {
+        struct DeltaTime(f32);
+        struct Score(u32);
+
+        let mut world = DynWorld::new();
+        world.insert_resource(DeltaTime(0.25));
+        world.insert_resource(Score(10));
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            world.resources_scope(|_world, (_delta_time, _score): &mut (DeltaTime, Score)| {
+                panic!("boom")
+            });
+        }));
+
+        assert!(result.is_err());
+        assert_eq!(world.resource::<DeltaTime>().unwrap().0, 0.25);
+        assert_eq!(world.resource::<Score>().unwrap().0, 10);
+    }
+
+    #[test]
+    #[should_panic(expected = "resources_scope requires")]
+    fn test_resources_scope_missing_resource_leaves_world_untouched() {
+        struct Present;
+        struct Missing;
+
+        let mut world = DynWorld::new();
+        world.insert_resource(Present);
+
+        world.resources_scope(|_world, (_present, _missing): &mut (Present, Missing)| {});
+    }
+
+    #[test]
+    fn test_resources_scope_failed_take_removes_nothing() {
+        struct Present(u32);
+        struct Missing;
+
+        let mut world = DynWorld::new();
+        world.insert_resource(Present(1));
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            world.resources_scope(|_world, (_missing, _present): &mut (Missing, Present)| {});
+        }));
+
+        assert!(result.is_err());
+        assert_eq!(world.resource::<Present>().unwrap().0, 1);
+    }
+
+    #[test]
+    #[should_panic(expected = "must not repeat a resource type")]
+    fn test_resources_scope_rejects_repeated_type() {
+        struct Score;
+
+        let mut world = DynWorld::new();
+        world.insert_resource(Score);
+
+        world.resources_scope(|_world, (_first, _second): &mut (Score, Score)| {});
+    }
+
+    #[test]
+    #[should_panic(expected = "resource_scope requires")]
     fn test_resource_scope_panics_on_missing_resource() {
         struct Missing;
 

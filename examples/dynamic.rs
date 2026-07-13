@@ -153,6 +153,23 @@ fn main() {
     });
     println!("player: {:?}", world.get::<Position>(player));
 
+    println!("\n=== Resources scope, the tuple form ===");
+    world.insert_resource(0u32);
+    world.resources_scope(|world, (frame_count, delta_time): &mut (u32, f32)| {
+        world
+            .query::<(&mut Position, &Velocity)>()
+            .for_each(|_entity, (position, velocity)| {
+                position.x += velocity.x * *delta_time;
+                position.y += velocity.y * *delta_time;
+            });
+        *frame_count += 1;
+    });
+    println!(
+        "player: {:?} after {} scoped frame(s)",
+        world.get::<Position>(player),
+        world.resource::<u32>().unwrap()
+    );
+
     println!("\n=== Deferred commands ===");
     world.queue_despawn_entity(enemy);
     world.queue_set(player, Health { value: 250.0 });
