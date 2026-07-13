@@ -1245,9 +1245,9 @@ world. Implement `ResourceHost` on the wrapper (one method returning the
 wrapped resource map) and import `ResourceHostExt` for the same scopes as
 methods on the host, `host.resource_scope(...)` and
 `host.resources_scope(...)`. Their closures receive the host itself, with
-the same take/put semantics and panic reinsertion. The free-function forms
-`dynamic::resource_scope(&mut host, ...)` and `dynamic::resources_scope`
-are the no-import spelling of the same calls.
+the same take/put semantics and panic reinsertion. The host must return
+the same map on every call, and debug builds verify the reinserted
+resource is still reachable, so a misrouted map fails loudly.
 
 #### Tags
 
