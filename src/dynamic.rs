@@ -2896,14 +2896,19 @@ impl_read_query_tuple!(
 );
 
 /// A typed query in progress. Filters compose before `for_each` runs it.
+/// Like everything else in the crate, the fields are plain data: the filter
+/// methods are conveniences over them, and writing them directly is fine.
+/// [`DynWorld::query`] seeds `include` with the tuple's required components;
+/// a hand-built query whose `include` misses one panics at fetch rather than
+/// misbehaving.
 pub struct DynQuery<'world, Q: QueryTuple> {
-    world: &'world mut DynWorld,
-    include: u64,
-    exclude: u64,
-    changed_mask: u64,
-    include_tag_sets: [Option<&'world SparseTagSet>; 4],
-    exclude_tag_sets: [Option<&'world SparseTagSet>; 4],
-    marker: PhantomData<Q>,
+    pub world: &'world mut DynWorld,
+    pub include: u64,
+    pub exclude: u64,
+    pub changed_mask: u64,
+    pub include_tag_sets: [Option<&'world SparseTagSet>; 4],
+    pub exclude_tag_sets: [Option<&'world SparseTagSet>; 4],
+    pub marker: PhantomData<Q>,
 }
 
 fn push_tag_set<'world>(
@@ -3087,16 +3092,19 @@ impl<'world, Q: QueryTuple> DynQuery<'world, Q> {
 }
 
 /// A read-only typed query in progress, from [`DynWorld::query_ref`].
-/// Filters compose before [`iter`](Self::iter) runs it.
+/// Filters compose before [`iter`](Self::iter) runs it. The fields are the
+/// plain query description and writing them directly is fine; `iter`
+/// resolves the tuple's masks itself, so `include` only carries extra
+/// filters.
 pub struct DynQueryRef<'world, Q: ReadQueryTuple> {
-    world: &'world DynWorld,
-    include: u64,
-    exclude: u64,
-    changed_mask: u64,
-    include_tag_sets: [Option<&'world SparseTagSet>; 4],
-    exclude_tag_sets: [Option<&'world SparseTagSet>; 4],
-    dead: bool,
-    marker: PhantomData<Q>,
+    pub world: &'world DynWorld,
+    pub include: u64,
+    pub exclude: u64,
+    pub changed_mask: u64,
+    pub include_tag_sets: [Option<&'world SparseTagSet>; 4],
+    pub exclude_tag_sets: [Option<&'world SparseTagSet>; 4],
+    pub dead: bool,
+    pub marker: PhantomData<Q>,
 }
 
 impl<'world, Q: ReadQueryTuple> DynQueryRef<'world, Q> {
@@ -3241,21 +3249,21 @@ impl<'world, Q: ReadQueryTuple> DynQueryRef<'world, Q> {
 /// instead of scanning every table; the cache stays valid because table
 /// registration appends to matching entries.
 pub struct DynQueryRefIter<'world, Q: ReadQueryTuple> {
-    world: &'world DynWorld,
-    element_masks: [u64; 8],
-    include: u64,
-    exclude: u64,
-    tag_include: u64,
-    tag_exclude: u64,
-    include_tag_sets: [Option<&'world SparseTagSet>; 4],
-    exclude_tag_sets: [Option<&'world SparseTagSet>; 4],
-    changed_mask: u64,
-    since_tick: u32,
-    cached_tables: Option<&'world [usize]>,
-    table_index: usize,
-    row_index: usize,
-    current: Option<(&'world [Entity], Q::ReadFetch<'world>)>,
-    done: bool,
+    pub world: &'world DynWorld,
+    pub element_masks: [u64; 8],
+    pub include: u64,
+    pub exclude: u64,
+    pub tag_include: u64,
+    pub tag_exclude: u64,
+    pub include_tag_sets: [Option<&'world SparseTagSet>; 4],
+    pub exclude_tag_sets: [Option<&'world SparseTagSet>; 4],
+    pub changed_mask: u64,
+    pub since_tick: u32,
+    pub cached_tables: Option<&'world [usize]>,
+    pub table_index: usize,
+    pub row_index: usize,
+    pub current: Option<(&'world [Entity], Q::ReadFetch<'world>)>,
+    pub done: bool,
 }
 
 impl<'world, Q: ReadQueryTuple> Iterator for DynQueryRefIter<'world, Q> {
