@@ -2903,6 +2903,10 @@ mod snapshot {
         /// `register_serde` components; together with
         /// [`Self::get_component_by_name`] this is the value-level door for
         /// editors and protocols, no per-component dispatch required.
+        /// Standalone worlds reject dead entities with
+        /// [`SnapshotError::DeadEntity`]; a grouped member world defers
+        /// liveness to its group, so route grouped writes through
+        /// [`DynEcs::set_component_by_name`], which checks it.
         pub fn set_component_by_name(
             &mut self,
             entity: Entity,
