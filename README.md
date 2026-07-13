@@ -740,7 +740,14 @@ A despawn is logged as a single `Despawned` entry; the tags an entity held are d
 
 ### System Scheduling
 
-Organize systems into a schedule for automatic execution:
+Organize systems into a schedule for automatic execution. For programs
+assembled from independent parts (engine plugins, feature crates), `Stages`
+holds an ordered list of named stages, each its own `Schedule`: the app
+declares stage order once, parts push systems into stages by name
+(`stages.stage_mut("simulation").push(...)`), stages run in declaration
+order and systems within a stage in push order, and pushing into an
+undeclared stage panics with the declared list. Deterministic composition
+with no labels or constraint graphs.
 
 ```rust
 use freecs::Schedule;
@@ -1389,6 +1396,15 @@ one entity can hold rows in any combination of worlds, and despawning retires
 it everywhere with the same generation broadcast the static multi-world uses,
 so stale handles are refused in every member. Group tags live outside any
 world's mask space and filter per-world typed queries by set reference.
+
+The group is also where state and signals that cross member (and plugin)
+boundaries live: `DynEcs` carries its own resource map
+(`insert_resource` / `expect_resource` / `resource_scope` /
+`resources_scope`, same semantics as the world's) and its own event
+channels (`send` / `consume_events` with per-consumer cursors), and
+`ecs.step()` expires group events and steps every member world in one
+call. World-local resources and events remain on each `DynWorld`; the two
+levels are separate channels, not mirrors.
 
 Declare the members once with `dynamic_worlds!` (index constants plus the
 build function, each member asserted at its declared index; apps extending a

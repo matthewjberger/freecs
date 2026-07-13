@@ -493,6 +493,130 @@ fn event_update<T: Send + Sync + 'static>(data: &mut (dyn Any + Send + Sync)) {
         .update();
 }
 
+/// The type-erased event channels one container owns. [`DynWorld`] and
+/// [`DynEcs`] both embed one, so world-local and group-shared events run on
+/// identical machinery: sequence-numbered channels, two-frame buffering
+/// driven by [`update`](Self::update), and exactly-once consumption through
+/// per-consumer cursors.
+#[derive(Default)]
+pub struct EventBus {
+    slots: Vec<EventSlot>,
+    by_type: HashMap<TypeId, usize>,
+}
+
+impl EventBus {
+    fn slot_index<T: Send + Sync + 'static>(&mut self) -> usize {
+        if let Some(&index) = self.by_type.get(&TypeId::of::<T>()) {
+            return index;
+        }
+        let index = self.slots.len();
+        self.slots.push(EventSlot {
+            type_id: TypeId::of::<T>(),
+            data: Box::new(EventChannel::<T>::new()),
+            update: event_update::<T>,
+        });
+        self.by_type.insert(TypeId::of::<T>(), index);
+        index
+    }
+
+    fn channel<T: Send + Sync + 'static>(&self) -> Option<&EventChannel<T>> {
+        let index = *self.by_type.get(&TypeId::of::<T>())?;
+        debug_assert_eq!(self.slots[index].type_id, TypeId::of::<T>());
+        Some(
+            self.slots[index]
+                .data
+                .downcast_ref::<EventChannel<T>>()
+                .expect("event channel type mismatch"),
+        )
+    }
+
+    fn channel_mut<T: Send + Sync + 'static>(&mut self) -> &mut EventChannel<T> {
+        let index = self.slot_index::<T>();
+        self.slots[index]
+            .data
+            .downcast_mut::<EventChannel<T>>()
+            .expect("event channel type mismatch")
+    }
+
+    pub fn send<T: Send + Sync + 'static>(&mut self, event: T) {
+        self.channel_mut::<T>().send(event);
+    }
+
+    pub fn read<T: Send + Sync + 'static>(&self) -> &[T] {
+        self.channel::<T>()
+            .map(|channel| channel.events.as_slice())
+            .unwrap_or(&[])
+    }
+
+    pub fn read_since<T: Send + Sync + 'static>(&self, cursor: u64) -> &[T] {
+        self.channel::<T>()
+            .map(|channel| channel.events_since(cursor))
+            .unwrap_or(&[])
+    }
+
+    pub fn consume<T: Send + Sync + 'static>(&self, cursor: &mut u64) -> &[T] {
+        match self.channel::<T>() {
+            Some(channel) => channel.consume(cursor),
+            None => &[],
+        }
+    }
+
+    pub fn sequence<T: Send + Sync + 'static>(&self) -> u64 {
+        self.channel::<T>()
+            .map(|channel| channel.sequence())
+            .unwrap_or(0)
+    }
+
+    pub fn trim<T: Send + Sync + 'static>(&mut self, up_to_sequence: u64) {
+        self.channel_mut::<T>().trim(up_to_sequence);
+    }
+
+    pub fn clear<T: Send + Sync + 'static>(&mut self) {
+        self.channel_mut::<T>().clear();
+    }
+
+    /// Advances every channel one frame, expiring events past their
+    /// two-frame window. The containers call this from their `step`.
+    pub fn update(&mut self) {
+        for slot in &mut self.slots {
+            (slot.update)(slot.data.as_mut());
+        }
+    }
+}
+
+/// The type-keyed resource singletons one container owns. [`DynWorld`] and
+/// [`DynEcs`] both embed one, so world-local and group-shared resources use
+/// identical machinery; the containers add the expect and scope forms.
+#[derive(Default)]
+pub struct ResourceMap {
+    pub entries: HashMap<TypeId, ErasedColumn>,
+}
+
+impl ResourceMap {
+    pub fn insert<T: Send + Sync + 'static>(&mut self, value: T) {
+        self.entries.insert(TypeId::of::<T>(), Box::new(value));
+    }
+
+    pub fn get<T: Send + Sync + 'static>(&self) -> Option<&T> {
+        self.entries
+            .get(&TypeId::of::<T>())
+            .and_then(|value| value.downcast_ref::<T>())
+    }
+
+    pub fn get_mut<T: Send + Sync + 'static>(&mut self) -> Option<&mut T> {
+        self.entries
+            .get_mut(&TypeId::of::<T>())
+            .and_then(|value| value.downcast_mut::<T>())
+    }
+
+    pub fn remove<T: Send + Sync + 'static>(&mut self) -> Option<T> {
+        self.entries
+            .remove(&TypeId::of::<T>())
+            .and_then(|value| value.downcast::<T>().ok())
+            .map(|value| *value)
+    }
+}
+
 /// A world whose component set is a runtime value. Same archetype storage,
 /// change detection, structural log, tags, events, and command deferral as
 /// the macro-generated worlds, with dispatch confined to registration
@@ -519,9 +643,8 @@ pub struct DynWorld {
     pub structural_sequence: u64,
     pub tags: Vec<SparseTagSet>,
     command_buffer: Vec<DynCommand>,
-    event_slots: Vec<EventSlot>,
-    events_by_type: HashMap<TypeId, usize>,
-    pub resources: HashMap<TypeId, ErasedColumn>,
+    pub events: EventBus,
+    pub resources: ResourceMap,
 }
 
 impl Default for DynWorld {
@@ -575,9 +698,8 @@ impl DynWorld {
             structural_sequence: 0,
             tags: Vec::new(),
             command_buffer: Vec::new(),
-            event_slots: Vec::new(),
-            events_by_type: HashMap::new(),
-            resources: HashMap::new(),
+            events: EventBus::default(),
+            resources: ResourceMap::default(),
         };
         while world.tags.len() < tag_count {
             world.tags.push(SparseTagSet::default());
@@ -1622,60 +1744,24 @@ impl DynWorld {
     }
 
     pub fn step(&mut self) {
-        for slot in &mut self.event_slots {
-            (slot.update)(slot.data.as_mut());
-        }
+        self.events.update();
         self.last_tick = self.current_tick;
         self.current_tick = self.current_tick.wrapping_add(1);
     }
 
-    fn event_slot_index<T: Send + Sync + 'static>(&mut self) -> usize {
-        if let Some(&index) = self.events_by_type.get(&TypeId::of::<T>()) {
-            return index;
-        }
-        let index = self.event_slots.len();
-        self.event_slots.push(EventSlot {
-            type_id: TypeId::of::<T>(),
-            data: Box::new(EventChannel::<T>::new()),
-            update: event_update::<T>,
-        });
-        self.events_by_type.insert(TypeId::of::<T>(), index);
-        index
-    }
-
-    fn event_channel<T: Send + Sync + 'static>(&self) -> Option<&EventChannel<T>> {
-        let index = *self.events_by_type.get(&TypeId::of::<T>())?;
-        debug_assert_eq!(self.event_slots[index].type_id, TypeId::of::<T>());
-        Some(
-            self.event_slots[index]
-                .data
-                .downcast_ref::<EventChannel<T>>()
-                .expect("event channel type mismatch"),
-        )
-    }
-
     pub fn send<T: Send + Sync + 'static>(&mut self, event: T) {
-        let index = self.event_slot_index::<T>();
-        self.event_slots[index]
-            .data
-            .downcast_mut::<EventChannel<T>>()
-            .expect("event channel type mismatch")
-            .send(event);
+        self.events.send(event);
     }
 
     /// Everything still buffered for `T`, oldest first. An unregistered event
     /// type reads as empty, which is indistinguishable from registered and
     /// empty.
     pub fn read_events<T: Send + Sync + 'static>(&self) -> &[T] {
-        self.event_channel::<T>()
-            .map(|channel| channel.events.as_slice())
-            .unwrap_or(&[])
+        self.events.read::<T>()
     }
 
     pub fn read_events_since<T: Send + Sync + 'static>(&self, cursor: u64) -> &[T] {
-        self.event_channel::<T>()
-            .map(|channel| channel.events_since(cursor))
-            .unwrap_or(&[])
+        self.events.read_since::<T>(cursor)
     }
 
     /// The exactly-once read: yields events sent after the cursor and
@@ -1684,50 +1770,31 @@ impl DynWorld {
     /// [`read_events`](Self::read_events) re-delivers on the second frame;
     /// keep one `u64` cursor per consumer and reach for this by default.
     pub fn consume_events<T: Send + Sync + 'static>(&self, cursor: &mut u64) -> &[T] {
-        match self.event_channel::<T>() {
-            Some(channel) => channel.consume(cursor),
-            None => &[],
-        }
+        self.events.consume::<T>(cursor)
     }
 
     pub fn event_sequence<T: Send + Sync + 'static>(&self) -> u64 {
-        self.event_channel::<T>()
-            .map(|channel| channel.sequence())
-            .unwrap_or(0)
+        self.events.sequence::<T>()
     }
 
     pub fn trim_events<T: Send + Sync + 'static>(&mut self, up_to_sequence: u64) {
-        let index = self.event_slot_index::<T>();
-        self.event_slots[index]
-            .data
-            .downcast_mut::<EventChannel<T>>()
-            .expect("event channel type mismatch")
-            .trim(up_to_sequence);
+        self.events.trim::<T>(up_to_sequence);
     }
 
     pub fn clear_events<T: Send + Sync + 'static>(&mut self) {
-        let index = self.event_slot_index::<T>();
-        self.event_slots[index]
-            .data
-            .downcast_mut::<EventChannel<T>>()
-            .expect("event channel type mismatch")
-            .clear();
+        self.events.clear::<T>();
     }
 
     pub fn insert_resource<T: Send + Sync + 'static>(&mut self, value: T) {
-        self.resources.insert(TypeId::of::<T>(), Box::new(value));
+        self.resources.insert(value);
     }
 
     pub fn resource<T: Send + Sync + 'static>(&self) -> Option<&T> {
-        self.resources
-            .get(&TypeId::of::<T>())
-            .and_then(|value| value.downcast_ref::<T>())
+        self.resources.get::<T>()
     }
 
     pub fn resource_mut<T: Send + Sync + 'static>(&mut self) -> Option<&mut T> {
-        self.resources
-            .get_mut(&TypeId::of::<T>())
-            .and_then(|value| value.downcast_mut::<T>())
+        self.resources.get_mut::<T>()
     }
 
     /// [`resource`](Self::resource) for resources that must exist: panics
@@ -1752,10 +1819,7 @@ impl DynWorld {
     }
 
     pub fn remove_resource<T: Send + Sync + 'static>(&mut self) -> Option<T> {
-        self.resources
-            .remove(&TypeId::of::<T>())
-            .and_then(|value| value.downcast::<T>().ok())
-            .map(|value| *value)
+        self.resources.remove::<T>()
     }
 
     /// Takes `R` out of the world, runs the closure with the world and the
@@ -1818,10 +1882,10 @@ impl DynWorld {
         &mut self,
         f: impl FnOnce(&mut DynWorld, &mut B) -> T,
     ) -> T {
-        let mut bundle = B::take(self);
+        let mut bundle = B::take(&mut self.resources);
         let result =
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(self, &mut bundle)));
-        bundle.put(self);
+        bundle.put(&mut self.resources);
         match result {
             Ok(value) => value,
             Err(panic) => std::panic::resume_unwind(panic),
@@ -2120,6 +2184,8 @@ pub struct DynEcs {
     pub structural_log: Vec<StructuralChange>,
     pub structural_sequence: u64,
     pub type_routes: HashMap<TypeId, usize>,
+    pub resources: ResourceMap,
+    pub events: EventBus,
 }
 
 impl DynEcs {
@@ -2295,6 +2361,127 @@ impl DynEcs {
         }
     }
 
+    /// Advances the group frame: expires group events past their two-frame
+    /// window and steps every member world, so one call at frame end drives
+    /// group-level and world-level event lifetimes and change windows
+    /// together.
+    pub fn step(&mut self) {
+        self.events.update();
+        for world in &mut self.worlds {
+            world.step();
+        }
+    }
+
+    /// Sends a group-level event, the shared channel for events that cross
+    /// member-world (and plugin) boundaries; world-local events stay on
+    /// [`DynWorld::send`]. Same two-frame buffer, expired by
+    /// [`step`](Self::step).
+    pub fn send<T: Send + Sync + 'static>(&mut self, event: T) {
+        self.events.send(event);
+    }
+
+    /// Everything still buffered for `T` at the group level, oldest first.
+    pub fn read_events<T: Send + Sync + 'static>(&self) -> &[T] {
+        self.events.read::<T>()
+    }
+
+    pub fn read_events_since<T: Send + Sync + 'static>(&self, cursor: u64) -> &[T] {
+        self.events.read_since::<T>(cursor)
+    }
+
+    /// The exactly-once group read: yields events sent after the cursor and
+    /// advances it past them. Keep one `u64` cursor per consumer.
+    pub fn consume_events<T: Send + Sync + 'static>(&self, cursor: &mut u64) -> &[T] {
+        self.events.consume::<T>(cursor)
+    }
+
+    pub fn event_sequence<T: Send + Sync + 'static>(&self) -> u64 {
+        self.events.sequence::<T>()
+    }
+
+    pub fn clear_events<T: Send + Sync + 'static>(&mut self) {
+        self.events.clear::<T>();
+    }
+
+    /// Inserts a group-level resource, the home for state shared across
+    /// member worlds and plugins; world-local resources stay on
+    /// [`DynWorld::insert_resource`].
+    pub fn insert_resource<T: Send + Sync + 'static>(&mut self, value: T) {
+        self.resources.insert(value);
+    }
+
+    pub fn resource<T: Send + Sync + 'static>(&self) -> Option<&T> {
+        self.resources.get::<T>()
+    }
+
+    pub fn resource_mut<T: Send + Sync + 'static>(&mut self) -> Option<&mut T> {
+        self.resources.get_mut::<T>()
+    }
+
+    /// [`resource`](Self::resource) for resources that must exist: panics
+    /// with the type name instead of returning `Option`.
+    pub fn expect_resource<T: Send + Sync + 'static>(&self) -> &T {
+        self.resource::<T>().unwrap_or_else(|| {
+            panic!(
+                "expect_resource requires {} to be present",
+                std::any::type_name::<T>()
+            )
+        })
+    }
+
+    /// The mutable form of [`expect_resource`](Self::expect_resource).
+    pub fn expect_resource_mut<T: Send + Sync + 'static>(&mut self) -> &mut T {
+        match self.resource_mut::<T>() {
+            Some(resource) => resource,
+            None => panic!(
+                "expect_resource_mut requires {} to be present",
+                std::any::type_name::<T>()
+            ),
+        }
+    }
+
+    pub fn remove_resource<T: Send + Sync + 'static>(&mut self) -> Option<T> {
+        self.resources.remove::<T>()
+    }
+
+    /// Takes a group resource out, runs the closure with the group and the
+    /// resource as independent borrows, then puts it back, even when the
+    /// closure panics. Panics if `R` is not present.
+    pub fn resource_scope<R: Send + Sync + 'static, T>(
+        &mut self,
+        f: impl FnOnce(&mut DynEcs, &mut R) -> T,
+    ) -> T {
+        let mut resource = self.remove_resource::<R>().unwrap_or_else(|| {
+            panic!(
+                "resource_scope requires {} to be present",
+                std::any::type_name::<R>()
+            )
+        });
+        let result =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(self, &mut resource)));
+        self.insert_resource(resource);
+        match result {
+            Ok(value) => value,
+            Err(panic) => std::panic::resume_unwind(panic),
+        }
+    }
+
+    /// The tuple form of [`resource_scope`](Self::resource_scope), same
+    /// semantics as [`DynWorld::resources_scope`].
+    pub fn resources_scope<B: ResourceBundle, T>(
+        &mut self,
+        f: impl FnOnce(&mut DynEcs, &mut B) -> T,
+    ) -> T {
+        let mut bundle = B::take(&mut self.resources);
+        let result =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(self, &mut bundle)));
+        bundle.put(&mut self.resources);
+        match result {
+            Ok(value) => value,
+            Err(panic) => std::panic::resume_unwind(panic),
+        }
+    }
+
     /// [`add_world`](Self::add_world) with the index asserted against the
     /// constant a schema pairs with this member, replacing the hand-written
     /// add-then-assert dance. Panics when members register out of
@@ -2410,13 +2597,6 @@ impl DynEcs {
 
     pub fn query_tag(&self, tag_index: usize) -> impl Iterator<Item = Entity> + '_ {
         self.tags[tag_index].iter()
-    }
-
-    /// Steps every member world: event expiry and change-detection ticks.
-    pub fn step(&mut self) {
-        for world in &mut self.worlds {
-            world.step();
-        }
     }
 }
 
@@ -4300,13 +4480,14 @@ impl HierarchyIndex {
     }
 }
 
-/// A tuple of resource types taken out of the world together by
-/// [`DynWorld::resources_scope`]. Implemented for tuples of up to eight
-/// distinct resource types; presence and distinctness are checked before
-/// anything is removed, so a failed take leaves the world untouched.
+/// A tuple of resource types taken out of a [`ResourceMap`] together by
+/// [`DynWorld::resources_scope`] and [`DynEcs::resources_scope`].
+/// Implemented for tuples of up to eight distinct resource types; presence
+/// and distinctness are checked before anything is removed, so a failed
+/// take leaves the map untouched.
 pub trait ResourceBundle: sealed::SealedResourceBundle + Sized {
-    fn take(world: &mut DynWorld) -> Self;
-    fn put(self, world: &mut DynWorld);
+    fn take(resources: &mut ResourceMap) -> Self;
+    fn put(self, resources: &mut ResourceMap);
 }
 
 macro_rules! impl_resource_bundle {
@@ -4314,7 +4495,7 @@ macro_rules! impl_resource_bundle {
         impl<$($element: Send + Sync + 'static),+> sealed::SealedResourceBundle for ($($element,)+) {}
 
         impl<$($element: Send + Sync + 'static),+> ResourceBundle for ($($element,)+) {
-            fn take(world: &mut DynWorld) -> Self {
+            fn take(resources: &mut ResourceMap) -> Self {
                 let elements = [$((TypeId::of::<$element>(), std::any::type_name::<$element>()),)+];
                 for (index, (type_id, name)) in elements.iter().enumerate() {
                     assert!(
@@ -4322,21 +4503,21 @@ macro_rules! impl_resource_bundle {
                         "resource scopes must not repeat a resource type: {name}"
                     );
                     assert!(
-                        world.resources.contains_key(type_id),
+                        resources.entries.contains_key(type_id),
                         "resources_scope requires {name} to be present"
                     );
                 }
                 ($(
-                    world
-                        .remove_resource::<$element>()
+                    resources
+                        .remove::<$element>()
                         .expect("presence was checked before any removal"),
                 )+)
             }
 
             #[allow(non_snake_case)]
-            fn put(self, world: &mut DynWorld) {
+            fn put(self, resources: &mut ResourceMap) {
                 let ($($element,)+) = self;
-                $(world.insert_resource($element);)+
+                $(resources.insert($element);)+
             }
         }
     };
@@ -6323,6 +6504,80 @@ mod tests {
             let expected = if offset < 5 { 7.0 } else { 0.0 };
             assert_eq!(world.get_keyed(position, entity).unwrap().x, expected);
         }
+    }
+
+    #[test]
+    fn test_dyn_ecs_group_events_are_exactly_once_with_two_frame_expiry() {
+        let mut ecs = DynEcs::new();
+        ecs.add_world(ComponentRegistry::new());
+        ecs.add_world(ComponentRegistry::new());
+
+        ecs.send(42u32);
+        let mut cursor = 0;
+        assert_eq!(ecs.consume_events::<u32>(&mut cursor), &[42]);
+        assert!(ecs.consume_events::<u32>(&mut cursor).is_empty());
+        assert_eq!(
+            ecs.read_events::<u32>(),
+            &[42],
+            "read_events re-reads inside the buffer window"
+        );
+
+        let core_tick = ecs.worlds[0].current_tick;
+        ecs.step();
+        assert_eq!(
+            ecs.worlds[0].current_tick,
+            core_tick.wrapping_add(1),
+            "group step drives member ticks"
+        );
+        assert_eq!(ecs.read_events::<u32>(), &[42]);
+        ecs.step();
+        assert!(
+            ecs.read_events::<u32>().is_empty(),
+            "group events expire after two frames"
+        );
+
+        ecs.worlds[0].send(7u32);
+        assert!(
+            ecs.read_events::<u32>().is_empty(),
+            "world-local channels stay separate from the group channel"
+        );
+    }
+
+    #[test]
+    fn test_dyn_ecs_group_resources_and_scopes() {
+        struct Shared(u32);
+        struct Delta(f32);
+
+        let mut ecs = DynEcs::new();
+        ecs.add_world(ComponentRegistry::new());
+
+        assert!(ecs.resource::<Shared>().is_none());
+        ecs.insert_resource(Shared(1));
+        ecs.insert_resource(Delta(0.5));
+        ecs.expect_resource_mut::<Shared>().0 += 1;
+        assert_eq!(ecs.expect_resource::<Shared>().0, 2);
+
+        let entity = ecs.spawn();
+        ecs.resource_scope(|ecs, shared: &mut Shared| {
+            shared.0 += u32::from(ecs.is_alive(entity));
+        });
+        assert_eq!(ecs.resource::<Shared>().unwrap().0, 3);
+
+        ecs.resources_scope(|ecs, (shared, delta): &mut (Shared, Delta)| {
+            shared.0 += u32::from(ecs.is_alive(entity)) + delta.0 as u32;
+        });
+        assert_eq!(ecs.resource::<Shared>().unwrap().0, 4);
+        assert!(ecs.remove_resource::<Delta>().is_some());
+
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            ecs.resource_scope(|_ecs, _shared: &mut Shared| panic!("boom"));
+        }));
+        assert!(panic.is_err());
+        assert_eq!(
+            ecs.resource::<Shared>().unwrap().0,
+            4,
+            "the resource is restored even when the closure panics"
+        );
     }
 
     #[test]

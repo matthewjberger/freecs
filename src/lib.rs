@@ -1416,6 +1416,72 @@ impl<W> Default for Schedule<W> {
     }
 }
 
+/// An ordered set of named stages, each its own [`Schedule`], for programs
+/// assembled from independent parts: the app declares the stage order once,
+/// and each part pushes systems into stages by name, so composition stays
+/// deterministic without labels or ordering constraints. Stages run in
+/// declaration order; systems within a stage run in push order. Plain data,
+/// inspectable through [`stages`](Self::stages).
+pub struct Stages<W> {
+    pub stages: Vec<(&'static str, Schedule<W>)>,
+}
+
+impl<W> Stages<W> {
+    pub fn new() -> Self {
+        Self { stages: Vec::new() }
+    }
+
+    /// Appends a stage at the end of the run order. Panics on a duplicate
+    /// name, since two parts declaring the same stage is a wiring bug.
+    pub fn add_stage(&mut self, name: &'static str) -> &mut Self {
+        assert!(
+            !self.stages.iter().any(|(existing, _)| *existing == name),
+            "stage {name:?} is already declared"
+        );
+        self.stages.push((name, Schedule::new()));
+        self
+    }
+
+    /// The stage's schedule, for pushing systems into it
+    /// (`stages.stage_mut("simulation").push(...)`). Panics with the
+    /// declared stage list when the stage does not exist, so a part pushing
+    /// into a missing stage fails at wiring time, not silently.
+    pub fn stage_mut(&mut self, name: &str) -> &mut Schedule<W> {
+        let declared: Vec<&'static str> = self
+            .stages
+            .iter()
+            .map(|(stage_name, _)| *stage_name)
+            .collect();
+        match self
+            .stages
+            .iter_mut()
+            .find(|(stage_name, _)| *stage_name == name)
+        {
+            Some((_, schedule)) => schedule,
+            None => panic!("no stage named {name:?}; declared stages are {declared:?}"),
+        }
+    }
+
+    /// Runs every stage in declaration order.
+    pub fn run(&mut self, world: &mut W) {
+        for (_name, schedule) in &mut self.stages {
+            schedule.run(world);
+        }
+    }
+
+    /// Runs one stage by name, for loops that drive stages on different
+    /// cadences. Panics like [`stage_mut`](Self::stage_mut) when missing.
+    pub fn run_stage(&mut self, name: &str, world: &mut W) {
+        self.stage_mut(name).run(world);
+    }
+}
+
+impl<W> Default for Stages<W> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[macro_export]
 macro_rules! ecs {
     (
@@ -5946,6 +6012,47 @@ mod tests {
             assert_eq!(restored.entity_count(), 1);
             assert_eq!(SERDE_SCHEMA_POSITION, 1);
         }
+    }
+
+    #[test]
+    fn test_stages_run_in_declaration_order() {
+        let mut stages: Stages<Vec<&'static str>> = Stages::new();
+        stages.add_stage("input").add_stage("simulation");
+        stages.add_stage("render");
+
+        stages
+            .stage_mut("render")
+            .push("draw", |log: &mut Vec<&'static str>| log.push("draw"));
+        stages
+            .stage_mut("input")
+            .push("poll", |log: &mut Vec<&'static str>| log.push("poll"));
+        stages
+            .stage_mut("simulation")
+            .push("physics", |log: &mut Vec<&'static str>| log.push("physics"))
+            .push("ai", |log: &mut Vec<&'static str>| log.push("ai"));
+
+        let mut log = Vec::new();
+        stages.run(&mut log);
+        assert_eq!(log, vec!["poll", "physics", "ai", "draw"]);
+
+        log.clear();
+        stages.run_stage("simulation", &mut log);
+        assert_eq!(log, vec!["physics", "ai"]);
+    }
+
+    #[test]
+    #[should_panic(expected = "already declared")]
+    fn test_stages_reject_duplicate_names() {
+        let mut stages: Stages<u32> = Stages::new();
+        stages.add_stage("simulation").add_stage("simulation");
+    }
+
+    #[test]
+    #[should_panic(expected = "declared stages are [\"input\"]")]
+    fn test_stages_missing_stage_names_the_declared_set() {
+        let mut stages: Stages<u32> = Stages::new();
+        stages.add_stage("input");
+        stages.stage_mut("simulation");
     }
 
     #[test]
