@@ -1049,7 +1049,24 @@ worlds[core]
     .query::<(&mut Position,)>()
     .with_tag_set(&tags[selected])
     .for_each(|_entity, (position,)| position.x += 1.0);
+
+// The group keeps its own lifecycle log, the same two-log split as the
+// macro multi-world: "entity spawned or died anywhere" and group tag flips
+// are one cursor-consumed stream on the group, while each member world's
+// structural log records that world's row history.
+let mut cursor = 0;
+for change in ecs.structural_changes_since(cursor) {
+    // Spawned / Despawned with mask 0, TagsAdded / TagsRemoved carrying
+    // the group tag index in the mask field.
+    let _ = (change.entity, change.kind);
+}
+cursor = ecs.structural_sequence();
+ecs.trim_structural_log(cursor);
 ```
+
+The lifecycle log is verified against the macro multi-world's by the
+differential oracle: one seeded op stream drives both forms and requires
+entry-for-entry identical logs.
 
 ### Snapshots
 

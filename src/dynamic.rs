@@ -1894,8 +1894,16 @@ impl DynWorld {
 /// Filter per-world queries by them with
 /// [`with_tag_set`](DynQuery::with_tag_set), or check membership directly.
 ///
+/// The group keeps its own lifecycle log, the same two-log split as the
+/// macro's multi-world form: this log records handle allocation (`Spawned`),
+/// handle death anywhere (`Despawned`), and group tag flips, while each
+/// member world's own structural log records that world's row history. Sync
+/// world contents from the world logs and entity lifetime or group tags from
+/// this one; a consumer merging both will see one entity spawn twice.
+///
 /// ```rust
 /// use freecs::dynamic::{ComponentRegistry, DynEcs};
+/// use freecs::StructuralChangeKind;
 ///
 /// #[derive(Default, Clone, Debug)]
 /// struct Position { x: f32 }
@@ -1917,17 +1925,77 @@ impl DynWorld {
 /// assert!(ecs.despawn(entity));
 /// assert!(ecs.worlds[render].get::<Sprite>(entity).is_none());
 /// assert!(!ecs.has_tag(selected, entity));
+///
+/// // "Entity died anywhere" is one stream on the group, not a per-world
+/// // question. Consumers keep a cursor and the owner trims consumed entries.
+/// let mut cursor = 0;
+/// let kinds: Vec<StructuralChangeKind> = ecs
+///     .structural_changes_since(cursor)
+///     .iter()
+///     .map(|change| change.kind)
+///     .collect();
+/// assert_eq!(kinds, vec![
+///     StructuralChangeKind::Spawned,
+///     StructuralChangeKind::TagsAdded,
+///     StructuralChangeKind::Despawned,
+/// ]);
+/// cursor = ecs.structural_sequence();
+/// ecs.trim_structural_log(cursor);
+/// assert!(ecs.structural_changes_since(0).is_empty());
 /// ```
 #[derive(Default)]
 pub struct DynEcs {
     pub allocator: EntityAllocator,
     pub worlds: Vec<DynWorld>,
     pub tags: Vec<SparseTagSet>,
+    pub structural_log: Vec<StructuralChange>,
+    pub structural_sequence: u64,
 }
 
 impl DynEcs {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    fn record_structural(&mut self, entity: Entity, kind: StructuralChangeKind, mask: u64) {
+        if self.structural_log.len() >= STRUCTURAL_LOG_CAPACITY {
+            self.structural_log.clear();
+        }
+        self.structural_sequence += 1;
+        self.structural_log.push(StructuralChange {
+            sequence: self.structural_sequence,
+            entity,
+            kind,
+            mask,
+        });
+    }
+
+    pub fn structural_sequence(&self) -> u64 {
+        self.structural_sequence
+    }
+
+    /// The group-level lifecycle log: handle allocation (`Spawned` with mask
+    /// 0), handle death anywhere (`Despawned` with mask 0), and group tag
+    /// flips (`TagsAdded`/`TagsRemoved` carrying the tag index in the mask
+    /// field, since group tags have no mask bits). Row-level history lives in
+    /// each member world's own structural log, where an entity is `Spawned`
+    /// with a component mask when its first components arrive there.
+    pub fn structural_changes_since(&self, cursor: u64) -> &[StructuralChange] {
+        let start = self
+            .structural_log
+            .partition_point(|change| change.sequence <= cursor);
+        &self.structural_log[start..]
+    }
+
+    pub fn trim_structural_log(&mut self, up_to_sequence: u64) {
+        let end = self
+            .structural_log
+            .partition_point(|change| change.sequence <= up_to_sequence);
+        self.structural_log.drain(..end);
+    }
+
+    pub fn clear_structural_log(&mut self) {
+        self.structural_log.clear();
     }
 
     /// Adds a world built from the given registry and returns its index.
@@ -1943,18 +2011,29 @@ impl DynEcs {
     /// Allocates a handle with no rows anywhere. Give it components through
     /// any member world's `set`/`add_components`.
     pub fn spawn(&mut self) -> Entity {
-        self.allocator.allocate()
+        let entity = self.allocator.allocate();
+        self.record_structural(entity, StructuralChangeKind::Spawned, 0);
+        entity
     }
 
     pub fn spawn_count(&mut self, count: usize) -> Vec<Entity> {
         let mut entities = Vec::new();
         self.allocator.allocate_batch(count, &mut entities);
+        for &entity in &entities {
+            self.record_structural(entity, StructuralChangeKind::Spawned, 0);
+        }
         entities
     }
 
-    /// Spawns entities with rows in one member world.
+    /// Spawns entities with rows in one member world. The handles land in
+    /// the group lifecycle log as `Spawned` with mask 0; the component mask
+    /// lands in that world's own structural log.
     pub fn spawn_entities(&mut self, world_index: usize, mask: u64, count: usize) -> Vec<Entity> {
-        self.worlds[world_index].spawn_entities_in(&mut self.allocator, mask, count)
+        let entities = self.worlds[world_index].spawn_entities_in(&mut self.allocator, mask, count);
+        for &entity in &entities {
+            self.record_structural(entity, StructuralChangeKind::Spawned, 0);
+        }
+        entities
     }
 
     pub fn is_alive(&self, entity: Entity) -> bool {
@@ -1976,6 +2055,7 @@ impl DynEcs {
         for tag_set in &mut self.tags {
             tag_set.remove(entity);
         }
+        self.record_structural(entity, StructuralChangeKind::Despawned, 0);
         true
     }
 
@@ -1997,13 +2077,17 @@ impl DynEcs {
     }
 
     pub fn add_tag(&mut self, tag_index: usize, entity: Entity) {
-        if self.allocator.is_alive(entity) {
-            self.tags[tag_index].insert(entity);
+        if self.allocator.is_alive(entity) && self.tags[tag_index].insert(entity) {
+            self.record_structural(entity, StructuralChangeKind::TagsAdded, tag_index as u64);
         }
     }
 
     pub fn remove_tag(&mut self, tag_index: usize, entity: Entity) -> bool {
-        self.tags[tag_index].remove(entity)
+        let removed = self.tags[tag_index].remove(entity);
+        if removed {
+            self.record_structural(entity, StructuralChangeKind::TagsRemoved, tag_index as u64);
+        }
+        removed
     }
 
     pub fn has_tag(&self, tag_index: usize, entity: Entity) -> bool {
@@ -2279,7 +2363,10 @@ mod snapshot {
         }
 
         /// Rebuilds a group from a snapshot and one registry per member
-        /// world, in the same order the worlds were added.
+        /// world, in the same order the worlds were added. Snapshots do not
+        /// carry structural logs, so the restored group and its worlds start
+        /// with empty logs; treat a load as a full-sync boundary and rely on
+        /// the restored slots being stamped changed.
         pub fn from_snapshot(
             registries: Vec<ComponentRegistry>,
             snapshot: &DynEcsSnapshot,
@@ -4794,6 +4881,81 @@ mod tests {
     }
 
     #[test]
+    fn test_dyn_ecs_lifecycle_log_records_handles_and_group_tags() {
+        let mut ecs = DynEcs::new();
+        let core = ecs.add_world(ComponentRegistry::new());
+        let position = ecs.worlds[core].register::<Position>();
+        let marked = ecs.register_tag();
+
+        let solo = ecs.spawn();
+        let pair = ecs.spawn_count(2);
+        let rowed = ecs.spawn_entities(core, position.mask, 1)[0];
+
+        ecs.add_tag(marked, solo);
+        ecs.add_tag(marked, solo);
+        assert!(ecs.remove_tag(marked, solo));
+        assert!(!ecs.remove_tag(marked, solo));
+
+        assert!(ecs.despawn(pair[0]));
+        assert!(!ecs.despawn(pair[0]));
+
+        let entries: Vec<(Entity, StructuralChangeKind, u64)> = ecs
+            .structural_changes_since(0)
+            .iter()
+            .map(|change| (change.entity, change.kind, change.mask))
+            .collect();
+        assert_eq!(
+            entries,
+            vec![
+                (solo, StructuralChangeKind::Spawned, 0),
+                (pair[0], StructuralChangeKind::Spawned, 0),
+                (pair[1], StructuralChangeKind::Spawned, 0),
+                (rowed, StructuralChangeKind::Spawned, 0),
+                (solo, StructuralChangeKind::TagsAdded, marked as u64),
+                (solo, StructuralChangeKind::TagsRemoved, marked as u64),
+                (pair[0], StructuralChangeKind::Despawned, 0),
+            ]
+        );
+
+        let sequences: Vec<u64> = ecs
+            .structural_changes_since(0)
+            .iter()
+            .map(|change| change.sequence)
+            .collect();
+        assert_eq!(sequences, (1..=7).collect::<Vec<u64>>());
+
+        let cursor = sequences[3];
+        assert_eq!(ecs.structural_changes_since(cursor).len(), 3);
+        ecs.trim_structural_log(cursor);
+        assert_eq!(ecs.structural_changes_since(0).len(), 3);
+        assert_eq!(ecs.structural_sequence(), 7);
+
+        ecs.clear_structural_log();
+        assert!(ecs.structural_changes_since(0).is_empty());
+        assert_eq!(ecs.structural_sequence(), 7);
+    }
+
+    #[test]
+    fn test_dyn_ecs_lifecycle_log_capacity_backstop() {
+        let mut ecs = DynEcs::new();
+        let entity = ecs.spawn();
+        let marked = ecs.register_tag();
+
+        for _ in 0..(STRUCTURAL_LOG_CAPACITY / 2) {
+            ecs.add_tag(marked, entity);
+            ecs.remove_tag(marked, entity);
+        }
+
+        assert!(ecs.structural_log.len() < STRUCTURAL_LOG_CAPACITY);
+        assert_eq!(
+            ecs.structural_sequence(),
+            STRUCTURAL_LOG_CAPACITY as u64 + 1
+        );
+        let tail = ecs.structural_changes_since(0);
+        assert_eq!(tail.last().unwrap().sequence, ecs.structural_sequence());
+    }
+
+    #[test]
     fn test_dyn_ecs_group_shares_entities_across_worlds() {
         let mut ecs = DynEcs::new();
         let core = ecs.add_world(ComponentRegistry::new());
@@ -5359,6 +5521,25 @@ mod tests {
                     }
                     let expected_marked = static_ecs.query_marked().count();
                     assert_eq!(dyn_ecs.query_tag(marked).count(), expected_marked);
+
+                    let static_lifecycle: Vec<(u64, Entity, StructuralChangeKind)> = static_ecs
+                        .structural_changes_since(0)
+                        .iter()
+                        .map(|change| (change.sequence, change.entity, change.kind))
+                        .collect();
+                    let dyn_lifecycle: Vec<(u64, Entity, StructuralChangeKind)> = dyn_ecs
+                        .structural_changes_since(0)
+                        .iter()
+                        .map(|change| (change.sequence, change.entity, change.kind))
+                        .collect();
+                    assert_eq!(
+                        static_lifecycle, dyn_lifecycle,
+                        "group lifecycle logs diverged with seed {seed}"
+                    );
+                    assert_eq!(
+                        static_ecs.structural_sequence(),
+                        dyn_ecs.structural_sequence()
+                    );
                 }
             }
         }
