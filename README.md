@@ -18,7 +18,7 @@ A high-performance, archetype-based Entity Component System (ECS) for Rust
 - Sequence-numbered event channels with exactly-once cursor consumption
 - Structural change log covering spawns, despawns, component moves, and tag flips
 - Multi-world support for >64 component types with shared entity allocator
-- Two first-class entry points: the `ecs!` macro fixes the component set at compile time and generates named accessors, while dynamic worlds (`dynamic` feature) register components at runtime with bundle spawns, typed queries, and marker tags, over the same storage and with the same guarantees
+- Two entry points over the same storage. The `ecs!` macro fixes the component set at compile time and generates named accessors, while dynamic worlds (`dynamic` feature) register components at runtime with bundle spawns, typed queries, and marker tags, with the same guarantees
 - Plain public data all the way down: tables, allocator, tag sets, and logs are inspectable structs and vecs
 
 The `ecs!` macro generates the entire ECS at compile time using only plain data structures, functions, and zero unsafe code.
@@ -93,12 +93,12 @@ freecs = "3"
 ```
 
 freecs has two entry points over the same archetype storage, and the
-dynamic world is the primary one: typed tuple queries with change and added
+dynamic world is the primary one. Typed tuple queries with change and added
 filters, cross-world joins, prepared queries, hierarchies, exactly-once
 events, snapshots and deltas, and the whole grouped multi-world substrate
 live there, and its typed queries compile to the same slice loops the macro
-emits. Reach for it by default. The `ecs!` macro is the compile-time tier:
-it fixes a small component set up front and generates a named accessor for
+emits. Reach for it by default. The `ecs!` macro is the compile-time tier.
+It fixes a small component set up front and generates a named accessor for
 everything, which keeps it the fastest path to a tiny fixed-schema game and
 the executable specification the dynamic implementation is tested against,
 but new surface lands on the dynamic side first. Both run side by side when
@@ -307,7 +307,7 @@ fn main() {
     world.insert_resource(DeltaTime(0.016));
     world.insert_resource(Score(0));
 
-    // Types register lazily on first use; tuples spawn as bundles.
+    // Types register lazily on first use, and tuples spawn as bundles.
     let player = world.spawn((
         Position { x: 0.0, y: 0.0 },
         Velocity { x: 1.0, y: 2.0 },
@@ -315,7 +315,7 @@ fn main() {
     ));
     world.add_tag_type::<Player>(player);
 
-    // Typed queries take mutability from the tuple; Option elements match
+    // Typed queries take mutability from the tuple. Option elements match
     // entities with or without the component.
     world.resources_scope(|world, (delta_time, score): &mut (DeltaTime, Score)| {
         world
@@ -343,8 +343,8 @@ fn main() {
 }
 ```
 
-Everything else in this README's static sections has a dynamic counterpart;
-the [Dynamic Worlds](#dynamic-worlds) section covers the full API, the three
+Everything else in this README's static sections has a dynamic counterpart.
+The [Dynamic Worlds](#dynamic-worlds) section covers the full API, the three
 access tiers, and measured performance against the macro path. The repository
 ships the same complete tower defense game written both ways
 (`examples/tower-defense.rs` and `examples/tower-defense-dynamic.rs`).
@@ -443,19 +443,19 @@ fn render_sync_system(world: &mut World, sync: &mut RenderSync) {
 }
 ```
 
-The buffer-reading forms, `read_<event>()` and `collect_<event>()`, return everything still buffered. Events stay buffered for **two frames** before `world.step()` expires them, so a per-frame handler using these sees each event twice; they are for debugging, one-shot inspection, or frame setups you manage yourself. When in doubt, use `consume_`.
+The buffer-reading forms, `read_<event>()` and `collect_<event>()`, return everything still buffered. Events stay buffered for **two frames** before `world.step()` expires them, so a per-frame handler using these sees each event twice. They are for debugging, one-shot inspection, or frame setups you manage yourself. When in doubt, use `consume_`.
 
 Each event type gets these generated methods:
 
 - `send_<event>(event)` - Queue an event
-- `consume_<event>(&mut cursor)` - Events sent since this cursor, advancing it; exactly-once per consumer, the default
+- `consume_<event>(&mut cursor)` - Events sent since this cursor, advancing it. Exactly-once per consumer, the default
 - `read_<event>_since(cursor)` - Slice of events sent after `cursor`, cursor untouched
-- `sequence_<event>()` - Sequence number of the newest event; record it as your cursor
+- `sequence_<event>()` - Sequence number of the newest event. Record it as your cursor
 - `trim_<event>(up_to_sequence)` - Drop consumed events early (pass the minimum cursor across consumers)
 - `read_<event>()` - Iterator over all buffered events (up to two frames' worth)
 - `collect_<event>()` - Collect buffered events into a Vec (up to two frames' worth)
 - `peek_<event>()` - Reference to the oldest buffered event
-- `update_<event>()` - Expire events older than one frame; `step()` already calls this per frame, so calling both halves event lifetime
+- `update_<event>()` - Expire events older than one frame. `step()` already calls this per frame, so calling both halves event lifetime
 - `clear_<event>()` - Immediately drop all buffered events
 - `len_<event>()` / `is_empty_<event>()` - Buffered event count
 
@@ -479,7 +479,7 @@ loop {
 
 ### Event Lifetime
 
-Events sent during frame N remain readable through frame N+1 and are dropped by the `step()` that ends frame N+1. This preserves the classic double-buffer property: a system scheduled before the sender still sees the event on the next frame. It is also exactly why per-frame handlers must consume through cursors: the two-frame buffer means `read_`/`collect_` deliver the same event on both frames, and `consume_` is what turns the buffer into exactly-once delivery. Cursor consumers are unaffected by expiry as long as they read at least every other frame; a cursor older than the buffer yields everything still buffered.
+Events sent during frame N remain readable through frame N+1 and are dropped by the `step()` that ends frame N+1. This preserves the classic double-buffer property: a system scheduled before the sender still sees the event on the next frame. It is also why per-frame handlers must consume through cursors. The two-frame buffer means `read_`/`collect_` deliver the same event on both frames, and `consume_` turns the buffer into exactly-once delivery. Cursor consumers are unaffected by expiry as long as they read at least every other frame. A cursor older than the buffer yields everything still buffered.
 
 ## High-Performance Features
 
@@ -530,7 +530,7 @@ for entity in world.query_entities(POSITION | VELOCITY) {
 }
 ```
 
-Query iteration allocates nothing per call. Mutable iteration paths maintain a query cache keyed by component mask so repeated queries skip table matching. One asymmetry to know about: the read-only `for_each` can consult the cache but cannot populate it (it takes `&self`), so a mask that has only ever been used read-only falls back to a linear scan over tables. Table counts are small in practice, and any mutable query with the same mask warms the cache for both.
+Query iteration allocates nothing per call. Mutable iteration paths maintain a query cache keyed by component mask so repeated queries skip table matching. One asymmetry to know about is that the read-only `for_each` can consult the cache but cannot populate it (it takes `&self`), so a mask that has only ever been used read-only falls back to a linear scan over tables. Table counts are small in practice, and any mutable query with the same mask warms the cache for both.
 
 ### Batch Spawning
 
@@ -589,11 +589,11 @@ fn parallel_physics_system(world: &mut World) {
 }
 ```
 
-**Parallelism granularity**: `par_for_each_mut` parallelizes across archetype tables, so a world with two big archetypes gets at most two-way parallelism from it. The single-component variant `par_for_each_<component>_mut` additionally parallelizes within each table and is the better choice when most matching entities live in one archetype.
+`par_for_each_mut` parallelizes across archetype tables, so a world with two big archetypes gets at most two-way parallelism from it. The single-component variant `par_for_each_<component>_mut` additionally parallelizes within each table and is the better choice when most matching entities live in one archetype.
 
 Best for 100K+ entities with non-trivial per-entity computation. For smaller entity counts, serial iteration may be more efficient due to parallelization overhead.
 
-**Note**: Parallel methods are only available when targeting non-WASM platforms. On WASM targets, use the regular serial iteration methods instead.
+Parallel methods are only available when targeting non-WASM platforms. On WASM targets, use the serial iteration methods instead.
 
 ### Sparse Set Tags
 
@@ -613,7 +613,7 @@ ecs! {
 }
 
 // Adding tags doesn't move entities between archetypes.
-// The entity must be alive; tags on dead handles are refused.
+// The entity must be alive. Tags on dead handles are refused.
 world.add_player(entity);
 world.add_selected(entity);
 
@@ -638,7 +638,7 @@ world.remove_player(entity);
 
 Tag masks occupy the top bits of the `u64`, components fill from the bottom, and the macro asserts at compile time that they fit together. Tag adds and removes are recorded in the structural change log, so incremental consumers see tag flips the same way they see component changes.
 
-Tags are perfect for:
+Tags work well for:
 
 - Runtime categorization (player, enemy, npc)
 - Selection/highlighting states
@@ -681,7 +681,7 @@ Available command buffer operations:
 
 ### Mask Hygiene
 
-Component masks and tag masks share the `u64` but not the same APIs. Spawn masks, `add_components`, `remove_components`, and the mask-only queries (`query_entities`, `query_first_entity`, changed queries) take component bits only; `for_each`, `for_each_mut`, their changed and parallel variants, and `query_<component>_mut` accept tag bits and filter per entity. Passing tag bits where they don't belong is a `debug_assert` failure rather than a silently empty result, so misuse fails loudly in debug builds and costs nothing in release.
+Component masks and tag masks share the `u64` but not the same APIs. Spawn masks, `add_components`, `remove_components`, and the mask-only queries (`query_entities`, `query_first_entity`, changed queries) take component bits only, while `for_each`, `for_each_mut`, their changed and parallel variants, and `query_<component>_mut` accept tag bits and filter per entity. Passing tag bits where they don't belong is a `debug_assert` failure rather than a silently empty result, so misuse fails loudly in debug builds and costs nothing in release.
 
 ### Change Detection
 
@@ -720,7 +720,7 @@ Each table also keeps a per-component high-water tick. Changed queries compare i
 
 Multiple independent consumers can track their own change windows with the explicit-cursor variants `query_entities_changed_since(mask, since_tick)` and `for_each_mut_changed_since(include, exclude, since_tick, f)`. Record `current_tick()` when you consume, then call `increment_tick()` to fence, so writes made later in the same tick stamp a newer value and land in your next window.
 
-**Fixed cost**: change tracking stores one `u32` per component per entity plus a tick stamp on every accessor write, whether or not you consume it. That is the price of the feature always being available.
+Change tracking stores one `u32` per component per entity plus a tick stamp on every accessor write, whether or not you consume it. That is the price of the feature always being available.
 
 ### Structural Change Log
 
@@ -740,7 +740,7 @@ cursor = world.structural_sequence();
 world.trim_structural_log(cursor);
 ```
 
-A despawn is logged as a single `Despawned` entry; the tags an entity held are dropped implicitly rather than logged individually.
+A despawn is logged as a single `Despawned` entry. The tags an entity held are dropped implicitly rather than logged individually.
 
 ### System Scheduling
 
@@ -849,7 +849,7 @@ for position in world.query_position() {
 
 // Visit a component for entities matching an additional mask (components or tags)
 world.query_position_mut(VELOCITY | PLAYER, |entity, position| {
-    // Position of every player that also has velocity; marks position changed
+    // Position of every player that also has velocity, marking position changed
 });
 ```
 
@@ -969,14 +969,14 @@ tier, or to fix mask bits up front (bits are assigned in registration order):
 ```rust
 let mut world = DynWorld::new();
 
-// Lazy: the spawn registers Position and Velocity.
+// The spawn registers Position and Velocity lazily.
 let entity = world.spawn((Position::default(), Velocity::default()));
 
-// Explicit: returns a copyable key carrying the component's mask bit.
+// Explicit registration returns a copyable key carrying the mask bit.
 let health = world.register::<Health>();
 assert_eq!(health.mask, 0b100);
 
-// Components and tags share 64 bits per world; check the budget in a
+// Components and tags share 64 bits per world, so check the budget in a
 // startup assertion instead of meeting the panic at registration 65.
 assert!(world.remaining_bits() > 32);
 ```
@@ -1056,7 +1056,7 @@ assert_eq!(world.get_keyed(position, entity).unwrap().x, 5.0);
 
 #### Queries
 
-Borrow mutability comes from the tuple; mutable elements stamp change ticks
+Borrow mutability comes from the tuple, and mutable elements stamp change ticks
 per visited entity. Up to eight elements, all component types distinct:
 
 ```rust
@@ -1064,7 +1064,7 @@ let mut world = DynWorld::new();
 world.spawn((Position::default(), Velocity { x: 1.0, y: 0.0 }));
 world.spawn((Position::default(),));
 
-// The workhorse: a tuple query with a closure.
+// Most systems are a tuple query with a closure.
 world
     .query::<(&mut Position, &Velocity)>()
     .for_each(|_entity, (position, velocity)| {
@@ -1085,7 +1085,7 @@ world
         }
     });
 
-// Filters: with/without by type, mask, or tag, and changed/added windows.
+// Filter with/without by type, mask, or tag, plus changed/added windows.
 struct Frozen;
 world
     .query::<&mut Position>()
@@ -1106,7 +1106,7 @@ let total: f32 = world
     })
     .sum();
 
-// single() is the exactly-one-match read, the get-the-player call.
+// single() returns the match when exactly one entity qualifies.
 if let Some((entity, position)) = world.query_ref::<&Position>().single() {
     println!("{entity} at {}", position.x);
 }
@@ -1119,12 +1119,12 @@ for ((entity_a, a), (entity_b, b)) in world.query_ref::<&Position>().iter_combin
 ```
 
 In a `DynEcs` group, tuples whose components live in different member
-worlds run through `ecs.query_join` with the same filter vocabulary; see
+worlds run through `ecs.query_join` with the same filter vocabulary. See
 [Grouped dynamic worlds](#grouped-dynamic-worlds).
 
 Hot systems freeze a configured query into a `PreparedQuery` with
 `.prepare()` and rerun it without per-call `TypeId` resolution
-(`prepared.query(&mut world).for_each(...)`); the read form
+(`prepared.query(&mut world).for_each(...)`). The read form
 (`PreparedQueryRef`) does the same for iterators. Prepared masks are plain
 copyable data.
 
@@ -1141,9 +1141,9 @@ world
 
 #### Writing systems
 
-Systems are plain functions over `&mut DynWorld` or `&DynWorld`; the borrow
-checker is the access checker. The take/put scopes give a system a resource
-and the world as independent borrows, so there is no borrow juggling:
+Systems are plain functions over `&mut DynWorld` or `&DynWorld`, and the
+borrow checker is the access checker. The take/put scopes give a system a
+resource and the world as independent borrows:
 
 ```rust
 struct DeltaTime(f32);
@@ -1225,14 +1225,14 @@ struct, one per event type per consumer.
 let mut world = DynWorld::new();
 world.insert_resource(DeltaTime(0.016));
 
-// Fallible and infallible reads; expect_* panics with the type name.
+// Fallible and infallible reads. expect_* panics with the type name.
 assert!(world.resource::<Score>().is_none());
 let delta_time = world.expect_resource::<DeltaTime>().0;
 world.insert_resource(Score(0));
 world.expect_resource_mut::<Score>().0 += 1;
 
 // Scopes take resources out for one closure and put them back, even on
-// panic; see Writing systems above for the tuple form.
+// panic. See Writing systems above for the tuple form.
 world.resource_scope(|_world, score: &mut Score| score.0 += 1);
 let _ = (delta_time, world.remove_resource::<Score>());
 ```
@@ -1333,7 +1333,7 @@ and `queue_spawn_entities` round out the set.
 #### Change detection and sync
 
 Mutable typed-query elements and the typed/keyed accessors stamp change
-ticks; `added` ticks stamp when a component arrives and survive table
+ticks, and `added` ticks stamp when a component arrives and survive table
 migrations. Incremental consumers diff by tick, structural consumers read
 the log by cursor:
 
@@ -1363,7 +1363,7 @@ for change in world.structural_changes_since(cursor) {
 cursor = world.structural_sequence();
 world.trim_structural_log(cursor);
 
-// Raw-tier writes skip stamping; opt in explicitly when tick diffing
+// Raw-tier writes skip stamping, so opt in explicitly when tick diffing
 // matters (see Change Detection above for the static twin).
 world.mark_changed(entity, position.mask);
 ```
@@ -1401,16 +1401,16 @@ component when absent and stamp change ticks like any `set`.
 Three access tiers, from ergonomic to explicit:
 
 - **Typed**: `spawn(bundle)` / `spawn_bundles(bundle, count)` / `queue_spawn(bundle)` returning the handle before the command applies, `get::<T>` / `set` / `remove`, `query::<(&mut A, &B)>()` with `Option<&T>` elements, up to eight per tuple, and bare single elements (`query::<&mut A>()`), `changed::<T>()` and `added::<T>()` filters on both query forms, `query_ref` iterators on `&world` with `single()` and `iter_combinations()`, marker-type tags (`add_tag_type::<T>`, `with_tag_type::<T>()`), `despawn_with_any::<(A, B)>()`, `ChildOf` links with `children` / `despawn_recursive`, entity inspection (`entity_components`, `component_by_name`), `resource_scope` / `resources_scope` over tuples, `send(event)` / `consume_events::<T>(&mut cursor)`, `insert_resource` / `resource::<T>()` / `expect_resource::<T>()`. `TypeId` lookups happen at registration and per typed call, never inside iteration loops.
-- **Keyed**: `register::<T>()` returns a copyable `ComponentKey<T>` carrying the component's mask bit; `get_keyed` / `set_keyed` and mask-based `for_each` / `for_each_mut` skip the hash entirely.
+- **Keyed**: `register::<T>()` returns a copyable `ComponentKey<T>` carrying the component's mask bit. `get_keyed` / `set_keyed` and mask-based `for_each` / `for_each_mut` skip the hash entirely.
 - **Raw tables**: `for_each_tables_mut(mask, 0, |table| ...)` with `table.columns_pair(a, b)` hoists concrete slices once per table for the tightest loops, no change stamping, same covenant as the static path.
 
 Measured against the macro world on the same two-component mutation workload
 (three `f32` writes per entity), the typed query runs 0.83 µs per 1k entities
 versus 1.12 µs for the static `for_each_mut` closure form, and 75 µs versus
-116 µs per 100k; the hoisted table form does 7.3 µs per 10k versus 11.6 µs.
+116 µs per 100k. The hoisted table form does 7.3 µs per 10k versus 11.6 µs.
 The slice-zip loop shapes vectorize better than per-entity index closures, so
-the dynamic fast paths are not merely competitive, at scale they are ahead.
-The costs live elsewhere and are bounded: batch spawning pays function-pointer
+at scale the dynamic fast paths come out ahead. The costs are elsewhere and
+bounded. Batch spawning pays function-pointer
 column fills (16.5 µs versus 12.2 µs per 1k spawns), per-entity typed access
 pays the `TypeId` map (16.5 ns versus 6.8 ns keyed), and every column adds one
 `Box` indirection per table.
@@ -1433,12 +1433,12 @@ boundaries live: `DynEcs` carries its own resource map
 `resources_scope`, same semantics as the world's) and its own event
 channels (`send` / `consume_events` with per-consumer cursors), and
 `ecs.step()` expires group events and steps every member world in one
-call. World-local resources and events remain on each `DynWorld`; the two
+call. World-local resources and events remain on each `DynWorld`. The two
 levels are separate channels, not mirrors.
 
-Marker tags exist at the group level too — `ecs.add_tag_type::<Selected>`,
-`remove_tag_type`, `has_tag_type`, `query_tag_type` — and they're the
-natural home for entity-scoped markers in a grouped world: they spend no
+Marker tags exist at the group level too (`ecs.add_tag_type::<Selected>`,
+`remove_tag_type`, `has_tag_type`, `query_tag_type`), and they're the
+right home for entity-scoped markers in a grouped world. They spend no
 member world's mask bits, need no world index to touch, land in the group
 structural log, and drop on group despawn. `ecs.tag_set_type::<T>()` hands
 the set to any per-world typed query via `with_tag_set`/`without_tag_set`.
@@ -1449,7 +1449,7 @@ Tuples that span member worlds run through `ecs.query_join`: one world
 drives the iteration at full slice speed (the world holding every mutable
 element), the others resolve their elements per entity at `get` speed,
 read-only, skipping entities that lack a required foreign component.
-Mutable elements in two different worlds panic; mutate your own state and
+Mutable elements in two different worlds panic. Mutate your own state and
 read theirs, or co-locate the types in one schema when a hot loop needs
 slice speed for everything (registries compose, so two parts sharing a
 member world is a declaration choice, not a framework feature). A tuple
@@ -1464,7 +1464,7 @@ ecs.query_join::<(&mut Position, &Burning)>()
     });
 ```
 
-Joins are first-class alongside the single-world forms:
+Joins carry the same surface as the single-world forms.
 `query_join_ref` runs the read-only join as a real `Iterator` on `&ecs`,
 and `query_join(...).par_for_each(...)` walks driver tables in parallel
 with foreign worlds shared read-only across threads. `world.stats()` and
@@ -1473,7 +1473,7 @@ editor overlays, and `compact()` drops empty archetype tables at loading
 screens.
 
 Declare the members once with `dynamic_worlds!` (index constants plus the
-build function, each member asserted at its declared index; apps extending a
+build function, each member asserted at its declared index, and apps extending a
 built group use `add_world_at`):
 
 ```rust
@@ -1492,7 +1492,7 @@ registration creates a duplicate), the group routes typed access itself: `ecs.ge
 index order, cached in the public `type_routes` map), and
 `ecs.spawn_with(bundle)` spawns one group entity with each component routed
 to its world, so bundles span worlds. Routed access never registers types
-lazily; where a type lives is a schema decision, so `set` on an unregistered
+lazily. Where a type lives is a schema decision, so `set` on an unregistered
 type panics instead of guessing. Member indexing remains for world-level
 operations, snapshots, and structural logs:
 
@@ -1679,15 +1679,15 @@ core_world.for_each(POSITION, 0, |entity, table, idx| {
     }
 });
 
-// Despawn cascades across all worlds; returns false for stale handles
+// Despawn cascades across all worlds and returns false for stale handles
 ecs.despawn(entity);
 ```
 
 Despawning is safe against reuse: `despawn` refuses stale or already-despawned handles (returning `false`), and stale handles cannot re-add components in any world, including worlds that never stored the entity. That guarantee is paid for in memory. Despawn broadcasts the retired generation into every world's location table, so each world's table grows to cover any despawned id, 16 bytes per id per world. The trust boundary is the shared allocator: a handle forged for an id it never issued can still insert a row, since worlds have no allocator access.
 
-Tags, events, resources, command buffers, and `Schedule` all work identically in multi-world mode. Structural history is split across two kinds of log, and consumers should pick one oracle per purpose. The ECS keeps a lifecycle log (`structural_changes_since` on the ECS) recording handle allocation and death (`Spawned`/`Despawned` with mask 0) plus tag flips. Each world keeps its own row-level log, where an entity is `Spawned` with a component mask when its first components arrive in that world and `Despawned` when its row leaves. An entity that gains components therefore appears as `Spawned` once in the ECS log and once per world it enters; sync world contents from world logs, and handle lifetime or tags from the ECS log, rather than merging both.
+Tags, events, resources, command buffers, and `Schedule` all work identically in multi-world mode. Structural history is split across two kinds of log, and consumers should pick one oracle per purpose. The ECS keeps a lifecycle log (`structural_changes_since` on the ECS) recording handle allocation and death (`Spawned`/`Despawned` with mask 0) plus tag flips. Each world keeps its own row-level log, where an entity is `Spawned` with a component mask when its first components arrive in that world and `Despawned` when its row leaves. An entity that gains components therefore appears as `Spawned` once in the ECS log and once per world it enters. Sync world contents from world logs, and handle lifetime or tags from the ECS log, rather than merging both.
 
-One asymmetry: per-world query masks contain only that world's component bits, so tags cannot appear in per-world masks (this is asserted in debug builds). Tag filtering in multi-world uses the tag-set variants with split borrows:
+One asymmetry is that per-world query masks contain only that world's component bits, so tags cannot appear in per-world masks (asserted in debug builds). Tag filtering in multi-world uses the tag-set variants with split borrows:
 
 ```rust
 let GameEcs { core_world, player, .. } = &ecs;
