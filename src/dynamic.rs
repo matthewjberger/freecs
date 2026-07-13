@@ -486,7 +486,7 @@ enum DynCommand {
     RemoveComponents(Entity, u64),
     AddTag(Entity, TagKey),
     RemoveTag(Entity, TagKey),
-    Closure(Box<dyn FnOnce(&mut DynWorld) + Send>),
+    Closure(Box<dyn FnOnce(&mut DynWorld) + Send + Sync>),
 }
 
 struct EventSlot {
@@ -581,6 +581,10 @@ impl EventBus {
 
     pub fn clear<T: Send + Sync + 'static>(&mut self) {
         self.channel_mut::<T>().clear();
+    }
+
+    pub fn channel_count(&self) -> usize {
+        self.slots.len()
     }
 
     /// Advances every channel one frame, expiring events past their
@@ -749,6 +753,80 @@ impl DynWorld {
     /// checks belong here rather than at the panic.
     pub fn remaining_bits(&self) -> u32 {
         self.registry.remaining_bits()
+    }
+
+    /// A point-in-time census of this world's storage and bookkeeping. See
+    /// [`WorldStats`] for the fields.
+    pub fn stats(&self) -> WorldStats {
+        WorldStats {
+            entity_count: self.entity_count(),
+            table_count: self.tables.len(),
+            empty_table_count: self
+                .tables
+                .iter()
+                .filter(|table| table.entity_indices.is_empty())
+                .count(),
+            largest_table_rows: self
+                .tables
+                .iter()
+                .map(|table| table.entity_indices.len())
+                .max()
+                .unwrap_or(0),
+            table_rows: self
+                .tables
+                .iter()
+                .map(|table| (table.mask, table.entity_indices.len()))
+                .collect(),
+            component_count: self.registry.components.len(),
+            tag_count: self.registry.tag_count as usize,
+            remaining_mask_bits: self.remaining_bits(),
+            structural_log_entries: self.structural_log.len(),
+            query_cache_entries: self.query_cache.len(),
+            resource_count: self.resources.entries.len(),
+            event_channels: self.events.channel_count(),
+            pending_commands: self.command_count(),
+        }
+    }
+
+    /// Drops empty archetype tables and rebuilds every structure that
+    /// references table positions: entity locations remap in place with
+    /// retired-generation stamps untouched, the mask lookup rebuilds, the
+    /// archetype edge caches reset to refill lazily, and the query cache
+    /// clears. Explicit and opt-in; call at loading screens or level
+    /// boundaries, not per frame. Returns how many tables were dropped.
+    pub fn compact(&mut self) -> usize {
+        let mut remap: Vec<Option<usize>> = Vec::with_capacity(self.tables.len());
+        let mut kept = 0usize;
+        for table in &self.tables {
+            if table.entity_indices.is_empty() {
+                remap.push(None);
+            } else {
+                remap.push(Some(kept));
+                kept += 1;
+            }
+        }
+        let dropped = self.tables.len() - kept;
+        if dropped == 0 {
+            return 0;
+        }
+
+        self.tables.retain(|table| !table.entity_indices.is_empty());
+        for location in &mut self.entity_locations.locations {
+            if location.allocated
+                && let Some(new_index) = remap[location.table_index as usize]
+            {
+                location.table_index = new_index as u32;
+            }
+        }
+        self.table_lookup.clear();
+        for (table_index, table) in self.tables.iter().enumerate() {
+            self.table_lookup.insert(table.mask, table_index);
+        }
+        self.table_edges.clear();
+        self.table_edges
+            .resize_with(self.tables.len(), ArchetypeEdges::default);
+        self.query_cache.clear();
+        dropped
     }
 
     /// The components an entity currently carries, as registry records with
@@ -1957,7 +2035,7 @@ impl DynWorld {
     /// rows. The handle is allocated now, alive with no components, and
     /// gains the bundle's components when
     /// [`apply_commands`](Self::apply_commands) runs.
-    pub fn queue_spawn<B: Bundle + Send + 'static>(&mut self, bundle: B) -> Entity {
+    pub fn queue_spawn<B: Bundle + Send + Sync + 'static>(&mut self, bundle: B) -> Entity {
         let entity = self.allocator.allocate();
         self.queue(move |world| {
             if !world.is_alive(entity) {
@@ -1973,7 +2051,7 @@ impl DynWorld {
     }
 
     /// Queues an arbitrary deferred mutation.
-    pub fn queue(&mut self, command: impl FnOnce(&mut DynWorld) + Send + 'static) {
+    pub fn queue(&mut self, command: impl FnOnce(&mut DynWorld) + Send + Sync + 'static) {
         self.command_buffer
             .push(DynCommand::Closure(Box::new(command)));
     }
@@ -2096,6 +2174,7 @@ impl DynWorld {
             exclude: 0,
             changed_mask: 0,
             added_mask: 0,
+            element_masks: None,
             include_tag_sets: [None; 4],
             exclude_tag_sets: [None; 4],
             marker: PhantomData,
@@ -2115,6 +2194,7 @@ impl DynWorld {
             exclude: 0,
             changed_mask: 0,
             added_mask: 0,
+            resolved_masks: None,
             include_tag_sets: [None; 4],
             exclude_tag_sets: [None; 4],
             dead: false,
@@ -2394,6 +2474,22 @@ impl DynEcs {
         }
     }
 
+    /// The read-only cross-world join, a real [`Iterator`] on `&self`:
+    /// items borrow the group, the driver world walks its tables, and
+    /// foreign elements resolve per entity, read-only like every join
+    /// element. Unresolvable routing or filters degrade to an empty
+    /// iterator, matching [`query_ref`](Self::query_ref).
+    pub fn query_join_ref<Q: ReadQueryTuple>(&self) -> DynJoinRef<'_, Q> {
+        DynJoinRef {
+            ecs: self,
+            include_tag_types: [None; 4],
+            exclude_tag_types: [None; 4],
+            changed_lookups: [None; 4],
+            added_lookups: [None; 4],
+            marker: PhantomData,
+        }
+    }
+
     /// The read-only routed query. When no member world registers every
     /// required element the query is empty rather than a panic, matching
     /// [`DynWorld::query_ref`]'s graceful degradation.
@@ -2647,6 +2743,30 @@ impl DynEcs {
 
     pub fn query_tag(&self, tag_index: usize) -> impl Iterator<Item = Entity> + '_ {
         self.tags[tag_index].iter()
+    }
+
+    /// The group-level census. See [`EcsStats`] for the fields.
+    pub fn stats(&self) -> EcsStats {
+        EcsStats {
+            live_entities: self
+                .allocator
+                .slots
+                .iter()
+                .filter(|slot| slot.alive)
+                .count(),
+            free_ids: self.allocator.free_ids.len(),
+            group_tag_count: self.tags.len(),
+            group_structural_log_entries: self.structural_log.len(),
+            group_resource_count: self.resources.entries.len(),
+            group_event_channels: self.events.channel_count(),
+            worlds: self.worlds.iter().map(|world| world.stats()).collect(),
+        }
+    }
+
+    /// [`DynWorld::compact`] over every member world. Returns the total
+    /// number of tables dropped.
+    pub fn compact(&mut self) -> usize {
+        self.worlds.iter_mut().map(|world| world.compact()).sum()
     }
 
     /// The group tag index for marker type `T`, registering the tag on
@@ -3060,6 +3180,296 @@ mod snapshot {
         }
     }
 
+    /// Where a delta stream stands: the structural sequence and change tick
+    /// a capture starts from. Take the first cursor right after the full
+    /// snapshot that seeds a replica, then chain each delta's `to` cursor
+    /// into the next capture.
+    #[derive(Clone, Copy, Debug, Default, serde::Serialize, serde::Deserialize)]
+    pub struct DeltaCursor {
+        pub sequence: u64,
+        pub tick: u32,
+    }
+
+    /// A serialized change-set for one world since a [`DeltaCursor`]:
+    /// the structural entries in order, then one codec payload per changed
+    /// component value, reflecting end-of-window state. Apply with
+    /// [`DynWorld::apply_delta`] to a replica seeded from a snapshot of the
+    /// same lineage; deltas must apply in unbroken cursor order, the same
+    /// trust boundary snapshots carry.
+    #[derive(serde::Serialize, serde::Deserialize)]
+    pub struct DynWorldDelta {
+        pub since: DeltaCursor,
+        pub to: DeltaCursor,
+        pub structural: Vec<StructuralChange>,
+        pub values: Vec<(Entity, u32, Vec<u8>)>,
+    }
+
+    /// The group form: the group's own structural window (handle lifecycle
+    /// and group tags) plus one [`DynWorldDelta`] per member.
+    #[derive(serde::Serialize, serde::Deserialize)]
+    pub struct DynEcsDelta {
+        pub group_since: u64,
+        pub group_to: u64,
+        pub group_structural: Vec<StructuralChange>,
+        pub tag_type_names: Vec<Option<String>>,
+        pub worlds: Vec<DynWorldDelta>,
+    }
+
+    /// The group cursor: the group sequence plus one world cursor per
+    /// member.
+    #[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+    pub struct DynEcsDeltaCursor {
+        pub group_sequence: u64,
+        pub worlds: Vec<DeltaCursor>,
+    }
+
+    fn structural_window(
+        log: &[StructuralChange],
+        latest_sequence: u64,
+        since_sequence: u64,
+    ) -> Result<Vec<StructuralChange>, SnapshotError> {
+        let start = log.partition_point(|change| change.sequence <= since_sequence);
+        let window = &log[start..];
+        match window.first() {
+            Some(first) => {
+                if first.sequence != since_sequence + 1 {
+                    return Err(SnapshotError::Codec(format!(
+                        "structural log gap: delta cursor at {since_sequence}, oldest retained \
+                         entry is {}; reseed the replica from a full snapshot",
+                        first.sequence
+                    )));
+                }
+            }
+            None => {
+                if latest_sequence > since_sequence {
+                    return Err(SnapshotError::Codec(format!(
+                        "structural log gap: delta cursor at {since_sequence}, log trimmed \
+                         through {latest_sequence}; reseed the replica from a full snapshot",
+                    )));
+                }
+            }
+        }
+        Ok(window.to_vec())
+    }
+
+    impl DynWorld {
+        /// The cursor a delta stream starts from, taken right after the
+        /// full snapshot that seeds the replica. Fences the change window
+        /// with [`increment_tick`](Self::increment_tick), so writes made
+        /// after this call land in the first delta; without the fence,
+        /// same-tick writes would silently miss it.
+        pub fn delta_cursor(&mut self) -> DeltaCursor {
+            let cursor = DeltaCursor {
+                sequence: self.structural_sequence,
+                tick: self.current_tick,
+            };
+            self.increment_tick();
+            cursor
+        }
+
+        /// Captures everything that changed since the cursor as a
+        /// serialized change-set, then fences the change window with
+        /// [`increment_tick`](Self::increment_tick) so later writes land in
+        /// the next delta. Fails with a gap error when the structural log
+        /// was trimmed or overflowed past the cursor (reseed from a full
+        /// snapshot), and with [`SnapshotError::MissingCodec`] when a
+        /// component without a codec changed inside the window.
+        pub fn delta_since(
+            &mut self,
+            cursor: &DeltaCursor,
+        ) -> Result<DynWorldDelta, SnapshotError> {
+            let structural = structural_window(
+                &self.structural_log,
+                self.structural_sequence,
+                cursor.sequence,
+            )?;
+
+            let mut values = Vec::new();
+            for (component_index, info) in self.registry.components.iter().enumerate() {
+                let mut changed = self
+                    .query_entities_changed_since(info.mask, cursor.tick)
+                    .peekable();
+                match &self.registry.codecs[component_index] {
+                    Some(codec) => {
+                        for entity in changed {
+                            if let Some(bytes) = (codec.encode_value)(self, entity) {
+                                values.push((entity, component_index as u32, bytes?));
+                            }
+                        }
+                    }
+                    None => {
+                        if changed.peek().is_some() {
+                            return Err(SnapshotError::MissingCodec(info.type_name));
+                        }
+                    }
+                }
+            }
+
+            let to = DeltaCursor {
+                sequence: self.structural_sequence,
+                tick: self.current_tick,
+            };
+            self.increment_tick();
+            Ok(DynWorldDelta {
+                since: *cursor,
+                to,
+                structural,
+                values,
+            })
+        }
+
+        /// Replays a delta onto a replica: structural entries in order
+        /// (spawns revive the exact handle, despawns retire it, component
+        /// and tag changes reapply), then the changed component values
+        /// through their codecs. The replica must be seeded from a snapshot
+        /// of the same lineage and receive every delta in cursor order;
+        /// like snapshots, delta payloads are a trust boundary.
+        pub fn apply_delta(&mut self, delta: &DynWorldDelta) -> Result<(), SnapshotError> {
+            for change in &delta.structural {
+                match change.kind {
+                    StructuralChangeKind::Spawned => {
+                        self.allocator.revive(change.entity);
+                        if change.mask != 0 {
+                            self.insert_row(change.entity, change.mask);
+                        }
+                    }
+                    StructuralChangeKind::Despawned => {
+                        self.despawn_entities(&[change.entity]);
+                    }
+                    StructuralChangeKind::ComponentsAdded => {
+                        self.add_components(change.entity, change.mask);
+                    }
+                    StructuralChangeKind::ComponentsRemoved => {
+                        self.remove_components(change.entity, change.mask);
+                    }
+                    StructuralChangeKind::TagsAdded => {
+                        let tag_index = change.mask.leading_zeros();
+                        while self.tags.len() <= tag_index as usize {
+                            self.tags.push(SparseTagSet::default());
+                        }
+                        let key = self.registry.tag_key_for(tag_index);
+                        self.add_tag(key, change.entity);
+                    }
+                    StructuralChangeKind::TagsRemoved => {
+                        let tag_index = change.mask.leading_zeros();
+                        if (tag_index as usize) < self.tags.len() {
+                            let key = self.registry.tag_key_for(tag_index);
+                            self.remove_tag(key, change.entity);
+                        }
+                    }
+                }
+            }
+
+            for (entity, component_index, bytes) in &delta.values {
+                let info = self
+                    .registry
+                    .components
+                    .get(*component_index as usize)
+                    .ok_or_else(|| {
+                        SnapshotError::UnknownComponent(format!(
+                            "component index {component_index}"
+                        ))
+                    })?;
+                let codec = self.registry.codecs[*component_index as usize]
+                    .as_ref()
+                    .ok_or(SnapshotError::MissingCodec(info.type_name))?;
+                (codec.apply_value)(self, *entity, bytes)?;
+            }
+            Ok(())
+        }
+    }
+
+    impl DynEcs {
+        /// The group cursor a delta stream starts from, fencing every
+        /// member's change window like [`DynWorld::delta_cursor`].
+        pub fn delta_cursor(&mut self) -> DynEcsDeltaCursor {
+            DynEcsDeltaCursor {
+                group_sequence: self.structural_sequence,
+                worlds: self.worlds.iter_mut().map(DynWorld::delta_cursor).collect(),
+            }
+        }
+
+        /// [`DynWorld::delta_since`] across the whole group: the group's
+        /// structural window (handle lifecycle and group tags) plus one
+        /// world delta per member, each fenced.
+        pub fn delta_since(
+            &mut self,
+            cursor: &DynEcsDeltaCursor,
+        ) -> Result<DynEcsDelta, SnapshotError> {
+            if cursor.worlds.len() != self.worlds.len() {
+                return Err(SnapshotError::SchemaMismatch {
+                    expected: format!("{} member cursors", self.worlds.len()),
+                    found: format!("{} member cursors", cursor.worlds.len()),
+                });
+            }
+            let group_structural = structural_window(
+                &self.structural_log,
+                self.structural_sequence,
+                cursor.group_sequence,
+            )?;
+            let mut worlds = Vec::with_capacity(self.worlds.len());
+            for (world, world_cursor) in self.worlds.iter_mut().zip(&cursor.worlds) {
+                worlds.push(world.delta_since(world_cursor)?);
+            }
+            Ok(DynEcsDelta {
+                group_since: cursor.group_sequence,
+                group_to: self.structural_sequence,
+                group_structural,
+                tag_type_names: self.tag_type_names.clone(),
+                worlds,
+            })
+        }
+
+        /// Replays a group delta: group handle lifecycle and group tags in
+        /// order, then each member's delta.
+        pub fn apply_delta(&mut self, delta: &DynEcsDelta) -> Result<(), SnapshotError> {
+            if delta.worlds.len() != self.worlds.len() {
+                return Err(SnapshotError::SchemaMismatch {
+                    expected: format!("{} member deltas", self.worlds.len()),
+                    found: format!("{} member deltas", delta.worlds.len()),
+                });
+            }
+            for (index, name) in delta.tag_type_names.iter().enumerate() {
+                while self.tag_type_names.len() <= index {
+                    self.tags.push(SparseTagSet::default());
+                    self.tag_type_names.push(None);
+                }
+                if name.is_some() && self.tag_type_names[index].is_none() {
+                    self.tag_type_names[index] = name.clone();
+                }
+            }
+            for change in &delta.group_structural {
+                match change.kind {
+                    StructuralChangeKind::Spawned => {
+                        self.allocator.revive(change.entity);
+                    }
+                    StructuralChangeKind::Despawned => {
+                        self.despawn(change.entity);
+                    }
+                    StructuralChangeKind::TagsAdded => {
+                        let tag_index = change.mask as usize;
+                        while self.tags.len() <= tag_index {
+                            self.tags.push(SparseTagSet::default());
+                            self.tag_type_names.push(None);
+                        }
+                        self.tags[tag_index].insert(change.entity);
+                    }
+                    StructuralChangeKind::TagsRemoved => {
+                        if (change.mask as usize) < self.tags.len() {
+                            self.tags[change.mask as usize].remove(change.entity);
+                        }
+                    }
+                    StructuralChangeKind::ComponentsAdded
+                    | StructuralChangeKind::ComponentsRemoved => {}
+                }
+            }
+            for (world, world_delta) in self.worlds.iter_mut().zip(&delta.worlds) {
+                world.apply_delta(world_delta)?;
+            }
+            Ok(())
+        }
+    }
+
     impl DynEcs {
         /// [`DynWorld::set_component_by_name`] routed to the member world
         /// whose registry carries the name.
@@ -3160,7 +3570,8 @@ mod snapshot {
 
 #[cfg(feature = "snapshot")]
 pub use snapshot::{
-    ComponentCodec, DynEcsSnapshot, DynTableSnapshot, DynWorldSnapshot, SnapshotError,
+    ComponentCodec, DeltaCursor, DynEcsDelta, DynEcsDeltaCursor, DynEcsSnapshot, DynTableSnapshot,
+    DynWorldDelta, DynWorldSnapshot, EncodeValueFn, SnapshotError,
 };
 
 #[cfg(feature = "snapshot")]
@@ -3390,6 +3801,7 @@ pub trait ReadQueryElement: QueryElement {
     type ReadFetch<'table>: Copy;
     fn lookup_mask(world: &DynWorld) -> Option<u64>;
     fn read_fetch<'table>(slot: Option<&'table ColumnSlot>) -> Self::ReadFetch<'table>;
+    fn placeholder_read_fetch<'table>() -> Self::ReadFetch<'table>;
     fn read_changed_newer(fetch: Self::ReadFetch<'_>, index: usize, since_tick: u32) -> bool;
     fn read_added_newer(fetch: Self::ReadFetch<'_>, index: usize, since_tick: u32) -> bool;
     fn read_item<'table>(fetch: Self::ReadFetch<'table>, index: usize) -> Self::Item<'table>;
@@ -3409,6 +3821,10 @@ impl<T: Send + Sync + Default + 'static> ReadQueryElement for &T {
             slot.changed.as_slice(),
             slot.added.as_slice(),
         )
+    }
+
+    fn placeholder_read_fetch<'table>() -> Self::ReadFetch<'table> {
+        (&[], &[], &[])
     }
 
     fn read_changed_newer(fetch: Self::ReadFetch<'_>, index: usize, since_tick: u32) -> bool {
@@ -3433,6 +3849,10 @@ impl<T: Send + Sync + Default + 'static> ReadQueryElement for Option<&T> {
 
     fn read_fetch<'table>(slot: Option<&'table ColumnSlot>) -> Self::ReadFetch<'table> {
         slot.map(|slot| <&T as ReadQueryElement>::read_fetch(Some(slot)))
+    }
+
+    fn placeholder_read_fetch<'table>() -> Self::ReadFetch<'table> {
+        None
     }
 
     fn read_changed_newer(fetch: Self::ReadFetch<'_>, index: usize, since_tick: u32) -> bool {
@@ -3508,6 +3928,13 @@ pub trait QueryTuple: sealed::SealedQueryTuple {
         filters: &JoinFilters<'_>,
         f: F,
     );
+    #[cfg(not(target_family = "wasm"))]
+    fn join_par_for_each<F: for<'item> Fn(Entity, Self::Item<'item>) + Send + Sync>(
+        driver: &mut DynWorld,
+        element_worlds: &[Option<&DynWorld>; 8],
+        filters: &JoinFilters<'_>,
+        f: F,
+    );
     fn fetch<'table>(
         table_mask: u64,
         columns: &'table mut [ColumnSlot],
@@ -3552,6 +3979,22 @@ pub trait ReadQueryTuple: QueryTuple {
         since_tick: u32,
     ) -> bool;
     fn read_item<'table>(fetch: Self::ReadFetch<'table>, index: usize) -> Self::Item<'table>;
+    fn join_lookup(
+        driver: &DynWorld,
+        element_worlds: &[Option<&DynWorld>; 8],
+    ) -> Option<([u64; 8], u64)>;
+    fn join_read_fetch<'table>(
+        table_mask: u64,
+        columns: &'table [ColumnSlot],
+        element_masks: &[u64; 8],
+        element_worlds: &[Option<&DynWorld>; 8],
+    ) -> Self::ReadFetch<'table>;
+    fn join_read_item<'world>(
+        fetch: Self::ReadFetch<'world>,
+        element_worlds: &[Option<&'world DynWorld>; 8],
+        entity: Entity,
+        index: usize,
+    ) -> Option<Self::Item<'world>>;
 }
 
 fn required_mask(elements: &[(u64, bool)]) -> u64 {
@@ -3809,6 +4252,161 @@ macro_rules! impl_query_tuple {
                 driver.added_scratch = added_scratch;
             }
 
+            #[cfg(not(target_family = "wasm"))]
+            #[allow(non_snake_case)]
+            fn join_par_for_each<FN: for<'item> Fn(Entity, Self::Item<'item>) + Send + Sync>(
+                driver: &mut DynWorld,
+                element_worlds: &[Option<&DynWorld>; 8],
+                filters: &JoinFilters<'_>,
+                f: FN,
+            ) {
+                use crate::rayon::prelude::*;
+
+                let mut element_masks = [0u64; 8];
+                let mut local_include = 0u64;
+                $(
+                    if element_worlds[$position].is_none() {
+                        element_masks[$position] = $element::component_mask(driver);
+                        if $element::REQUIRED {
+                            local_include |= element_masks[$position];
+                        }
+                    }
+                )+
+                let mut changed_mask = 0u64;
+                for lookup in filters.changed_lookups.iter().flatten() {
+                    changed_mask |= lookup(driver)
+                        .expect("changed filters on query_join must name driver-world components");
+                }
+                let mut added_mask = 0u64;
+                for lookup in filters.added_lookups.iter().flatten() {
+                    added_mask |= lookup(driver)
+                        .expect("added filters on query_join must name driver-world components");
+                }
+                let local_tuple_mask = element_masks
+                    .iter()
+                    .fold(0, |mask, element| mask | element);
+                assert_eq!(
+                    (changed_mask | added_mask) & !local_tuple_mask,
+                    0,
+                    "changed and added filters must name components present in the query tuple"
+                );
+                let since_tick = driver.last_tick;
+                let current_tick = driver.current_tick;
+                driver
+                    .tables
+                    .par_iter_mut()
+                    .filter(|table| {
+                        table.mask & local_include == local_include
+                            && !table.entity_indices.is_empty()
+                    })
+                    .for_each(|table| {
+                        let table_mask = table.mask;
+                        let DynComponentArrays {
+                            entity_indices,
+                            columns,
+                            ..
+                        } = table;
+                        let added_scratch: Vec<bool> = if added_mask != 0 {
+                            let mut scratch = vec![false; entity_indices.len()];
+                            for column in columns.iter() {
+                                if added_mask & (1u64 << column.component_index) == 0 {
+                                    continue;
+                                }
+                                for (row, &added_tick) in column.added.iter().enumerate() {
+                                    if tick_is_newer(added_tick, since_tick) {
+                                        scratch[row] = true;
+                                    }
+                                }
+                            }
+                            scratch
+                        } else {
+                            Vec::new()
+                        };
+                        let positions = [$(
+                            if element_worlds[$position].is_none()
+                                && table_mask & element_masks[$position] != 0
+                            {
+                                Some(column_position(table_mask, element_masks[$position]))
+                            } else {
+                                None
+                            },
+                        )+];
+                        let [$($element,)+] = distribute_slots(columns, positions);
+                        $(
+                            let mut $element = if element_worlds[$position].is_none() {
+                                Some(<$element as QueryElement>::fetch($element, current_tick))
+                            } else {
+                                None
+                            };
+                        )+
+                        let mut visited = false;
+                        'rows: for (row_index, &entity) in entity_indices.iter().enumerate() {
+                            if !tag_sets_match(
+                                &filters.include_sets,
+                                &filters.exclude_sets,
+                                entity,
+                            ) {
+                                continue 'rows;
+                            }
+                            if added_mask != 0 && !added_scratch[row_index] {
+                                continue 'rows;
+                            }
+                            if changed_mask != 0 {
+                                let mut newer = false;
+                                $(
+                                    if !newer
+                                        && changed_mask & element_masks[$position] != 0
+                                        && let Some(fetch) = &$element
+                                        && <$element as QueryElement>::changed_newer(
+                                            fetch, row_index, since_tick,
+                                        )
+                                    {
+                                        newer = true;
+                                    }
+                                )+
+                                if !newer {
+                                    continue 'rows;
+                                }
+                            }
+                            $crate::paste::paste! {
+                                $(
+                                    let [<foreign_ $position>] = match element_worlds[$position] {
+                                        Some(world) => {
+                                            match <$element as QueryElement>::foreign_item(
+                                                world, entity,
+                                            ) {
+                                                Some(item) => Some(item),
+                                                None => continue 'rows,
+                                            }
+                                        }
+                                        None => None,
+                                    };
+                                )+
+                                $(
+                                    let [<item_ $position>] = match [<foreign_ $position>] {
+                                        Some(item) => item,
+                                        None => <$element as QueryElement>::item(
+                                            $element
+                                                .as_mut()
+                                                .expect("local positions carry a fetch"),
+                                            row_index,
+                                        ),
+                                    };
+                                )+
+                                visited = true;
+                                f(entity, ($([<item_ $position>],)+));
+                            }
+                        }
+                        if visited {
+                            $(
+                                if let Some(fetch) = &mut $element {
+                                    <$element as QueryElement>::stamp_peaks(fetch);
+                                }
+                            )+
+                        }
+                    });
+            }
+
             #[allow(non_snake_case)]
             fn fetch<'table>(
                 table_mask: u64,
@@ -4022,6 +4620,117 @@ macro_rules! impl_bare_element_query {
                     driver.added_scratch = added_scratch;
                 }
 
+                #[cfg(not(target_family = "wasm"))]
+                fn join_par_for_each<
+                    FN: for<'item> Fn(Entity, Self::Item<'item>) + Send + Sync,
+                >(
+                    driver: &mut DynWorld,
+                    element_worlds: &[Option<&DynWorld>; 8],
+                    filters: &JoinFilters<'_>,
+                    f: FN,
+                ) {
+                    use crate::rayon::prelude::*;
+
+                    debug_assert!(
+                        element_worlds[0].is_none(),
+                        "a single-element tuple always drives its own world"
+                    );
+                    let mut element_masks = [0u64; 8];
+                    element_masks[0] = <$element as QueryElement>::component_mask(driver);
+                    let local_include = if <$element as QueryElement>::REQUIRED {
+                        element_masks[0]
+                    } else {
+                        0
+                    };
+                    let mut changed_mask = 0u64;
+                    for lookup in filters.changed_lookups.iter().flatten() {
+                        changed_mask |= lookup(driver).expect(
+                            "changed filters on query_join must name driver-world components",
+                        );
+                    }
+                    let mut added_mask = 0u64;
+                    for lookup in filters.added_lookups.iter().flatten() {
+                        added_mask |= lookup(driver).expect(
+                            "added filters on query_join must name driver-world components",
+                        );
+                    }
+                    assert_eq!(
+                        (changed_mask | added_mask) & !element_masks[0],
+                        0,
+                        "changed and added filters must name components present in the query tuple"
+                    );
+                    let since_tick = driver.last_tick;
+                    let current_tick = driver.current_tick;
+                    driver
+                        .tables
+                        .par_iter_mut()
+                        .filter(|table| {
+                            table.mask & local_include == local_include
+                                && !table.entity_indices.is_empty()
+                        })
+                        .for_each(|table| {
+                            let table_mask = table.mask;
+                            let DynComponentArrays {
+                                entity_indices,
+                                columns,
+                                ..
+                            } = table;
+                            let added_scratch: Vec<bool> = if added_mask != 0 {
+                                let mut scratch = vec![false; entity_indices.len()];
+                                for column in columns.iter() {
+                                    if added_mask & (1u64 << column.component_index) == 0 {
+                                        continue;
+                                    }
+                                    for (row, &added_tick) in column.added.iter().enumerate() {
+                                        if tick_is_newer(added_tick, since_tick) {
+                                            scratch[row] = true;
+                                        }
+                                    }
+                                }
+                                scratch
+                            } else {
+                                Vec::new()
+                            };
+                            let positions = [if table_mask & element_masks[0] != 0 {
+                                Some(column_position(table_mask, element_masks[0]))
+                            } else {
+                                None
+                            }];
+                            let [slot] = distribute_slots(columns, positions);
+                            let mut fetch =
+                                <$element as QueryElement>::fetch(slot, current_tick);
+                            let mut visited = false;
+                            'rows: for (row_index, &entity) in
+                                entity_indices.iter().enumerate()
+                            {
+                                if !tag_sets_match(
+                                    &filters.include_sets,
+                                    &filters.exclude_sets,
+                                    entity,
+                                ) {
+                                    continue 'rows;
+                                }
+                                if added_mask != 0 && !added_scratch[row_index] {
+                                    continue 'rows;
+                                }
+                                if changed_mask != 0
+                                    && !<$element as QueryElement>::changed_newer(
+                                        &fetch, row_index, since_tick,
+                                    )
+                                {
+                                    continue 'rows;
+                                }
+                                let item =
+                                    <$element as QueryElement>::item(&mut fetch, row_index);
+                                visited = true;
+                                f(entity, item);
+                            }
+                            if visited {
+                                <$element as QueryElement>::stamp_peaks(&mut fetch);
+                            }
+                        });
+                }
+
                 fn fetch<'table>(
                     table_mask: u64,
                     columns: &'table mut [ColumnSlot],
@@ -4130,6 +4839,61 @@ macro_rules! impl_bare_element_read_query {
                 ) -> Self::Item<'table> {
                     <$element as ReadQueryElement>::read_item(fetch, index)
                 }
+
+                fn join_lookup(
+                    driver: &DynWorld,
+                    element_worlds: &[Option<&DynWorld>; 8],
+                ) -> Option<([u64; 8], u64)> {
+                    let mut masks = [0u64; 8];
+                    let mut required = 0u64;
+                    if element_worlds[0].is_none() {
+                        match <$element as ReadQueryElement>::lookup_mask(driver) {
+                            Some(mask) => {
+                                masks[0] = mask;
+                                if <$element as QueryElement>::REQUIRED {
+                                    required |= mask;
+                                }
+                            }
+                            None => {
+                                if <$element as QueryElement>::REQUIRED {
+                                    return None;
+                                }
+                            }
+                        }
+                    }
+                    Some((masks, required))
+                }
+
+                fn join_read_fetch<'table>(
+                    table_mask: u64,
+                    columns: &'table [ColumnSlot],
+                    element_masks: &[u64; 8],
+                    element_worlds: &[Option<&DynWorld>; 8],
+                ) -> Self::ReadFetch<'table> {
+                    if element_worlds[0].is_none() {
+                        <$element as ReadQueryElement>::read_fetch(
+                            if element_masks[0] != 0 && table_mask & element_masks[0] != 0 {
+                                Some(&columns[column_position(table_mask, element_masks[0])])
+                            } else {
+                                None
+                            },
+                        )
+                    } else {
+                        <$element as ReadQueryElement>::placeholder_read_fetch()
+                    }
+                }
+
+                fn join_read_item<'world>(
+                    fetch: Self::ReadFetch<'world>,
+                    element_worlds: &[Option<&'world DynWorld>; 8],
+                    entity: Entity,
+                    index: usize,
+                ) -> Option<Self::Item<'world>> {
+                    match element_worlds[0] {
+                        Some(world) => <$element as QueryElement>::foreign_item(world, entity),
+                        None => Some(<$element as ReadQueryElement>::read_item(fetch, index)),
+                    }
+                }
             }
         )+
     };
@@ -4205,6 +4969,79 @@ macro_rules! impl_read_query_tuple {
             ) -> Self::Item<'table> {
                 ($($element::read_item(fetch.$position, index),)+)
             }
+
+            fn join_lookup(
+                driver: &DynWorld,
+                element_worlds: &[Option<&DynWorld>; 8],
+            ) -> Option<([u64; 8], u64)> {
+                let mut masks = [0u64; 8];
+                let mut required = 0u64;
+                $(
+                    if element_worlds[$position].is_none() {
+                        match $element::lookup_mask(driver) {
+                            Some(mask) => {
+                                masks[$position] = mask;
+                                if $element::REQUIRED {
+                                    required |= mask;
+                                }
+                            }
+                            None => {
+                                if $element::REQUIRED {
+                                    return None;
+                                }
+                            }
+                        }
+                    }
+                )+
+                Some((masks, required))
+            }
+
+            fn join_read_fetch<'table>(
+                table_mask: u64,
+                columns: &'table [ColumnSlot],
+                element_masks: &[u64; 8],
+                element_worlds: &[Option<&DynWorld>; 8],
+            ) -> Self::ReadFetch<'table> {
+                ($(
+                    if element_worlds[$position].is_none() {
+                        $element::read_fetch(
+                            if element_masks[$position] != 0
+                                && table_mask & element_masks[$position] != 0
+                            {
+                                Some(&columns
+                                    [column_position(table_mask, element_masks[$position])])
+                            } else {
+                                None
+                            },
+                        )
+                    } else {
+                        $element::placeholder_read_fetch()
+                    },
+                )+)
+            }
+
+            #[allow(non_snake_case)]
+            fn join_read_item<'world>(
+                fetch: Self::ReadFetch<'world>,
+                element_worlds: &[Option<&'world DynWorld>; 8],
+                entity: Entity,
+                index: usize,
+            ) -> Option<Self::Item<'world>> {
+                $crate::paste::paste! {
+                    $(
+                        let [<item_ $position>] = match element_worlds[$position] {
+                            Some(world) => {
+                                match <$element as QueryElement>::foreign_item(world, entity) {
+                                    Some(item) => item,
+                                    None => return None,
+                                }
+                            }
+                            None => $element::read_item(fetch.$position, index),
+                        };
+                    )+
+                    Some(($([<item_ $position>],)+))
+                }
+            }
         }
     };
 }
@@ -4241,6 +5078,7 @@ pub struct DynQuery<'world, Q: QueryTuple> {
     pub added_mask: u64,
     pub include_tag_sets: [Option<&'world SparseTagSet>; 4],
     pub exclude_tag_sets: [Option<&'world SparseTagSet>; 4],
+    pub element_masks: Option<[u64; 8]>,
     pub marker: PhantomData<Q>,
 }
 
@@ -4351,8 +5189,35 @@ impl<'world, Q: QueryTuple> DynQuery<'world, Q> {
         self
     }
 
+    /// Freezes this query's resolved masks into a reusable
+    /// [`PreparedQuery`], registering the tuple's types now. Tag-set
+    /// references cannot be captured (they borrow the world); apply those
+    /// at run time on the rehydrated query.
+    pub fn prepare(self) -> PreparedQuery<Q> {
+        assert!(
+            self.include_tag_sets.iter().all(Option::is_none)
+                && self.exclude_tag_sets.iter().all(Option::is_none),
+            "prepared queries cannot capture tag-set references; \
+             apply with_tag_set/without_tag_set on the rehydrated query"
+        );
+        PreparedQuery {
+            element_masks: match self.element_masks {
+                Some(masks) => masks,
+                None => Q::element_masks(self.world),
+            },
+            include: self.include,
+            exclude: self.exclude,
+            changed_mask: self.changed_mask,
+            added_mask: self.added_mask,
+            marker: PhantomData,
+        }
+    }
+
     pub fn for_each(self, mut f: impl for<'item> FnMut(Entity, Q::Item<'item>)) {
-        let element_masks = Q::element_masks(self.world);
+        let element_masks = match self.element_masks {
+            Some(masks) => masks,
+            None => Q::element_masks(self.world),
+        };
         let tuple_mask = element_masks.iter().fold(0, |mask, element| mask | element);
         assert_eq!(
             (self.changed_mask | self.added_mask) & !tuple_mask,
@@ -4467,7 +5332,10 @@ impl<'world, Q: QueryTuple> DynQuery<'world, Q> {
     {
         use crate::rayon::prelude::*;
 
-        let element_masks = Q::element_masks(self.world);
+        let element_masks = match self.element_masks {
+            Some(masks) => masks,
+            None => Q::element_masks(self.world),
+        };
         let tuple_mask = element_masks.iter().fold(0, |mask, element| mask | element);
         assert_eq!(
             (self.changed_mask | self.added_mask) & !tuple_mask,
@@ -4586,6 +5454,7 @@ pub struct DynQueryRef<'world, Q: ReadQueryTuple> {
     pub added_mask: u64,
     pub include_tag_sets: [Option<&'world SparseTagSet>; 4],
     pub exclude_tag_sets: [Option<&'world SparseTagSet>; 4],
+    pub resolved_masks: Option<([u64; 8], u64)>,
     pub dead: bool,
     pub marker: PhantomData<Q>,
 }
@@ -4674,13 +5543,44 @@ impl<'world, Q: ReadQueryTuple> DynQueryRef<'world, Q> {
         self
     }
 
+    /// Freezes this query's resolved masks into a reusable
+    /// [`PreparedQueryRef`]. Tag-set references cannot be captured; apply
+    /// those at run time on the rehydrated query.
+    pub fn prepare(self) -> PreparedQueryRef<Q> {
+        assert!(
+            self.include_tag_sets.iter().all(Option::is_none)
+                && self.exclude_tag_sets.iter().all(Option::is_none),
+            "prepared queries cannot capture tag-set references; \
+             apply with_tag_set/without_tag_set on the rehydrated query"
+        );
+        PreparedQueryRef {
+            resolved_masks: if self.dead {
+                None
+            } else {
+                match self.resolved_masks {
+                    Some(resolved) => Some(resolved),
+                    None => Q::lookup_masks(self.world),
+                }
+            },
+            include: self.include,
+            exclude: self.exclude,
+            changed_mask: self.changed_mask,
+            added_mask: self.added_mask,
+            marker: PhantomData,
+        }
+    }
+
     /// Runs the query as an iterator of `(Entity, items)`. Items borrow the
     /// world, not the iterator, so they survive collection.
     pub fn iter(self) -> DynQueryRefIter<'world, Q> {
         let mut done = self.dead;
         let mut element_masks = [0u64; 8];
         let mut include = self.include;
-        match Q::lookup_masks(self.world) {
+        let resolved = match self.resolved_masks {
+            Some(resolved) => Some(resolved),
+            None => Q::lookup_masks(self.world),
+        };
+        match resolved {
             Some((masks, required)) => {
                 element_masks = masks;
                 include |= required;
@@ -5111,6 +6011,464 @@ impl<Q: QueryTuple> DynJoin<'_, Q> {
         };
         Q::join_for_each(driver_world, &element_worlds, &filters, f);
     }
+
+    /// The parallel form of [`for_each`](Self::for_each): driver tables run
+    /// concurrently, rows within a table sequentially, foreign worlds are
+    /// shared across threads read-only, and the `added` filter builds one
+    /// scratch buffer per table task. Same routing rules and stamping.
+    #[cfg(not(target_family = "wasm"))]
+    pub fn par_for_each<F>(self, f: F)
+    where
+        F: for<'item> Fn(Entity, Q::Item<'item>) + Send + Sync,
+    {
+        let routes = Q::join_routes(&self.ecs.worlds);
+
+        let mut driver: Option<usize> = None;
+        for route in routes.iter().flatten() {
+            if route.required && route.world.is_none() {
+                panic!(
+                    "{} is not registered in any member world; add it to a member schema first",
+                    route.type_name
+                );
+            }
+            if route.mutable
+                && let Some(world) = route.world
+            {
+                match driver {
+                    None => driver = Some(world),
+                    Some(existing) => assert_eq!(
+                        existing, world,
+                        "cross-world queries mutate only one world's components; \
+                         {} lives in member world {world}, but another mutable element \
+                         already fixed the driver to member world {existing}",
+                        route.type_name
+                    ),
+                }
+            }
+        }
+        let driver = driver.unwrap_or_else(|| {
+            let mut counts = vec![0usize; self.ecs.worlds.len()];
+            for route in routes.iter().flatten() {
+                if let Some(world) = route.world {
+                    counts[world] += 1;
+                }
+            }
+            counts
+                .iter()
+                .copied()
+                .enumerate()
+                .max_by_key(|&(index, count)| (count, usize::MAX - index))
+                .map(|(index, _)| index)
+                .expect("query_join requires at least one member world")
+        });
+
+        let mut include_sets: [Option<&SparseTagSet>; 4] = [None; 4];
+        let mut exclude_sets: [Option<&SparseTagSet>; 4] = [None; 4];
+        for (slot, type_id) in include_sets.iter_mut().zip(self.include_tag_types.iter()) {
+            if let Some(type_id) = type_id {
+                match self.ecs.tag_type_indices.get(type_id) {
+                    Some(&index) => *slot = Some(&self.ecs.tags[index]),
+                    None => return,
+                }
+            }
+        }
+        for (slot, type_id) in exclude_sets.iter_mut().zip(self.exclude_tag_types.iter()) {
+            if let Some(type_id) = type_id
+                && let Some(&index) = self.ecs.tag_type_indices.get(type_id)
+            {
+                *slot = Some(&self.ecs.tags[index]);
+            }
+        }
+
+        let (left, rest) = self.ecs.worlds.split_at_mut(driver);
+        let (driver_world, right) = rest
+            .split_first_mut()
+            .expect("the driver index is within the member list");
+        let left: &[DynWorld] = left;
+        let right: &[DynWorld] = right;
+
+        let mut element_worlds: [Option<&DynWorld>; 8] = [None; 8];
+        for (position, route) in routes.iter().enumerate() {
+            if let Some(route) = route
+                && let Some(world) = route.world
+                && world != driver
+            {
+                element_worlds[position] = Some(if world < driver {
+                    &left[world]
+                } else {
+                    &right[world - driver - 1]
+                });
+            }
+        }
+
+        let filters = JoinFilters {
+            include_sets,
+            exclude_sets,
+            changed_lookups: self.changed_lookups,
+            added_lookups: self.added_lookups,
+        };
+        Q::join_par_for_each(driver_world, &element_worlds, &filters, f);
+    }
+}
+
+/// The read-only cross-world join builder, from
+/// [`DynEcs::query_join_ref`]. Filter semantics mirror [`DynJoin`]'s,
+/// except failures degrade to empty instead of panicking where the
+/// read-only single-world path also degrades.
+pub struct DynJoinRef<'ecs, Q: ReadQueryTuple> {
+    pub ecs: &'ecs DynEcs,
+    pub include_tag_types: [Option<TypeId>; 4],
+    pub exclude_tag_types: [Option<TypeId>; 4],
+    pub changed_lookups: [Option<JoinMaskLookup>; 4],
+    pub added_lookups: [Option<JoinMaskLookup>; 4],
+    pub marker: PhantomData<Q>,
+}
+
+impl<'ecs, Q: ReadQueryTuple> DynJoinRef<'ecs, Q> {
+    /// Only visit entities carrying the marker type `T`'s group tag.
+    pub fn with_tag_type<T: 'static>(mut self) -> Self {
+        push_join_slot(&mut self.include_tag_types, TypeId::of::<T>());
+        self
+    }
+
+    /// Skip entities carrying the marker type `T`'s group tag.
+    pub fn without_tag_type<T: 'static>(mut self) -> Self {
+        push_join_slot(&mut self.exclude_tag_types, TypeId::of::<T>());
+        self
+    }
+
+    /// Only visit entities whose `T` changed since the driver world's last
+    /// step. `T` must be one of the tuple's driver-world components; an
+    /// unregistered `T` reads as an empty iterator.
+    pub fn changed<T: Send + Sync + Default + 'static>(mut self) -> Self {
+        push_join_slot(&mut self.changed_lookups, join_mask_of::<T>);
+        self
+    }
+
+    /// Only visit entities that gained `T` since the driver world's last
+    /// step, with the same rules as [`changed`](Self::changed).
+    pub fn added<T: Send + Sync + Default + 'static>(mut self) -> Self {
+        push_join_slot(&mut self.added_lookups, join_mask_of::<T>);
+        self
+    }
+
+    /// Runs the join as an iterator of `(Entity, items)` borrowing the
+    /// group.
+    pub fn iter(self) -> DynJoinRefIter<'ecs, Q> {
+        let dead_iterator = |ecs: &'ecs DynEcs| DynJoinRefIter {
+            driver: &ecs.worlds[0],
+            element_worlds: [None; 8],
+            element_masks: [0u64; 8],
+            include: 0,
+            include_sets: [None; 4],
+            exclude_sets: [None; 4],
+            changed_mask: 0,
+            added_mask: 0,
+            since_tick: 0,
+            added_scratch: Vec::new(),
+            table_index: 0,
+            row_index: 0,
+            current: None,
+            done: true,
+            marker: PhantomData,
+        };
+
+        if self.ecs.worlds.is_empty() {
+            panic!("query_join requires at least one member world");
+        }
+
+        let routes = Q::join_routes(&self.ecs.worlds);
+        for route in routes.iter().flatten() {
+            if route.required && route.world.is_none() {
+                return dead_iterator(self.ecs);
+            }
+        }
+        let mut counts = vec![0usize; self.ecs.worlds.len()];
+        for route in routes.iter().flatten() {
+            if let Some(world) = route.world {
+                counts[world] += 1;
+            }
+        }
+        let driver_index = counts
+            .iter()
+            .copied()
+            .enumerate()
+            .max_by_key(|&(index, count)| (count, usize::MAX - index))
+            .map(|(index, _)| index)
+            .expect("query_join requires at least one member world");
+
+        let mut include_sets: [Option<&SparseTagSet>; 4] = [None; 4];
+        let mut exclude_sets: [Option<&SparseTagSet>; 4] = [None; 4];
+        for (slot, type_id) in include_sets.iter_mut().zip(self.include_tag_types.iter()) {
+            if let Some(type_id) = type_id {
+                match self.ecs.tag_type_indices.get(type_id) {
+                    Some(&index) => *slot = Some(&self.ecs.tags[index]),
+                    None => return dead_iterator(self.ecs),
+                }
+            }
+        }
+        for (slot, type_id) in exclude_sets.iter_mut().zip(self.exclude_tag_types.iter()) {
+            if let Some(type_id) = type_id
+                && let Some(&index) = self.ecs.tag_type_indices.get(type_id)
+            {
+                *slot = Some(&self.ecs.tags[index]);
+            }
+        }
+
+        let driver = &self.ecs.worlds[driver_index];
+        let mut element_worlds: [Option<&'ecs DynWorld>; 8] = [None; 8];
+        for (position, route) in routes.iter().enumerate() {
+            if let Some(route) = route
+                && let Some(world) = route.world
+                && world != driver_index
+            {
+                element_worlds[position] = Some(&self.ecs.worlds[world]);
+            }
+        }
+
+        let Some((element_masks, include)) = Q::join_lookup(driver, &element_worlds) else {
+            return dead_iterator(self.ecs);
+        };
+
+        let mut changed_mask = 0u64;
+        for lookup in self.changed_lookups.iter().flatten() {
+            match lookup(driver) {
+                Some(mask) => changed_mask |= mask,
+                None => return dead_iterator(self.ecs),
+            }
+        }
+        let mut added_mask = 0u64;
+        for lookup in self.added_lookups.iter().flatten() {
+            match lookup(driver) {
+                Some(mask) => added_mask |= mask,
+                None => return dead_iterator(self.ecs),
+            }
+        }
+        let local_tuple_mask = element_masks.iter().fold(0, |mask, element| mask | element);
+        assert_eq!(
+            (changed_mask | added_mask) & !local_tuple_mask,
+            0,
+            "changed and added filters must name components present in the query tuple"
+        );
+
+        DynJoinRefIter {
+            driver,
+            element_worlds,
+            element_masks,
+            include,
+            include_sets,
+            exclude_sets,
+            changed_mask,
+            added_mask,
+            since_tick: driver.last_tick,
+            added_scratch: Vec::new(),
+            table_index: 0,
+            row_index: 0,
+            current: None,
+            done: false,
+            marker: PhantomData,
+        }
+    }
+}
+
+/// The iterator behind [`DynJoinRef::iter`]: walks the driver world's
+/// matching tables in order, resolving foreign elements per entity. The
+/// `added` filter recomputes its scratch per table into an iterator-owned
+/// buffer.
+pub struct DynJoinRefIter<'ecs, Q: ReadQueryTuple> {
+    pub driver: &'ecs DynWorld,
+    pub element_worlds: [Option<&'ecs DynWorld>; 8],
+    pub element_masks: [u64; 8],
+    pub include: u64,
+    pub include_sets: [Option<&'ecs SparseTagSet>; 4],
+    pub exclude_sets: [Option<&'ecs SparseTagSet>; 4],
+    pub changed_mask: u64,
+    pub added_mask: u64,
+    pub since_tick: u32,
+    pub added_scratch: Vec<bool>,
+    pub table_index: usize,
+    pub row_index: usize,
+    pub current: Option<(&'ecs [Entity], Q::ReadFetch<'ecs>)>,
+    pub done: bool,
+    pub marker: PhantomData<Q>,
+}
+
+impl<'ecs, Q: ReadQueryTuple> Iterator for DynJoinRefIter<'ecs, Q> {
+    type Item = (Entity, Q::Item<'ecs>);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.done {
+            return None;
+        }
+        loop {
+            if let Some((entities, fetch)) = self.current {
+                while self.row_index < entities.len() {
+                    let index = self.row_index;
+                    self.row_index += 1;
+                    let entity = entities[index];
+                    if !tag_sets_match(&self.include_sets, &self.exclude_sets, entity) {
+                        continue;
+                    }
+                    if self.added_mask != 0 && !self.added_scratch[index] {
+                        continue;
+                    }
+                    if self.changed_mask != 0
+                        && !Q::read_changed_newer(
+                            fetch,
+                            index,
+                            &self.element_masks,
+                            self.changed_mask,
+                            self.since_tick,
+                        )
+                    {
+                        continue;
+                    }
+                    match Q::join_read_item(fetch, &self.element_worlds, entity, index) {
+                        Some(item) => return Some((entity, item)),
+                        None => continue,
+                    }
+                }
+                self.current = None;
+            }
+
+            let table = loop {
+                let Some(table) = self.driver.tables.get(self.table_index) else {
+                    self.done = true;
+                    return None;
+                };
+                self.table_index += 1;
+                if table.mask & self.include == self.include && !table.entity_indices.is_empty() {
+                    break table;
+                }
+            };
+
+            if self.added_mask != 0 {
+                self.added_scratch.clear();
+                self.added_scratch.resize(table.entity_indices.len(), false);
+                for column in &table.columns {
+                    if self.added_mask & (1u64 << column.component_index) == 0 {
+                        continue;
+                    }
+                    for (row, &added_tick) in column.added.iter().enumerate() {
+                        if tick_is_newer(added_tick, self.since_tick) {
+                            self.added_scratch[row] = true;
+                        }
+                    }
+                }
+            }
+            let fetch = Q::join_read_fetch(
+                table.mask,
+                &table.columns,
+                &self.element_masks,
+                &self.element_worlds,
+            );
+            self.current = Some((table.entity_indices.as_slice(), fetch));
+            self.row_index = 0;
+        }
+    }
+}
+
+/// A mutable typed query resolved once and reused: element masks and
+/// filter masks cached as plain copyable data, so hot systems skip the
+/// per-call `TypeId` resolution. Build one by configuring a
+/// [`DynQuery`] and calling [`prepare`](DynQuery::prepare); run it with
+/// [`query`](Self::query). Prepared against one world's schema; running it
+/// against a world with different mask assignments is a logic error that
+/// the column machinery surfaces as a panic rather than wrong data.
+#[derive(Clone, Copy)]
+pub struct PreparedQuery<Q: QueryTuple> {
+    pub element_masks: [u64; 8],
+    pub include: u64,
+    pub exclude: u64,
+    pub changed_mask: u64,
+    pub added_mask: u64,
+    pub marker: PhantomData<Q>,
+}
+
+impl<Q: QueryTuple> PreparedQuery<Q> {
+    /// Rehydrates the prepared masks into a runnable [`DynQuery`].
+    /// Tag-set filters compose here at run time
+    /// (`prepared.query(world).with_tag_set(...)`).
+    pub fn query<'world>(&self, world: &'world mut DynWorld) -> DynQuery<'world, Q> {
+        DynQuery {
+            world,
+            include: self.include,
+            exclude: self.exclude,
+            changed_mask: self.changed_mask,
+            added_mask: self.added_mask,
+            include_tag_sets: [None; 4],
+            exclude_tag_sets: [None; 4],
+            element_masks: Some(self.element_masks),
+            marker: PhantomData,
+        }
+    }
+}
+
+/// The read-only prepared form, from [`DynQueryRef::prepare`]. A tuple
+/// whose required elements were unregistered at prepare time stays dead,
+/// matching `query_ref`'s graceful degradation.
+#[derive(Clone, Copy)]
+pub struct PreparedQueryRef<Q: ReadQueryTuple> {
+    pub resolved_masks: Option<([u64; 8], u64)>,
+    pub include: u64,
+    pub exclude: u64,
+    pub changed_mask: u64,
+    pub added_mask: u64,
+    pub marker: PhantomData<Q>,
+}
+
+impl<Q: ReadQueryTuple> PreparedQueryRef<Q> {
+    /// Rehydrates the prepared masks into a runnable [`DynQueryRef`].
+    pub fn query<'world>(&self, world: &'world DynWorld) -> DynQueryRef<'world, Q> {
+        DynQueryRef {
+            world,
+            include: self.include,
+            exclude: self.exclude,
+            changed_mask: self.changed_mask,
+            added_mask: self.added_mask,
+            include_tag_sets: [None; 4],
+            exclude_tag_sets: [None; 4],
+            resolved_masks: self.resolved_masks,
+            dead: self.resolved_masks.is_none(),
+            marker: PhantomData,
+        }
+    }
+}
+
+/// A point-in-time census of one world's storage and bookkeeping, from
+/// [`DynWorld::stats`]: table occupancy, schema budget, and the lengths of
+/// every log and cache an editor overlay or a perf investigation reaches
+/// for. Plain data, cheap to build, allocation proportional to the table
+/// count.
+#[derive(Clone, Debug, Default)]
+pub struct WorldStats {
+    pub entity_count: usize,
+    pub table_count: usize,
+    pub empty_table_count: usize,
+    pub largest_table_rows: usize,
+    pub table_rows: Vec<(u64, usize)>,
+    pub component_count: usize,
+    pub tag_count: usize,
+    pub remaining_mask_bits: u32,
+    pub structural_log_entries: usize,
+    pub query_cache_entries: usize,
+    pub resource_count: usize,
+    pub event_channels: usize,
+    pub pending_commands: usize,
+}
+
+/// The group-level census, from [`DynEcs::stats`]: allocator liveness,
+/// group tags, logs, resources, and events, plus one [`WorldStats`] per
+/// member world.
+#[derive(Clone, Debug, Default)]
+pub struct EcsStats {
+    pub live_entities: usize,
+    pub free_ids: usize,
+    pub group_tag_count: usize,
+    pub group_structural_log_entries: usize,
+    pub group_resource_count: usize,
+    pub group_event_channels: usize,
+    pub worlds: Vec<WorldStats>,
 }
 
 /// A parent link for entity hierarchies: plain data, pull-maintained, no
@@ -7578,6 +8936,359 @@ mod tests {
             ecs.worlds[0].remaining_bits() == 63,
             "group marker tags spend no member-world mask bits"
         );
+    }
+
+    #[cfg(feature = "snapshot")]
+    fn assert_worlds_equivalent(left: &DynWorld, right: &DynWorld, context: &str) {
+        let mut left_entities: Vec<Entity> = left
+            .tables
+            .iter()
+            .flat_map(|table| table.entity_indices.iter().copied())
+            .collect();
+        let mut right_entities: Vec<Entity> = right
+            .tables
+            .iter()
+            .flat_map(|table| table.entity_indices.iter().copied())
+            .collect();
+        left_entities.sort_unstable_by_key(|entity| entity.id);
+        right_entities.sort_unstable_by_key(|entity| entity.id);
+        assert_eq!(
+            left_entities, right_entities,
+            "entity sets diverge: {context}"
+        );
+
+        for &entity in &left_entities {
+            assert_eq!(
+                left.component_mask(entity),
+                right.component_mask(entity),
+                "masks diverge for {entity}: {context}"
+            );
+            for info in &left.registry.components {
+                let name = info.type_name;
+                let left_bytes = left.get_component_by_name(entity, name).unwrap();
+                let right_bytes = right.get_component_by_name(entity, name).unwrap();
+                assert_eq!(
+                    left_bytes, right_bytes,
+                    "{name} diverges for {entity}: {context}"
+                );
+            }
+        }
+        for (index, (left_set, right_set)) in left.tags.iter().zip(&right.tags).enumerate() {
+            let mut left_members: Vec<Entity> = left_set.iter().collect();
+            let mut right_members: Vec<Entity> = right_set.iter().collect();
+            left_members.sort_unstable_by_key(|entity| entity.id);
+            right_members.sort_unstable_by_key(|entity| entity.id);
+            assert_eq!(
+                left_members, right_members,
+                "tag {index} diverges: {context}"
+            );
+        }
+    }
+
+    #[cfg(feature = "snapshot")]
+    #[test]
+    fn test_world_deltas_replicate_op_stream() {
+        let mut registry = ComponentRegistry::new();
+        registry.register_serde::<Position>();
+        registry.register_serde::<Velocity>();
+        registry.register_serde::<Health>();
+        let mut source = DynWorld::from_registry(registry.clone());
+
+        let seed_a = source.spawn((Position { x: 1.0, y: 0.0 }, Health { value: 5.0 }));
+        source.spawn((Velocity { x: 2.0, y: 0.0 },));
+
+        let snapshot = source.snapshot().unwrap();
+        let mut replica = DynWorld::from_snapshot(registry, &snapshot).unwrap();
+        let mut cursor = source.delta_cursor();
+
+        let mut rng = Lcg(2024);
+        let mut handles = vec![seed_a];
+        for round in 0..6 {
+            for _ in 0..40 {
+                match rng.next() % 8 {
+                    0 | 1 => handles.push(source.spawn((Position {
+                        x: rng.next() as f32 % 10.0,
+                        y: 0.0,
+                    },))),
+                    2 => {
+                        if let Some(&entity) = handles.last() {
+                            source.set(
+                                entity,
+                                Health {
+                                    value: (rng.next() % 100) as f32,
+                                },
+                            );
+                        }
+                    }
+                    3 => {
+                        if !handles.is_empty() {
+                            let entity = handles[rng.next() as usize % handles.len()];
+                            if let Some(position) = source.get_mut::<Position>(entity) {
+                                position.x += 1.0;
+                            }
+                        }
+                    }
+                    4 => {
+                        if !handles.is_empty() {
+                            let entity = handles[rng.next() as usize % handles.len()];
+                            source.remove::<Health>(entity);
+                        }
+                    }
+                    5 => {
+                        if !handles.is_empty() {
+                            let entity = handles[rng.next() as usize % handles.len()];
+                            source.add_tag_type::<u8>(entity);
+                        }
+                    }
+                    6 => {
+                        if !handles.is_empty() {
+                            let entity = handles[rng.next() as usize % handles.len()];
+                            source.remove_tag_type::<u8>(entity);
+                        }
+                    }
+                    _ => {
+                        if handles.len() > 2 {
+                            let victim = handles.remove(rng.next() as usize % handles.len());
+                            source.despawn_entities(&[victim]);
+                        }
+                    }
+                }
+            }
+            let delta = source.delta_since(&cursor).unwrap();
+            cursor = delta.to;
+            let bytes = postcard::to_allocvec(&delta).unwrap();
+            let decoded: DynWorldDelta = postcard::from_bytes(&bytes).unwrap();
+            replica.apply_delta(&decoded).unwrap();
+            assert_worlds_equivalent(&source, &replica, &format!("round {round}"));
+        }
+
+        let stale = handles[0];
+        source.despawn_entities(&[stale]);
+        let delta = source.delta_since(&cursor).unwrap();
+        replica.apply_delta(&delta).unwrap();
+        assert!(!replica.is_alive(stale) || replica.get::<Position>(stale).is_none());
+    }
+
+    #[cfg(feature = "snapshot")]
+    #[test]
+    fn test_world_delta_detects_log_gaps() {
+        let mut registry = ComponentRegistry::new();
+        registry.register_serde::<Position>();
+        let mut world = DynWorld::from_registry(registry);
+        let cursor = world.delta_cursor();
+        world.spawn((Position::default(),));
+        world.trim_structural_log(world.structural_sequence);
+        world.spawn((Position::default(),));
+        world.trim_structural_log(world.structural_sequence);
+        let result = world.delta_since(&cursor);
+        assert!(
+            matches!(result, Err(SnapshotError::Codec(message)) if message.contains("gap")),
+            "a trimmed log past the cursor must be a loud gap"
+        );
+    }
+
+    #[cfg(feature = "snapshot")]
+    #[test]
+    fn test_group_deltas_replicate_across_members() {
+        struct Marked;
+
+        let mut core_registry = ComponentRegistry::new();
+        core_registry.register_serde::<Position>();
+        let mut game_registry = ComponentRegistry::new();
+        game_registry.register_serde::<Health>();
+
+        let mut source = DynEcs::new();
+        source.add_world_at(0, core_registry.clone());
+        source.add_world_at(1, game_registry.clone());
+        let anchor = source.spawn_with((Position { x: 1.0, y: 0.0 }, Health { value: 9.0 }));
+
+        let snapshot = source.snapshot().unwrap();
+        let mut replica =
+            DynEcs::from_snapshot(vec![core_registry, game_registry], &snapshot).unwrap();
+        let mut cursor = source.delta_cursor();
+
+        let newcomer = source.spawn_with((Position { x: 5.0, y: 0.0 }, Health { value: 1.0 }));
+        source.add_tag_type::<Marked>(newcomer);
+        source.get_mut::<Health>(anchor).unwrap().value = 77.0;
+        let doomed = source.spawn_with((Position::default(),));
+        source.despawn(doomed);
+
+        let delta = source.delta_since(&cursor).unwrap();
+        cursor = DynEcsDeltaCursor {
+            group_sequence: delta.group_to,
+            worlds: delta.worlds.iter().map(|world| world.to).collect(),
+        };
+        replica.apply_delta(&delta).unwrap();
+
+        assert!(replica.is_alive(newcomer));
+        assert!(!replica.is_alive(doomed));
+        assert_eq!(replica.get::<Health>(anchor).unwrap().value, 77.0);
+        assert_eq!(replica.get::<Position>(newcomer).unwrap().x, 5.0);
+        assert!(replica.has_tag_type::<Marked>(newcomer));
+        assert_worlds_equivalent(&source.worlds[0], &replica.worlds[0], "core");
+        assert_worlds_equivalent(&source.worlds[1], &replica.worlds[1], "game");
+
+        source.remove_tag_type::<Marked>(newcomer);
+        source.get_mut::<Position>(newcomer).unwrap().x = 6.0;
+        let second = source.delta_since(&cursor).unwrap();
+        replica.apply_delta(&second).unwrap();
+        assert!(!replica.has_tag_type::<Marked>(newcomer));
+        assert_eq!(replica.get::<Position>(newcomer).unwrap().x, 6.0);
+    }
+
+    #[test]
+    fn test_prepared_queries_match_direct_queries() {
+        let mut world = DynWorld::new();
+        let moving = world.spawn((Position { x: 1.0, y: 0.0 }, Velocity { x: 1.0, y: 0.0 }));
+        world.spawn((Position { x: 2.0, y: 0.0 },));
+
+        let prepared = world
+            .query::<(&mut Position, &Velocity)>()
+            .changed::<Position>()
+            .prepare();
+        let prepared_read = world.query_ref::<&Position>().prepare();
+
+        world.step();
+        world.get_mut::<Position>(moving).unwrap().x = 5.0;
+
+        let mut visited = Vec::new();
+        prepared
+            .query(&mut world)
+            .for_each(|entity, (position, velocity)| {
+                position.x += velocity.x;
+                visited.push(entity);
+            });
+        assert_eq!(visited, vec![moving]);
+        assert_eq!(world.get::<Position>(moving).unwrap().x, 6.0);
+
+        let total = prepared_read.query(&world).iter().count();
+        assert_eq!(total, 2);
+
+        let again = prepared_read.query(&world).iter().count();
+        assert_eq!(again, 2, "prepared queries rerun without re-resolving");
+    }
+
+    #[test]
+    fn test_query_join_ref_iterates_across_worlds() {
+        struct Chosen;
+
+        let mut core_registry = ComponentRegistry::new();
+        core_registry.register::<Position>();
+        let mut game_registry = ComponentRegistry::new();
+        game_registry.register::<Health>();
+
+        let mut ecs = DynEcs::new();
+        ecs.add_world_at(0, core_registry);
+        ecs.add_world_at(1, game_registry);
+
+        let both = ecs.spawn_with((Position { x: 1.0, y: 0.0 }, Health { value: 10.0 }));
+        ecs.spawn_with((Position { x: 2.0, y: 0.0 },));
+        let tagged = ecs.spawn_with((Position { x: 3.0, y: 0.0 }, Health { value: 30.0 }));
+        ecs.add_tag_type::<Chosen>(tagged);
+
+        let pairs: Vec<(Entity, f32)> = ecs
+            .query_join_ref::<(&Position, &Health)>()
+            .iter()
+            .map(|(entity, (position, health))| (entity, position.x + health.value))
+            .collect();
+        assert_eq!(pairs, vec![(both, 11.0), (tagged, 33.0)]);
+
+        let chosen: Vec<Entity> = ecs
+            .query_join_ref::<(&Position, &Health)>()
+            .with_tag_type::<Chosen>()
+            .iter()
+            .map(|(entity, _items)| entity)
+            .collect();
+        assert_eq!(chosen, vec![tagged]);
+
+        assert_eq!(
+            ecs.query_join_ref::<(&Position, &Velocity)>()
+                .iter()
+                .count(),
+            0,
+            "an unregistered required element degrades to empty"
+        );
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    #[test]
+    fn test_query_join_par_for_each_matches_sequential() {
+        let mut core_registry = ComponentRegistry::new();
+        core_registry.register::<Position>();
+        let mut game_registry = ComponentRegistry::new();
+        game_registry.register::<Health>();
+
+        let mut ecs = DynEcs::new();
+        ecs.add_world_at(0, core_registry);
+        ecs.add_world_at(1, game_registry);
+        for index in 0..50 {
+            let entity = ecs.spawn_with((Position {
+                x: index as f32,
+                y: 0.0,
+            },));
+            if index % 2 == 0 {
+                ecs.set(entity, Health { value: 1.0 });
+            }
+        }
+
+        ecs.worlds[0].step();
+        ecs.query_join::<(&mut Position, &Health)>()
+            .par_for_each(|_entity, (position, health)| {
+                position.y += health.value;
+            });
+
+        let mut lifted = 0;
+        ecs.query_join::<(&Position, &Health)>()
+            .for_each(|_entity, (position, _health)| {
+                if position.y == 1.0 {
+                    lifted += 1;
+                }
+            });
+        assert_eq!(lifted, 25);
+        assert_eq!(
+            ecs.worlds[0]
+                .query_entities_changed(ecs.worlds[0].lookup_key::<Position>().unwrap().mask)
+                .count(),
+            25,
+            "parallel join mutation stamps driver ticks"
+        );
+    }
+
+    #[test]
+    fn test_stats_and_compact() {
+        let mut world = DynWorld::new();
+        let mover = world.spawn((Position::default(), Velocity::default()));
+        world.spawn((Position::default(),));
+        world.insert_resource(7u32);
+        world.send(3u8);
+
+        let stats = world.stats();
+        assert_eq!(stats.entity_count, 2);
+        assert_eq!(stats.table_count, 2);
+        assert_eq!(stats.empty_table_count, 0);
+        assert_eq!(stats.component_count, 2);
+        assert_eq!(stats.resource_count, 1);
+        assert_eq!(stats.event_channels, 1);
+
+        world.remove::<Velocity>(mover);
+        assert_eq!(world.stats().empty_table_count, 1);
+
+        let dropped = world.compact();
+        assert_eq!(dropped, 1);
+        assert_eq!(world.stats().table_count, 1);
+        assert_eq!(world.get::<Position>(mover).unwrap().x, 0.0);
+        world.set(mover, Velocity { x: 4.0, y: 0.0 });
+        assert_eq!(world.get::<Velocity>(mover).unwrap().x, 4.0);
+        assert_eq!(world.compact(), 0);
+
+        let mut ecs = DynEcs::new();
+        ecs.add_world(ComponentRegistry::new());
+        let entity = ecs.spawn();
+        ecs.add_tag_type::<u16>(entity);
+        let group_stats = ecs.stats();
+        assert_eq!(group_stats.live_entities, 1);
+        assert_eq!(group_stats.group_tag_count, 1);
+        assert_eq!(group_stats.worlds.len(), 1);
     }
 
     #[test]

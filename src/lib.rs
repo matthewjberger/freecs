@@ -14,8 +14,11 @@
 //! - **Events**: Sequence-numbered channels with exactly-once cursor consumption
 //! - **Structural Change Log**: Cursor-based log of spawns, despawns, component moves, and tag flips
 //! - **Multi-World**: Split components across multiple worlds for >64 component types
-//! - **Dynamic Worlds** (optional `dynamic` feature): register component types at
-//!   runtime with bundle spawns and typed queries, same storage underneath
+//! - **Dynamic Worlds** (optional `dynamic` feature): the primary entry point.
+//!   Runtime component registration with bundle spawns, typed queries, joins,
+//!   prepared queries, snapshots and deltas, same storage underneath; new
+//!   surface lands here first, and the macro tier stays the executable
+//!   specification it is tested against
 //!
 //! The `ecs!` macro generates the entire ECS at compile time using only plain data structures, functions, and zero unsafe code.
 //!
@@ -754,6 +757,31 @@ pub struct EntityAllocator {
 }
 
 impl EntityAllocator {
+    /// Forces a handle live at its exact id and generation, the primitive a
+    /// replica uses when applying a replicated spawn. Extends the slot
+    /// table as needed, removes the id from the free list, and keeps
+    /// `next_id` ahead of it.
+    pub fn revive(&mut self, entity: Entity) {
+        let index = entity.id as usize;
+        if self.slots.len() <= index {
+            self.slots.resize(
+                index + 1,
+                EntitySlot {
+                    generation: 0,
+                    alive: false,
+                },
+            );
+        }
+        self.slots[index] = EntitySlot {
+            generation: entity.generation,
+            alive: true,
+        };
+        self.free_ids.retain(|&(id, _)| id != entity.id);
+        if self.next_id <= entity.id {
+            self.next_id = entity.id + 1;
+        }
+    }
+
     #[inline]
     pub fn allocate(&mut self) -> Entity {
         let entity = if let Some((id, next_generation)) = self.free_ids.pop() {
@@ -1089,6 +1117,7 @@ where
 pub const STRUCTURAL_LOG_CAPACITY: usize = 262_144;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum StructuralChangeKind {
     Spawned,
     Despawned,
@@ -1104,6 +1133,7 @@ pub enum StructuralChangeKind {
 /// track their own `sequence` cursor via `structural_changes_since` and the
 /// owner trims consumed entries with `trim_structural_log`.
 #[derive(Debug, Clone, Copy)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct StructuralChange {
     pub sequence: u64,
     pub entity: Entity,

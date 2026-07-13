@@ -92,13 +92,17 @@ Add this to your `Cargo.toml`:
 freecs = "3"
 ```
 
-freecs has two first-class entry points over the same archetype storage. The
-`ecs!` macro fixes your component set at compile time and generates a named
-accessor for everything, which is the fastest path to a working game. The
-dynamic world registers component types at runtime for programs that cannot
-know their schema up front, editors, plugin hosts, data-driven prefabs, and
-its typed queries compile to the same slice loops. Pick whichever fits, or
-run both side by side.
+freecs has two entry points over the same archetype storage, and the
+dynamic world is the primary one: typed tuple queries with change and added
+filters, cross-world joins, prepared queries, hierarchies, exactly-once
+events, snapshots and deltas, and the whole grouped multi-world substrate
+live there, and its typed queries compile to the same slice loops the macro
+emits. Reach for it by default. The `ecs!` macro is the compile-time tier:
+it fixes a small component set up front and generates a named accessor for
+everything, which keeps it the fastest path to a tiny fixed-schema game and
+the executable specification the dynamic implementation is tested against,
+but new surface lands on the dynamic side first. Both run side by side when
+you want them to.
 
 ### Static: the `ecs!` macro
 
@@ -1118,6 +1122,12 @@ In a `DynEcs` group, tuples whose components live in different member
 worlds run through `ecs.query_join` with the same filter vocabulary; see
 [Grouped dynamic worlds](#grouped-dynamic-worlds).
 
+Hot systems freeze a configured query into a `PreparedQuery` with
+`.prepare()` and rerun it without per-call `TypeId` resolution
+(`prepared.query(&mut world).for_each(...)`); the read form
+(`PreparedQueryRef`) does the same for iterators. Prepared masks are plain
+copyable data.
+
 Heavy passes go parallel with `par_for_each`, table-granular like the
 keyed tier's `par_for_each_mut`, with the same filters and stamping:
 
@@ -1454,6 +1464,14 @@ ecs.query_join::<(&mut Position, &Burning)>()
     });
 ```
 
+Joins are first-class alongside the single-world forms:
+`query_join_ref` runs the read-only join as a real `Iterator` on `&ecs`,
+and `query_join(...).par_for_each(...)` walks driver tables in parallel
+with foreign worlds shared read-only across threads. `world.stats()` and
+`ecs.stats()` return a census of tables, budgets, logs, and caches for
+editor overlays, and `compact()` drops empty archetype tables at loading
+screens.
+
 Declare the members once with `dynamic_worlds!` (index constants plus the
 build function, each member asserted at its declared index; apps extending a
 built group use `add_world_at`):
@@ -1549,6 +1567,19 @@ Components and tags share each world's 64 mask bits, components from bit 0 up
 and tags from bit 63 down, and lazy registration spends bits silently, so
 check `world.remaining_bits()` in a startup assertion rather than discovering
 the ceiling when registration 65 panics.
+
+
+Deltas are the incremental form: `world.delta_cursor()` starts a stream
+(fencing the change window), `world.delta_since(&cursor)` captures
+everything that changed as a serialized change-set, and
+`replica.apply_delta(&delta)` replays it onto a replica seeded from a full
+snapshot of the same lineage. Structural entries replay in order, changed
+component values ride the same codecs snapshots use, and a trimmed or
+overflowed structural log fails the capture loudly so the caller reseeds
+from a full snapshot instead of silently diverging. `DynEcs` has the group
+forms (`delta_cursor` / `delta_since` / `apply_delta`), covering handle
+lifecycle, group tags, and every member world in one change-set. This is
+the substrate for network replication and efficient autosave.
 
 ### Named accessors over the keyed tier
 
