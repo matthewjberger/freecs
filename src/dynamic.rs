@@ -1547,14 +1547,13 @@ impl DynWorld {
         }
     }
 
-    /// Writes `value` into a contiguous row range of one column in one table,
-    /// resolving the column once instead of per row. The rows must already
-    /// exist and carry the component; the batch spawn paths use this to fill a
-    /// freshly grown table without a per-entity type lookup.
-    pub fn fill_column_range<T: Send + Sync + Default + Clone + 'static>(
+    /// Appends `count` clones of `value` to one column in one table, resolving
+    /// the column once. The batch spawn path grows every column this way, so a
+    /// bundle spawn writes each component once rather than a default followed
+    /// by an overwrite.
+    pub fn extend_column<T: Send + Sync + Default + Clone + 'static>(
         &mut self,
         table_index: usize,
-        start: usize,
         count: usize,
         value: &T,
     ) {
@@ -1563,8 +1562,9 @@ impl DynWorld {
         let position = column_position(table.mask, key.mask);
         let column = &mut table.columns[position];
         let vector = column_vec_mut::<T>(column.data.as_mut());
-        for slot in &mut vector[start..start + count] {
-            *slot = value.clone();
+        vector.reserve(count);
+        for _ in 0..count {
+            vector.push(value.clone());
         }
     }
 
@@ -2327,12 +2327,38 @@ impl DynWorld {
     /// [`spawn_batch`](Self::spawn_batch) instead.
     pub fn spawn_bundles<B: CloneBundle>(&mut self, bundle: B, count: usize) -> Vec<Entity> {
         let mask = B::component_mask(self);
-        let entities = self.spawn_entities(mask, count);
-        if let Some(&first) = entities.first() {
-            let (table_index, start) =
-                get_location(&self.entity_locations, first).expect("just spawned");
-            bundle.fill_range(self, table_index, start, count);
+        let table_index = self.get_or_create_table(mask);
+        let current_tick = self.current_tick;
+        let start_index = self.tables[table_index].entity_indices.len();
+
+        let mut entities = Vec::new();
+        let mut allocator = std::mem::take(&mut self.allocator);
+        allocator.allocate_batch(count, &mut entities);
+        self.allocator = allocator;
+
+        bundle.spawn_extend(self, table_index, count);
+
+        {
+            let table = &mut self.tables[table_index];
+            for column in &mut table.columns {
+                let filled_length = column.changed.len() + count;
+                column.changed.resize(filled_length, current_tick);
+                column.added.resize(filled_length, current_tick);
+                column.peak_changed = current_tick;
+                column.peak_added = current_tick;
+            }
+            table.entity_indices.extend_from_slice(&entities);
         }
+
+        for (offset, &entity) in entities.iter().enumerate() {
+            insert_location(
+                &mut self.entity_locations,
+                entity,
+                (table_index, start_index + offset),
+            );
+            self.record_structural(entity, StructuralChangeKind::Spawned, mask);
+        }
+
         entities
     }
 
@@ -6342,7 +6368,7 @@ pub trait Bundle: sealed::SealedBundle {
 /// spawned rows can be filled column by column from one bundle value. Sealed
 /// through [`Bundle`]; every clonable tuple bundle implements it.
 pub trait CloneBundle: Bundle + Clone {
-    fn fill_range(&self, world: &mut DynWorld, table_index: usize, start: usize, count: usize);
+    fn spawn_extend(&self, world: &mut DynWorld, table_index: usize, count: usize);
 }
 
 macro_rules! impl_bundle {
@@ -6379,9 +6405,9 @@ macro_rules! impl_bundle {
 
         impl<$($element: Send + Sync + Default + Clone + 'static),+> CloneBundle for ($($element,)+) {
             #[allow(non_snake_case)]
-            fn fill_range(&self, world: &mut DynWorld, table_index: usize, start: usize, count: usize) {
+            fn spawn_extend(&self, world: &mut DynWorld, table_index: usize, count: usize) {
                 let ($($element,)+) = self;
-                $(world.fill_column_range(table_index, start, count, $element);)+
+                $(world.extend_column(table_index, count, $element);)+
             }
         }
     };
