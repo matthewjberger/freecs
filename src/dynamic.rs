@@ -144,6 +144,15 @@ fn column_move_row<T: Send + Sync + Default + 'static>(
     column_vec_mut::<T>(destination).push(value);
 }
 
+fn column_swap_remove_into<T: Send + Sync + Default + 'static>(
+    source: &mut (dyn Any + Send + Sync),
+    index: usize,
+    destination: &mut (dyn Any + Send + Sync),
+) {
+    let value = column_vec_mut::<T>(source).swap_remove(index);
+    column_vec_mut::<T>(destination).push(value);
+}
+
 /// The per-type operations a column needs, as a plain record of function
 /// pointers captured at registration. This is the vtable, visible as data.
 #[derive(Clone, Copy)]
@@ -155,6 +164,7 @@ pub struct ComponentInfo {
     pub push_default: fn(&mut (dyn Any + Send + Sync), usize),
     pub swap_remove: fn(&mut (dyn Any + Send + Sync), usize),
     pub move_row: fn(&mut (dyn Any + Send + Sync), usize, &mut (dyn Any + Send + Sync)),
+    pub swap_remove_into: fn(&mut (dyn Any + Send + Sync), usize, &mut (dyn Any + Send + Sync)),
     pub column_len: fn(&(dyn Any + Send + Sync)) -> usize,
 }
 
@@ -251,6 +261,7 @@ impl ComponentRegistry {
             push_default: column_push_default::<T>,
             swap_remove: column_swap_remove::<T>,
             move_row: column_move_row::<T>,
+            swap_remove_into: column_swap_remove_into::<T>,
             column_len: column_len_of::<T>,
         });
         self.components_by_type
@@ -1240,34 +1251,12 @@ impl DynWorld {
         to_table: usize,
     ) {
         let tick = self.current_tick;
+        let swapped_entity;
         {
             let [source, destination] = self
                 .tables
                 .get_disjoint_mut([from_table, to_table])
                 .expect("migration source and destination must differ");
-
-            let shared = source.mask & destination.mask;
-            let mut bits = shared;
-            while bits != 0 {
-                let component_mask = bits & bits.wrapping_neg();
-                bits &= bits - 1;
-
-                let source_position = column_position(source.mask, component_mask);
-                let destination_position = column_position(destination.mask, component_mask);
-                let info = &self.registry.components
-                    [source.columns[source_position].component_index as usize];
-                (info.move_row)(
-                    source.columns[source_position].data.as_mut(),
-                    from_index,
-                    destination.columns[destination_position].data.as_mut(),
-                );
-                let carried_added = source.columns[source_position].added[from_index];
-                let destination_column = &mut destination.columns[destination_position];
-                destination_column.changed.push(tick);
-                destination_column.peak_changed = tick;
-                destination_column.added.push(carried_added);
-                destination_column.peak_added = tick;
-            }
 
             let mut gained = destination.mask & !source.mask;
             while gained != 0 {
@@ -1284,12 +1273,71 @@ impl DynWorld {
                 destination_column.peak_added = tick;
             }
 
+            let shared = source.mask & destination.mask;
+            let mut bits = shared;
+            while bits != 0 {
+                let component_mask = bits & bits.wrapping_neg();
+                bits &= bits - 1;
+
+                let source_position = column_position(source.mask, component_mask);
+                let destination_position = column_position(destination.mask, component_mask);
+                let carried_added = source.columns[source_position].added[from_index];
+                let info = &self.registry.components
+                    [source.columns[source_position].component_index as usize];
+                (info.swap_remove_into)(
+                    source.columns[source_position].data.as_mut(),
+                    from_index,
+                    destination.columns[destination_position].data.as_mut(),
+                );
+                source.columns[source_position]
+                    .changed
+                    .swap_remove(from_index);
+                source.columns[source_position]
+                    .added
+                    .swap_remove(from_index);
+                let destination_column = &mut destination.columns[destination_position];
+                destination_column.changed.push(tick);
+                destination_column.peak_changed = tick;
+                destination_column.added.push(carried_added);
+                destination_column.peak_added = tick;
+            }
+
+            let mut removed = source.mask & !destination.mask;
+            while removed != 0 {
+                let component_mask = removed & removed.wrapping_neg();
+                removed &= removed - 1;
+
+                let source_position = column_position(source.mask, component_mask);
+                let info = &self.registry.components
+                    [source.columns[source_position].component_index as usize];
+                (info.swap_remove)(source.columns[source_position].data.as_mut(), from_index);
+                source.columns[source_position]
+                    .changed
+                    .swap_remove(from_index);
+                source.columns[source_position]
+                    .added
+                    .swap_remove(from_index);
+            }
+
             destination.entity_indices.push(entity);
+
+            let last_index = source.entity_indices.len() - 1;
+            swapped_entity = if from_index < last_index {
+                Some(source.entity_indices[last_index])
+            } else {
+                None
+            };
+            source.entity_indices.swap_remove(from_index);
         }
 
         let new_index = self.tables[to_table].entity_indices.len() - 1;
         insert_location(&mut self.entity_locations, entity, (to_table, new_index));
-        self.remove_row(from_table, from_index);
+        if let Some(swapped) = swapped_entity
+            && let Some(location) = self.entity_locations.get_mut(swapped.id)
+            && location.allocated
+        {
+            location.array_index = from_index as u32;
+        }
     }
 
     pub fn add_components(&mut self, entity: Entity, mask: u64) -> bool {
@@ -8048,6 +8096,36 @@ mod tests {
             .changed::<Position>()
             .for_each(|_entity, _position| changed += 1);
         assert_eq!(changed, 200);
+    }
+
+    #[test]
+    fn test_migration_preserves_every_row_and_location() {
+        let mut world = DynWorld::new();
+        let entities: Vec<_> = (0..400)
+            .map(|index| {
+                world.spawn((Position {
+                    x: index as f32,
+                    y: 0.0,
+                },))
+            })
+            .collect();
+
+        for &entity in &entities {
+            world.set(entity, Velocity { x: 1.0, y: 0.0 });
+        }
+        for (index, &entity) in entities.iter().enumerate() {
+            assert_eq!(world.get::<Position>(entity).unwrap().x, index as f32);
+            assert_eq!(world.get::<Velocity>(entity).unwrap().x, 1.0);
+        }
+
+        for &entity in &entities {
+            world.remove::<Velocity>(entity);
+        }
+        for (index, &entity) in entities.iter().enumerate() {
+            assert_eq!(world.get::<Position>(entity).unwrap().x, index as f32);
+            assert!(world.get::<Velocity>(entity).is_none());
+        }
+        assert_eq!(world.entity_count(), 400);
     }
 
     #[test]
