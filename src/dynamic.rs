@@ -3738,6 +3738,8 @@ pub trait QueryElement: sealed::SealedElement {
         mid: usize,
     ) -> (Self::ParFetch<'table>, Self::ParFetch<'table>);
     fn par_item<'fetch>(fetch: &'fetch mut Self::ParFetch<'_>, index: usize) -> Self::Item<'fetch>;
+    fn mark_changed_all(fetch: &mut Self::Fetch<'_>);
+    fn item_marked<'fetch>(fetch: &'fetch mut Self::Fetch<'_>, index: usize) -> Self::Item<'fetch>;
 }
 
 impl<T: Send + Sync + Default + 'static> sealed::SealedElement for &T {}
@@ -3804,6 +3806,12 @@ impl<T: Send + Sync + Default + 'static> QueryElement for &T {
     }
 
     fn par_item<'fetch>(fetch: &'fetch mut Self::ParFetch<'_>, index: usize) -> Self::Item<'fetch> {
+        &fetch.0[index]
+    }
+
+    fn mark_changed_all(_fetch: &mut Self::Fetch<'_>) {}
+
+    fn item_marked<'fetch>(fetch: &'fetch mut Self::Fetch<'_>, index: usize) -> Self::Item<'fetch> {
         &fetch.0[index]
     }
 }
@@ -3895,6 +3903,14 @@ impl<T: Send + Sync + Default + 'static> QueryElement for &mut T {
         fetch.1[index] = fetch.2;
         &mut fetch.0[index]
     }
+
+    fn mark_changed_all(fetch: &mut Self::Fetch<'_>) {
+        fetch.1.fill(fetch.2);
+    }
+
+    fn item_marked<'fetch>(fetch: &'fetch mut Self::Fetch<'_>, index: usize) -> Self::Item<'fetch> {
+        &mut fetch.0[index]
+    }
 }
 
 impl<T: Send + Sync + Default + 'static> sealed::SealedElement for Option<&T> {}
@@ -3959,6 +3975,12 @@ impl<T: Send + Sync + Default + 'static> QueryElement for Option<&T> {
     }
 
     fn par_item<'fetch>(fetch: &'fetch mut Self::ParFetch<'_>, index: usize) -> Self::Item<'fetch> {
+        fetch.as_ref().map(|inner| &inner.0[index])
+    }
+
+    fn mark_changed_all(_fetch: &mut Self::Fetch<'_>) {}
+
+    fn item_marked<'fetch>(fetch: &'fetch mut Self::Fetch<'_>, index: usize) -> Self::Item<'fetch> {
         fetch.as_ref().map(|inner| &inner.0[index])
     }
 }
@@ -4039,6 +4061,16 @@ impl<T: Send + Sync + Default + 'static> QueryElement for Option<&mut T> {
             inner.1[index] = inner.2;
             &mut inner.0[index]
         })
+    }
+
+    fn mark_changed_all(fetch: &mut Self::Fetch<'_>) {
+        if let Some(inner) = fetch {
+            inner.1.fill(inner.2);
+        }
+    }
+
+    fn item_marked<'fetch>(fetch: &'fetch mut Self::Fetch<'_>, index: usize) -> Self::Item<'fetch> {
+        fetch.as_mut().map(|inner| &mut inner.0[index])
     }
 }
 
@@ -4210,6 +4242,8 @@ pub trait QueryTuple: sealed::SealedQueryTuple {
         mid: usize,
     ) -> (Self::ParFetch<'table>, Self::ParFetch<'table>);
     fn par_item<'fetch>(fetch: &'fetch mut Self::ParFetch<'_>, index: usize) -> Self::Item<'fetch>;
+    fn mark_changed_all(fetch: &mut Self::Fetch<'_>);
+    fn item_marked<'fetch>(fetch: &'fetch mut Self::Fetch<'_>, index: usize) -> Self::Item<'fetch>;
 }
 
 /// The read-only half of [`QueryTuple`], tuples of `&T` and `Option<&T>`
@@ -4742,6 +4776,14 @@ macro_rules! impl_query_tuple {
             fn par_item<'fetch>(fetch: &'fetch mut Self::ParFetch<'_>, index: usize) -> Self::Item<'fetch> {
                 ($($element::par_item(&mut fetch.$position, index),)+)
             }
+
+            fn mark_changed_all(fetch: &mut Self::Fetch<'_>) {
+                $($element::mark_changed_all(&mut fetch.$position);)+
+            }
+
+            fn item_marked<'fetch>(fetch: &'fetch mut Self::Fetch<'_>, index: usize) -> Self::Item<'fetch> {
+                ($($element::item_marked(&mut fetch.$position, index),)+)
+            }
         }
     };
 }
@@ -5117,6 +5159,17 @@ macro_rules! impl_bare_element_query {
                     index: usize,
                 ) -> Self::Item<'fetch> {
                     <$element as QueryElement>::par_item(fetch, index)
+                }
+
+                fn mark_changed_all(fetch: &mut Self::Fetch<'_>) {
+                    <$element as QueryElement>::mark_changed_all(fetch);
+                }
+
+                fn item_marked<'fetch>(
+                    fetch: &'fetch mut Self::Fetch<'_>,
+                    index: usize,
+                ) -> Self::Item<'fetch> {
+                    <$element as QueryElement>::item_marked(fetch, index)
                 }
             }
         )+
@@ -5660,8 +5713,9 @@ impl<'world, Q: QueryTuple> DynQuery<'world, Q> {
                     Q::stamp_peaks(&mut fetch);
                 }
             } else {
+                Q::mark_changed_all(&mut fetch);
                 for (index, &entity) in entity_indices.iter().enumerate() {
-                    f(entity, Q::item(&mut fetch, index));
+                    f(entity, Q::item_marked(&mut fetch, index));
                 }
                 if !entity_indices.is_empty() {
                     Q::stamp_peaks(&mut fetch);
@@ -7903,6 +7957,27 @@ mod tests {
                 positions += 1;
             });
         assert_eq!(positions, 500);
+    }
+
+    #[test]
+    fn test_unfiltered_mutable_iteration_marks_changes() {
+        let mut world = DynWorld::new();
+        world.spawn_bundles(
+            (Position { x: 1.0, y: 0.0 }, Velocity { x: 1.0, y: 0.0 }),
+            200,
+        );
+        world.step();
+
+        world
+            .query::<(&mut Position, &Velocity)>()
+            .for_each(|_entity, (position, velocity)| position.x += velocity.x);
+
+        let mut changed = 0;
+        world
+            .query::<&Position>()
+            .changed::<Position>()
+            .for_each(|_entity, _position| changed += 1);
+        assert_eq!(changed, 200);
     }
 
     #[cfg(not(target_family = "wasm"))]
