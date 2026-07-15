@@ -27,8 +27,8 @@ The `ecs!` macro generates the entire ECS at compile time using only plain data 
 
 - [How it works (build it from scratch)](#how-it-works-build-it-from-scratch)
 - [Quick Start](#quick-start)
-  - [Static: the `ecs!` macro](#static-the-ecs-macro)
   - [Dynamic: `DynWorld`](#dynamic-dynworld)
+  - [Static: the `ecs!` macro](#static-the-ecs-macro)
 - [Generated API](#generated-api)
   - [Closure-Based Mutation](#closure-based-mutation)
 - [Systems](#systems)
@@ -92,17 +92,98 @@ Add this to your `Cargo.toml`:
 freecs = "3"
 ```
 
-freecs has two entry points over the same archetype storage, and the
-dynamic world is the primary one. Typed tuple queries with change and added
-filters, cross-world joins, prepared queries, hierarchies, exactly-once
-events, snapshots and deltas, and the whole grouped multi-world substrate
-live there, and its typed queries compile to the same slice loops the macro
-emits. Reach for it by default. The `ecs!` macro is the compile-time tier.
-It fixes a small component set up front and generates a named accessor for
-everything, which keeps it the fastest path to a tiny fixed-schema game and
-the executable specification the dynamic implementation is tested against,
-but new surface lands on the dynamic side first. Both run side by side when
-you want them to.
+freecs has two entry points over the same archetype storage. Reach for the
+dynamic world by default. Typed tuple queries with change and added filters,
+Bevy-style `Res`/`ResMut`/`Query` system functions, cross-world joins,
+prepared queries, hierarchies, exactly-once events, snapshots and deltas, and
+the whole grouped multi-world substrate live there, its typed queries compile
+to the same slice loops the macro emits, and new surface lands on the dynamic
+side first. The `ecs!` macro is the compile-time tier. It fixes a small
+component set up front and generates a named accessor for everything over
+full static dispatch and no runtime registration, which keeps it the fastest
+path to a tiny fixed-schema game, the most explicit API, and the executable
+specification the dynamic implementation is tested against. Both run side by
+side when you want them to.
+
+### Dynamic: `DynWorld`
+
+Enable the feature:
+
+```toml
+[dependencies]
+freecs = { version = "3", features = ["dynamic"] }
+```
+
+Runtime registration, no macro and no masks. Types register lazily on first
+use, tuples spawn as bundles, and systems are plain functions whose arguments
+are `Res`, `ResMut`, and `Query`:
+
+```rust
+use freecs::Schedule;
+use freecs::dynamic::DynWorld;
+use freecs::system_param::{Query, Res, ResMut, ScheduleExt};
+
+#[derive(Default, Clone, Debug)]
+struct Position { x: f32, y: f32 }
+
+#[derive(Default, Clone, Debug)]
+struct Velocity { x: f32, y: f32 }
+
+#[derive(Default, Clone, Debug)]
+struct Health { value: f32 }
+
+struct Player;
+
+struct DeltaTime(f32);
+struct Score(u32);
+
+// Typed queries take mutability from the tuple. Option elements match
+// entities with or without the component.
+fn physics(dt: Res<DeltaTime>, mut score: ResMut<Score>, query: Query<(&mut Position, &Velocity, Option<&mut Health>)>) {
+    query.for_each(|_entity, (position, velocity, health)| {
+        position.x += velocity.x * dt.0;
+        position.y += velocity.y * dt.0;
+        if let Some(health) = health {
+            health.value *= 0.98;
+        }
+    });
+    score.0 += 1;
+}
+
+fn main() {
+    let mut world = DynWorld::new();
+    world.insert_resource(DeltaTime(0.016));
+    world.insert_resource(Score(0));
+
+    let player = world.spawn((
+        Position { x: 0.0, y: 0.0 },
+        Velocity { x: 1.0, y: 2.0 },
+        Health { value: 100.0 },
+    ));
+    world.add_tag_type::<Player>(player);
+
+    let mut schedule = Schedule::new();
+    schedule.add_system("physics", physics);
+    schedule.run(&mut world);
+
+    // Read-only queries on &world are real iterators.
+    let player_positions: Vec<_> = world
+        .query_ref::<(&Position,)>()
+        .with_tag_type::<Player>()
+        .iter()
+        .map(|(entity, (position,))| (entity, position.x, position.y))
+        .collect();
+    println!("{player_positions:?}");
+
+    world.step();
+}
+```
+
+Everything else in this README's static sections has a dynamic counterpart.
+The [Dynamic Worlds](#dynamic-worlds) section covers the full API, the three
+access tiers, and measured performance against the macro path. The repository
+ships the same complete tower defense game written both ways
+(`examples/tower-defense.rs` and `examples/tower-defense-dynamic.rs`).
 
 ### Static: the `ecs!` macro
 
@@ -273,81 +354,6 @@ mod systems {
     }
 }
 ```
-
-### Dynamic: `DynWorld`
-
-Enable the feature:
-
-```toml
-[dependencies]
-freecs = { version = "3", features = ["dynamic"] }
-```
-
-The same game shape with runtime registration, no macro and no masks:
-
-```rust
-use freecs::dynamic::DynWorld;
-
-#[derive(Default, Clone, Debug)]
-struct Position { x: f32, y: f32 }
-
-#[derive(Default, Clone, Debug)]
-struct Velocity { x: f32, y: f32 }
-
-#[derive(Default, Clone, Debug)]
-struct Health { value: f32 }
-
-struct Player;
-
-struct DeltaTime(f32);
-struct Score(u32);
-
-fn main() {
-    let mut world = DynWorld::new();
-    world.insert_resource(DeltaTime(0.016));
-    world.insert_resource(Score(0));
-
-    // Types register lazily on first use, and tuples spawn as bundles.
-    let player = world.spawn((
-        Position { x: 0.0, y: 0.0 },
-        Velocity { x: 1.0, y: 2.0 },
-        Health { value: 100.0 },
-    ));
-    world.add_tag_type::<Player>(player);
-
-    // Typed queries take mutability from the tuple. Option elements match
-    // entities with or without the component.
-    world.resources_scope(|world, (delta_time, score): &mut (DeltaTime, Score)| {
-        world
-            .query::<(&mut Position, &Velocity, Option<&mut Health>)>()
-            .for_each(|_entity, (position, velocity, health)| {
-                position.x += velocity.x * delta_time.0;
-                position.y += velocity.y * delta_time.0;
-                if let Some(health) = health {
-                    health.value *= 0.98;
-                }
-            });
-        score.0 += 1;
-    });
-
-    // Read-only queries on &world are real iterators.
-    let player_positions: Vec<_> = world
-        .query_ref::<(&Position,)>()
-        .with_tag_type::<Player>()
-        .iter()
-        .map(|(entity, (position,))| (entity, position.x, position.y))
-        .collect();
-    println!("{player_positions:?}");
-
-    world.step();
-}
-```
-
-Everything else in this README's static sections has a dynamic counterpart.
-The [Dynamic Worlds](#dynamic-worlds) section covers the full API, the three
-access tiers, and measured performance against the macro path. The repository
-ships the same complete tower defense game written both ways
-(`examples/tower-defense.rs` and `examples/tower-defense-dynamic.rs`).
 
 ## Generated API
 
@@ -1221,25 +1227,31 @@ schedule.run(&mut world);
 ```
 
 Resource parameters resolve out of the world's `ResourceMap` through the same
-take/put `resources_scope` uses, so they never alias the query's table
-borrow. Type-level filters (`With`, `Without`, `Changed`, `Added`, and tuples
-of them) narrow a query as `Query<(&mut Position,), With<Player>>`. The one
-world-borrowing parameter, a `Query` or a `ParamSet`, comes last. Two
-simultaneous queries go through `ParamSet`, which lends one member at a time
-through `p0()` and `p1()`.
+take/put `resources_scope` uses, so they never alias a query's table borrow.
+Resource parameters come first, query parameters after. Type-level filters
+(`With`, `Without`, `Changed`, `Added`, `WithTag`, `WithoutTag`, and tuples of
+them) narrow a query as `Query<(&mut Position,), With<Player>>`.
+
+A single query borrows the world directly. Several queries in one system share
+the world through a cell and each take it only for one `for_each`, so two
+queries run in sequence rather than nested, at a cost of one borrow check per
+call rather than anything per entity:
 
 ```rust
-use freecs::system_param::{ParamSet, Query, ScheduleExt};
+use freecs::system_param::{Query, ScheduleExt};
 
-fn resolve(mut set: ParamSet<(Query<&mut Position>, Query<&Velocity>)>) {
+fn resolve(positions: Query<&mut Position>, velocities: Query<&Velocity>) {
     let mut sample = (0.0, 0.0);
-    set.p1().for_each(|_entity, velocity| sample = (velocity.x, velocity.y));
-    set.p0().for_each(|_entity, position| {
+    velocities.for_each(|_entity, velocity| sample = (velocity.x, velocity.y));
+    positions.for_each(|_entity, position| {
         position.x += sample.0;
         position.y += sample.1;
     });
 }
 ```
+
+`ParamSet<(Query<…>, Query<…>)>` is the alternative when you would rather name
+a grouped set and reach its members through `p0()` and `p1()`.
 
 #### Events
 

@@ -1,10 +1,10 @@
 //! Bevy-style system parameters over [`DynWorld`]: functions whose
 //! arguments are [`Res`], [`ResMut`], and [`Query`] resolve into runnable
-//! systems the existing [`Schedule`](crate::Schedule) accepts, with no
+//! systems the existing [`Schedule`] accepts, with no
 //! `unsafe` and no new executor.
 //!
 //! A system is any function whose parameters are system parameters. Register
-//! it on a [`Schedule`](crate::Schedule) over a [`DynWorld`] with
+//! it on a [`Schedule`] over a [`DynWorld`] with
 //! [`ScheduleExt::add_system`]:
 //!
 //! ```rust
@@ -43,14 +43,56 @@
 //! Resource parameters ([`Res`], [`ResMut`]) resolve out of the world's
 //! [`ResourceMap`](crate::dynamic::ResourceMap) through the same take/put
 //! scope [`resources_scope`](crate::dynamic::ResourceHostExt::resources_scope)
-//! uses, so they never alias the query's table borrow. The one
-//! world-borrowing parameter, a [`Query`] or [`ParamSet`], comes last and
-//! receives the world after the resources are lifted out. Two simultaneous
-//! queries go through [`ParamSet`], which lends one at a time.
+//! uses, so they never alias a query's table borrow. Resource parameters
+//! come first, query parameters after.
+//!
+//! A single query parameter borrows the world directly and pays nothing
+//! beyond the query itself. Several query parameters in one system, such as
+//! `fn(a: Query<&mut Position>, b: Query<&Velocity>)`, share the world
+//! through a cell and each take it only for the span of one
+//! [`for_each`](Query::for_each), so the cost is one borrow check per call
+//! rather than anything per entity. Because `for_each` consumes the query,
+//! two of them run in sequence, never nested. Type-level filters ([`With`],
+//! [`Without`], [`Changed`], [`Added`], [`WithTag`], [`WithoutTag`], and
+//! tuples of them) narrow a query as `Query<(&mut Position,), With<Player>>`.
+//! [`ParamSet`] groups queries behind `p0()`/`p1()` accessors when you would
+//! rather name a set than list the queries.
+//!
+//! ```rust
+//! use freecs::dynamic::DynWorld;
+//! use freecs::system_param::{Query, ScheduleExt};
+//!
+//! #[derive(Default, Clone, Debug)]
+//! struct Position { x: f32, y: f32 }
+//! #[derive(Default, Clone, Debug)]
+//! struct Velocity { x: f32, y: f32 }
+//!
+//! fn drift(positions: Query<&mut Position>, velocities: Query<&Velocity>) {
+//!     let mut total = (0.0, 0.0);
+//!     velocities.for_each(|_entity, velocity| {
+//!         total.0 += velocity.x;
+//!         total.1 += velocity.y;
+//!     });
+//!     positions.for_each(|_entity, position| {
+//!         position.x += total.0;
+//!         position.y += total.1;
+//!     });
+//! }
+//!
+//! let mut world = DynWorld::new();
+//! world.spawn((Position { x: 0.0, y: 0.0 }, Velocity { x: 1.0, y: 2.0 }));
+//!
+//! let mut schedule = freecs::Schedule::new();
+//! schedule.add_system("drift", drift);
+//! schedule.run(&mut world);
+//!
+//! assert_eq!(world.get::<Position>(world.query_ref::<&Position>().single().unwrap().0).unwrap().x, 1.0);
+//! ```
 
 use crate::Entity;
 use crate::Schedule;
 use crate::dynamic::{DynQuery, DynWorld, QueryTuple};
+use std::cell::RefCell;
 use std::marker::PhantomData;
 
 /// A shared reference to a resource of type `T`, resolved for a system
@@ -165,6 +207,24 @@ impl<T: Send + Sync + Default + 'static> QueryFilter for Added<T> {
     }
 }
 
+/// Restricts a query to entities carrying the marker tag type `T`.
+pub struct WithTag<T>(PhantomData<fn() -> T>);
+
+impl<T: 'static> QueryFilter for WithTag<T> {
+    fn apply<Q: QueryTuple>(query: DynQuery<'_, Q>) -> DynQuery<'_, Q> {
+        query.with_tag_type::<T>()
+    }
+}
+
+/// Restricts a query to entities not carrying the marker tag type `T`.
+pub struct WithoutTag<T>(PhantomData<fn() -> T>);
+
+impl<T: 'static> QueryFilter for WithoutTag<T> {
+    fn apply<Q: QueryTuple>(query: DynQuery<'_, Q>) -> DynQuery<'_, Q> {
+        query.without_tag_type::<T>()
+    }
+}
+
 macro_rules! impl_query_filter_tuple {
     ($($filter:ident),+) => {
         impl<$($filter: QueryFilter),+> QueryFilter for ($($filter,)+) {
@@ -181,18 +241,31 @@ impl_query_filter_tuple!(A, B);
 impl_query_filter_tuple!(A, B, C);
 impl_query_filter_tuple!(A, B, C, D);
 
+enum QueryState<'world, Q: QueryTuple> {
+    Eager(DynQuery<'world, Q>),
+    Lazy(&'world RefCell<&'world mut DynWorld>),
+}
+
 /// A query system parameter over tuple `Q` with type-level filter `F`. The
-/// filter defaults to none. Exposes [`for_each`](Self::for_each) and the
-/// filter builders of the underlying [`DynQuery`].
+/// filter defaults to none. A single query parameter borrows the world
+/// directly; several query parameters in one system share the world through
+/// a cell and take it one [`for_each`](Self::for_each) at a time.
 pub struct Query<'world, Q: QueryTuple, F: QueryFilter = ()> {
-    query: DynQuery<'world, Q>,
+    state: QueryState<'world, Q>,
     filter: PhantomData<fn() -> F>,
 }
 
 impl<'world, Q: QueryTuple, F: QueryFilter> Query<'world, Q, F> {
     /// Visits every matching entity with its fetched components.
     pub fn for_each(self, f: impl for<'item> FnMut(Entity, Q::Item<'item>)) {
-        self.query.for_each(f);
+        match self.state {
+            QueryState::Eager(query) => F::apply(query).for_each(f),
+            QueryState::Lazy(cell) => {
+                let mut guard = cell.borrow_mut();
+                let world: &mut DynWorld = &mut guard;
+                F::apply(world.query::<Q>()).for_each(f);
+            }
+        }
     }
 
     /// The parallel form of [`for_each`](Self::for_each), table-granular.
@@ -201,37 +274,20 @@ impl<'world, Q: QueryTuple, F: QueryFilter> Query<'world, Q, F> {
     where
         Fun: for<'item> Fn(Entity, Q::Item<'item>) + Send + Sync,
     {
-        self.query.par_for_each(f);
-    }
-
-    /// Narrows the match to entities also carrying `T`, at run time.
-    pub fn with<T: Send + Sync + Default + 'static>(mut self) -> Self {
-        self.query = self.query.with::<T>();
-        self
-    }
-
-    /// Narrows the match to entities not carrying `T`, at run time.
-    pub fn without<T: Send + Sync + Default + 'static>(mut self) -> Self {
-        self.query = self.query.without::<T>();
-        self
-    }
-
-    /// Narrows the match to the marker tag type `T`, at run time.
-    pub fn with_tag_type<T: 'static>(mut self) -> Self {
-        self.query = self.query.with_tag_type::<T>();
-        self
-    }
-
-    /// Excludes the marker tag type `T`, at run time.
-    pub fn without_tag_type<T: 'static>(mut self) -> Self {
-        self.query = self.query.without_tag_type::<T>();
-        self
+        match self.state {
+            QueryState::Eager(query) => F::apply(query).par_for_each(f),
+            QueryState::Lazy(cell) => {
+                let mut guard = cell.borrow_mut();
+                let world: &mut DynWorld = &mut guard;
+                F::apply(world.query::<Q>()).par_for_each(f);
+            }
+        }
     }
 }
 
-/// A world-borrowing system parameter, resolved last from the world after
-/// the resource parameters are lifted out. Implemented for [`Query`] and
-/// [`ParamSet`].
+/// A world-borrowing system parameter in the single-query slot, resolved
+/// after the resource parameters are lifted out. Implemented for [`Query`]
+/// and [`ParamSet`].
 pub trait WorldParam {
     /// The parameter value handed to the system for a given borrow.
     type Item<'world>;
@@ -243,7 +299,28 @@ impl<'a, Q: QueryTuple, F: QueryFilter> WorldParam for Query<'a, Q, F> {
     type Item<'world> = Query<'world, Q, F>;
     fn build(world: &mut DynWorld) -> Query<'_, Q, F> {
         Query {
-            query: F::apply(world.query::<Q>()),
+            state: QueryState::Eager(world.query::<Q>()),
+            filter: PhantomData,
+        }
+    }
+}
+
+/// A query parameter that shares the world with sibling query parameters
+/// through a cell, so a system can take several [`Query`] arguments. Each
+/// query borrows the world only for the span of one
+/// [`for_each`](Query::for_each), so two queries never iterate at once.
+pub trait MultiQueryParam {
+    /// The parameter value handed to the system for a given borrow.
+    type Item<'world>;
+    /// Resolves the parameter against the shared world cell.
+    fn build_lazy<'world>(cell: &'world RefCell<&'world mut DynWorld>) -> Self::Item<'world>;
+}
+
+impl<'a, Q: QueryTuple, F: QueryFilter> MultiQueryParam for Query<'a, Q, F> {
+    type Item<'world> = Query<'world, Q, F>;
+    fn build_lazy<'world>(cell: &'world RefCell<&'world mut DynWorld>) -> Query<'world, Q, F> {
+        Query {
+            state: QueryState::Lazy(cell),
             filter: PhantomData,
         }
     }
@@ -307,7 +384,7 @@ impl<'world, P0: WorldParam, P1: WorldParam, P2: WorldParam> ParamSet<'world, (P
 }
 
 /// Converts a system-parameter function into a runner the
-/// [`Schedule`](crate::Schedule) accepts. `Marker` is inferred from the
+/// [`Schedule`] accepts. `Marker` is inferred from the
 /// function's parameter types, so a plain `fn(Res<A>, ResMut<B>, Query<C>)`
 /// registers directly. Register through [`ScheduleExt::add_system`].
 pub trait IntoSystem<Marker>: Sized {
@@ -316,7 +393,7 @@ pub trait IntoSystem<Marker>: Sized {
     fn into_runner(self) -> impl FnMut(&mut DynWorld) + Send + 'static;
 }
 
-/// Registers system-parameter functions on a [`Schedule`](crate::Schedule)
+/// Registers system-parameter functions on a [`Schedule`]
 /// over a [`DynWorld`], resolving [`Res`]/[`ResMut`]/[`Query`] parameters
 /// per run.
 pub trait ScheduleExt {
@@ -425,6 +502,70 @@ impl_query_system!(R0 r0, R1 r1, R2 r2, R3 r3);
 impl_query_system!(R0 r0, R1 r1, R2 r2, R3 r3, R4 r4);
 impl_query_system!(R0 r0, R1 r1, R2 r2, R3 r3, R4 r4, R5 r5);
 impl_query_system!(R0 r0, R1 r1, R2 r2, R3 r3, R4 r4, R5 r5, R6 r6);
+
+/// The marker for a system with resource parameters and two or more
+/// world-borrowing query parameters resolved through a shared world cell.
+pub struct MultiQuerySystemMarker<R, Q>(PhantomData<fn() -> (R, Q)>);
+
+macro_rules! impl_multi_query_bare {
+    ($($query:ident $qbind:ident),+) => {
+        impl<Func, $($query,)+> IntoSystem<MultiQuerySystemMarker<(), ($($query,)+)>> for Func
+        where
+            $($query: MultiQueryParam,)+
+            Func: FnMut($($query,)+)
+                + for<'world> FnMut($($query::Item<'world>,)+)
+                + Send
+                + 'static,
+        {
+            #[allow(non_snake_case)]
+            fn into_runner(mut self) -> impl FnMut(&mut DynWorld) + Send + 'static {
+                move |world: &mut DynWorld| {
+                    let cell = RefCell::new(world);
+                    $(let $qbind = $query::build_lazy(&cell);)+
+                    self($($qbind,)+);
+                }
+            }
+        }
+    };
+}
+
+macro_rules! impl_multi_query_resourced {
+    (($($resource:ident $rbind:ident),+), ($($query:ident $qbind:ident),+)) => {
+        impl<Func, $($resource,)+ $($query,)+>
+            IntoSystem<MultiQuerySystemMarker<($($resource,)+), ($($query,)+)>> for Func
+        where
+            $($resource: ResourceParam,)+
+            $($query: MultiQueryParam,)+
+            Func: FnMut($($resource,)+ $($query,)+)
+                + for<'world> FnMut($($resource::Item<'world>,)+ $($query::Item<'world>,)+)
+                + Send
+                + 'static,
+        {
+            #[allow(non_snake_case)]
+            fn into_runner(mut self) -> impl FnMut(&mut DynWorld) + Send + 'static {
+                move |world: &mut DynWorld| {
+                    world.resources_scope::<($($resource::Resource,)+), _>(|world, bundle| {
+                        let ($($rbind,)+) = bundle;
+                        let cell = RefCell::new(world);
+                        $(let $qbind = $query::build_lazy(&cell);)+
+                        self($($resource::build($rbind),)+ $($qbind,)+);
+                    });
+                }
+            }
+        }
+    };
+}
+
+impl_multi_query_bare!(Q0 q0, Q1 q1);
+impl_multi_query_bare!(Q0 q0, Q1 q1, Q2 q2);
+impl_multi_query_bare!(Q0 q0, Q1 q1, Q2 q2, Q3 q3);
+
+impl_multi_query_resourced!((R0 r0), (Q0 q0, Q1 q1));
+impl_multi_query_resourced!((R0 r0), (Q0 q0, Q1 q1, Q2 q2));
+impl_multi_query_resourced!((R0 r0, R1 r1), (Q0 q0, Q1 q1));
+impl_multi_query_resourced!((R0 r0, R1 r1), (Q0 q0, Q1 q1, Q2 q2));
+impl_multi_query_resourced!((R0 r0, R1 r1, R2 r2), (Q0 q0, Q1 q1));
+impl_multi_query_resourced!((R0 r0, R1 r1, R2 r2), (Q0 q0, Q1 q1, Q2 q2));
 
 #[cfg(test)]
 mod tests {
@@ -546,11 +687,12 @@ mod tests {
                 .all(|(_entity, position)| position.x == 0.0)
         );
 
-        run(&mut world, |query: Query<&mut Position>| {
-            query
-                .without_tag_type::<Frozen>()
-                .for_each(|_entity, position| position.x = 2.0);
-        });
+        run(
+            &mut world,
+            |query: Query<&mut Position, WithoutTag<Frozen>>| {
+                query.for_each(|_entity, position| position.x = 2.0);
+            },
+        );
         let moved = world
             .query_ref::<&Position>()
             .iter()
@@ -599,6 +741,65 @@ mod tests {
 
         let position = world.query_ref::<&Position>().single().unwrap().1.clone();
         assert_eq!(position, Position { x: 4.0, y: 4.0 });
+    }
+
+    #[test]
+    fn two_direct_queries_disjoint_components() {
+        let mut world = DynWorld::new();
+        world.spawn((Position { x: 1.0, y: 1.0 }, Velocity { x: 3.0, y: 4.0 }));
+
+        run(
+            &mut world,
+            |positions: Query<&mut Position>, velocities: Query<&Velocity>| {
+                let mut sample = (0.0, 0.0);
+                velocities.for_each(|_entity, velocity| sample = (velocity.x, velocity.y));
+                positions.for_each(|_entity, position| {
+                    position.x += sample.0;
+                    position.y += sample.1;
+                });
+            },
+        );
+
+        let position = world.query_ref::<&Position>().single().unwrap().1.clone();
+        assert_eq!(position, Position { x: 4.0, y: 5.0 });
+    }
+
+    #[test]
+    fn two_direct_queries_same_component_run_sequentially() {
+        let mut world = DynWorld::new();
+        world.spawn((Position { x: 0.0, y: 0.0 },));
+
+        run(
+            &mut world,
+            |first: Query<&mut Position>, second: Query<&mut Position>| {
+                first.for_each(|_entity, position| position.x += 1.0);
+                second.for_each(|_entity, position| position.x += 10.0);
+            },
+        );
+
+        assert_eq!(world.query_ref::<&Position>().single().unwrap().1.x, 11.0);
+    }
+
+    #[test]
+    fn resource_with_two_direct_queries() {
+        let mut world = DynWorld::new();
+        world.insert_resource(Score(0));
+        world.spawn((Position { x: 0.0, y: 0.0 }, Velocity { x: 2.0, y: 0.0 }));
+
+        run(
+            &mut world,
+            |mut score: ResMut<Score>,
+             positions: Query<&mut Position>,
+             velocities: Query<&Velocity>| {
+                let mut velocity_x = 0.0;
+                velocities.for_each(|_entity, velocity| velocity_x = velocity.x);
+                positions.for_each(|_entity, position| position.x += velocity_x);
+                score.0 += 1;
+            },
+        );
+
+        assert_eq!(world.resource::<Score>().unwrap().0, 1);
+        assert_eq!(world.query_ref::<&Position>().single().unwrap().1.x, 2.0);
     }
 
     #[test]
