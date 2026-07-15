@@ -9,10 +9,16 @@
 //! safe `Any` downcast per column per table. Query inner loops run over
 //! concrete slices, the same machine code the macro produces.
 //!
-//! Nothing here uses `unsafe`. Columns are erased as whole `Vec<T>` values
-//! behind `Box<dyn Any + Send + Sync>`, never as raw bytes, so `Drop` and
-//! thread-safety come from the vec itself, and a type must exist at the
-//! registration call site.
+//! By default nothing here uses `unsafe`: columns are erased as whole `Vec<T>`
+//! values behind `Box<dyn Any + Send + Sync>`, so `Drop` and thread-safety come
+//! from the vec itself. The opt-in `raw_storage` feature swaps that one storage
+//! type for a contiguous byte buffer reached through pointer casts, dropping the
+//! per-access downcast for extra speed. It is off by default, changes no public
+//! API and no observable behavior (the whole test suite runs identically under
+//! both, and the raw path is `miri`-verified), and confines every `unsafe` to a
+//! single [`RawColumn`](self) type. Leave it off for the safety guarantee; turn
+//! it on when you want the storage-bound paths (spawn, migration, fragmented
+//! iteration) as fast as they go.
 //!
 //! # Quick start
 //!
@@ -95,62 +101,385 @@ use crate::{
 
 static NEXT_REGISTRY_ID: AtomicU32 = AtomicU32::new(1);
 
-type ErasedColumn = Box<dyn Any + Send + Sync>;
+/// Type-erased boxed storage for events and resources, which stay `Box<dyn
+/// Any>` regardless of the column storage backend.
+type BoxedAny = Box<dyn Any + Send + Sync>;
 
-fn column_new<T: Send + Sync + Default + 'static>() -> ErasedColumn {
-    Box::new(Vec::<T>::new())
+/// A type-erased component column. With the default (safe) storage it is a
+/// boxed `Vec<T>` reached through `Any` downcasts. With the opt-in
+/// `raw_storage` feature it is a hand-rolled contiguous buffer reached through
+/// pointer casts that are checked once at registration, dropping the per-access
+/// downcast. Both present the same interface, so nothing above this type
+/// changes: the public API and observable behavior are identical either way.
+pub struct ErasedColumn {
+    #[cfg(not(feature = "raw_storage"))]
+    storage: Box<dyn Any + Send + Sync>,
+    #[cfg(feature = "raw_storage")]
+    storage: raw_storage::RawColumn,
 }
 
-fn column_vec<T: 'static>(column: &(dyn Any + Send + Sync)) -> &Vec<T> {
-    column
-        .downcast_ref::<Vec<T>>()
-        .expect("column type does not match its registered component")
-}
+impl ErasedColumn {
+    fn new<T: Send + Sync + Default + 'static>() -> Self {
+        ErasedColumn {
+            #[cfg(not(feature = "raw_storage"))]
+            storage: Box::new(Vec::<T>::new()),
+            #[cfg(feature = "raw_storage")]
+            storage: raw_storage::RawColumn::new::<T>(),
+        }
+    }
 
-fn column_vec_mut<T: 'static>(column: &mut (dyn Any + Send + Sync)) -> &mut Vec<T> {
-    column
-        .downcast_mut::<Vec<T>>()
-        .expect("column type does not match its registered component")
-}
+    #[inline]
+    fn slice<T: 'static>(&self) -> &[T] {
+        #[cfg(not(feature = "raw_storage"))]
+        {
+            self.storage
+                .downcast_ref::<Vec<T>>()
+                .expect("column type does not match its registered component")
+                .as_slice()
+        }
+        #[cfg(feature = "raw_storage")]
+        {
+            self.storage.slice::<T>()
+        }
+    }
 
-fn column_push_default<T: Send + Sync + Default + 'static>(
-    column: &mut (dyn Any + Send + Sync),
-    count: usize,
-) {
-    let column = column_vec_mut::<T>(column);
-    column.reserve(count);
-    for _ in 0..count {
-        column.push(T::default());
+    #[inline]
+    fn slice_mut<T: 'static>(&mut self) -> &mut [T] {
+        #[cfg(not(feature = "raw_storage"))]
+        {
+            self.storage
+                .downcast_mut::<Vec<T>>()
+                .expect("column type does not match its registered component")
+                .as_mut_slice()
+        }
+        #[cfg(feature = "raw_storage")]
+        {
+            self.storage.slice_mut::<T>()
+        }
+    }
+
+    fn push<T: Send + Sync + Default + 'static>(&mut self, value: T) {
+        #[cfg(not(feature = "raw_storage"))]
+        {
+            self.storage
+                .downcast_mut::<Vec<T>>()
+                .expect("column type does not match its registered component")
+                .push(value);
+        }
+        #[cfg(feature = "raw_storage")]
+        {
+            self.storage.push::<T>(value);
+        }
+    }
+
+    fn extend_clone<T: Send + Sync + Default + Clone + 'static>(
+        &mut self,
+        count: usize,
+        value: &T,
+    ) {
+        #[cfg(not(feature = "raw_storage"))]
+        {
+            let column = self
+                .storage
+                .downcast_mut::<Vec<T>>()
+                .expect("column type does not match its registered component");
+            column.reserve(count);
+            for _ in 0..count {
+                column.push(value.clone());
+            }
+        }
+        #[cfg(feature = "raw_storage")]
+        {
+            self.storage.reserve(count);
+            for _ in 0..count {
+                self.storage.push::<T>(value.clone());
+            }
+        }
+    }
+
+    fn push_defaults<T: Send + Sync + Default + 'static>(&mut self, count: usize) {
+        #[cfg(not(feature = "raw_storage"))]
+        {
+            let column = self
+                .storage
+                .downcast_mut::<Vec<T>>()
+                .expect("column type does not match its registered component");
+            column.reserve(count);
+            for _ in 0..count {
+                column.push(T::default());
+            }
+        }
+        #[cfg(feature = "raw_storage")]
+        {
+            self.storage.reserve(count);
+            for _ in 0..count {
+                self.storage.push::<T>(T::default());
+            }
+        }
+    }
+
+    fn swap_remove<T: Send + Sync + Default + 'static>(&mut self, index: usize) {
+        #[cfg(not(feature = "raw_storage"))]
+        {
+            self.storage
+                .downcast_mut::<Vec<T>>()
+                .expect("column type does not match its registered component")
+                .swap_remove(index);
+        }
+        #[cfg(feature = "raw_storage")]
+        {
+            let _ = std::marker::PhantomData::<T>;
+            self.storage.swap_remove(index);
+        }
+    }
+
+    fn move_row<T: Send + Sync + Default + 'static>(
+        &mut self,
+        index: usize,
+        destination: &mut ErasedColumn,
+    ) {
+        let value = std::mem::take(&mut self.slice_mut::<T>()[index]);
+        destination.push::<T>(value);
+    }
+
+    fn swap_remove_into<T: Send + Sync + Default + 'static>(
+        &mut self,
+        index: usize,
+        destination: &mut ErasedColumn,
+    ) {
+        #[cfg(not(feature = "raw_storage"))]
+        {
+            let value = self
+                .storage
+                .downcast_mut::<Vec<T>>()
+                .expect("column type does not match its registered component")
+                .swap_remove(index);
+            destination.push::<T>(value);
+        }
+        #[cfg(feature = "raw_storage")]
+        {
+            let _ = std::marker::PhantomData::<T>;
+            self.storage
+                .swap_remove_into(index, &mut destination.storage);
+        }
+    }
+
+    fn len<T: 'static>(&self) -> usize {
+        #[cfg(not(feature = "raw_storage"))]
+        {
+            self.storage
+                .downcast_ref::<Vec<T>>()
+                .expect("column type does not match its registered component")
+                .len()
+        }
+        #[cfg(feature = "raw_storage")]
+        {
+            let _ = std::marker::PhantomData::<T>;
+            self.storage.len()
+        }
     }
 }
 
-fn column_len_of<T: Send + Sync + Default + 'static>(column: &(dyn Any + Send + Sync)) -> usize {
-    column_vec::<T>(column).len()
+/// The contiguous storage backend used when the `raw_storage` feature is on.
+/// Every `unsafe` in that backend is contained in this module. The invariant
+/// upheld by [`ErasedColumn`] is narrow: each method is called with the exact
+/// `T` the column was registered for, so size, alignment, and drop glue always
+/// match the bytes it holds.
+#[cfg(feature = "raw_storage")]
+mod raw_storage {
+    use std::alloc::{self, Layout};
+    use std::ptr::{self, NonNull};
+
+    pub(crate) struct RawColumn {
+        pointer: NonNull<u8>,
+        len: usize,
+        capacity: usize,
+        item_size: usize,
+        item_align: usize,
+        drop_fn: Option<unsafe fn(*mut u8)>,
+    }
+
+    // A column only ever holds a registered component, and every registered
+    // component is `Send + Sync + 'static`, so the erased bytes are too.
+    unsafe impl Send for RawColumn {}
+    unsafe impl Sync for RawColumn {}
+
+    unsafe fn drop_in_place_as<T>(pointer: *mut u8) {
+        unsafe { ptr::drop_in_place(pointer.cast::<T>()) }
+    }
+
+    impl RawColumn {
+        pub(crate) fn new<T: 'static>() -> Self {
+            let layout = Layout::new::<T>();
+            RawColumn {
+                pointer: NonNull::new(layout.align() as *mut u8).expect("alignment is never zero"),
+                len: 0,
+                capacity: 0,
+                item_size: layout.size(),
+                item_align: layout.align(),
+                drop_fn: std::mem::needs_drop::<T>()
+                    .then_some(drop_in_place_as::<T> as unsafe fn(*mut u8)),
+            }
+        }
+
+        #[inline]
+        pub(crate) fn len(&self) -> usize {
+            self.len
+        }
+
+        #[inline]
+        fn element_pointer(&self, index: usize) -> *mut u8 {
+            unsafe { self.pointer.as_ptr().add(index * self.item_size) }
+        }
+
+        pub(crate) fn slice<T: 'static>(&self) -> &[T] {
+            unsafe { std::slice::from_raw_parts(self.pointer.as_ptr().cast::<T>(), self.len) }
+        }
+
+        pub(crate) fn slice_mut<T: 'static>(&mut self) -> &mut [T] {
+            unsafe { std::slice::from_raw_parts_mut(self.pointer.as_ptr().cast::<T>(), self.len) }
+        }
+
+        fn layout_for(&self, capacity: usize) -> Layout {
+            Layout::from_size_align(self.item_size * capacity, self.item_align)
+                .expect("component column layout overflow")
+        }
+
+        pub(crate) fn reserve(&mut self, additional: usize) {
+            if self.item_size == 0 {
+                return;
+            }
+            let required = self.len + additional;
+            if required <= self.capacity {
+                return;
+            }
+            let new_capacity = required.max(self.capacity * 2).max(4);
+            let new_layout = self.layout_for(new_capacity);
+            let new_pointer = if self.capacity == 0 {
+                unsafe { alloc::alloc(new_layout) }
+            } else {
+                let old_layout = self.layout_for(self.capacity);
+                unsafe { alloc::realloc(self.pointer.as_ptr(), old_layout, new_layout.size()) }
+            };
+            self.pointer =
+                NonNull::new(new_pointer).unwrap_or_else(|| alloc::handle_alloc_error(new_layout));
+            self.capacity = new_capacity;
+        }
+
+        pub(crate) fn push<T: 'static>(&mut self, value: T) {
+            if self.item_size == 0 {
+                std::mem::forget(value);
+                self.len += 1;
+                return;
+            }
+            if self.len == self.capacity {
+                self.reserve(1);
+            }
+            unsafe { ptr::write(self.element_pointer(self.len).cast::<T>(), value) }
+            self.len += 1;
+        }
+
+        pub(crate) fn swap_remove(&mut self, index: usize) {
+            assert!(index < self.len, "column swap_remove index out of bounds");
+            if let Some(drop_fn) = self.drop_fn {
+                unsafe { drop_fn(self.element_pointer(index)) }
+            }
+            self.len -= 1;
+            if index != self.len && self.item_size != 0 {
+                unsafe {
+                    ptr::copy_nonoverlapping(
+                        self.element_pointer(self.len),
+                        self.element_pointer(index),
+                        self.item_size,
+                    )
+                }
+            }
+        }
+
+        pub(crate) fn swap_remove_into(&mut self, index: usize, destination: &mut RawColumn) {
+            assert!(
+                index < self.len,
+                "column swap_remove_into index out of bounds"
+            );
+            destination.reserve(1);
+            if self.item_size != 0 {
+                unsafe {
+                    ptr::copy_nonoverlapping(
+                        self.element_pointer(index),
+                        destination.element_pointer(destination.len),
+                        self.item_size,
+                    )
+                }
+            }
+            destination.len += 1;
+            self.len -= 1;
+            if index != self.len && self.item_size != 0 {
+                unsafe {
+                    ptr::copy_nonoverlapping(
+                        self.element_pointer(self.len),
+                        self.element_pointer(index),
+                        self.item_size,
+                    )
+                }
+            }
+        }
+    }
+
+    impl Drop for RawColumn {
+        fn drop(&mut self) {
+            if let Some(drop_fn) = self.drop_fn {
+                for index in 0..self.len {
+                    unsafe { drop_fn(self.element_pointer(index)) }
+                }
+            }
+            if self.item_size != 0 && self.capacity != 0 {
+                unsafe { alloc::dealloc(self.pointer.as_ptr(), self.layout_for(self.capacity)) }
+            }
+        }
+    }
 }
 
-fn column_swap_remove<T: Send + Sync + Default + 'static>(
-    column: &mut (dyn Any + Send + Sync),
-    index: usize,
+fn column_new<T: Send + Sync + Default + 'static>() -> ErasedColumn {
+    ErasedColumn::new::<T>()
+}
+
+fn column_vec<T: 'static>(column: &ErasedColumn) -> &[T] {
+    column.slice::<T>()
+}
+
+fn column_vec_mut<T: 'static>(column: &mut ErasedColumn) -> &mut [T] {
+    column.slice_mut::<T>()
+}
+
+fn column_push_default<T: Send + Sync + Default + 'static>(
+    column: &mut ErasedColumn,
+    count: usize,
 ) {
-    column_vec_mut::<T>(column).swap_remove(index);
+    column.push_defaults::<T>(count);
+}
+
+fn column_len_of<T: Send + Sync + Default + 'static>(column: &ErasedColumn) -> usize {
+    column.len::<T>()
+}
+
+fn column_swap_remove<T: Send + Sync + Default + 'static>(column: &mut ErasedColumn, index: usize) {
+    column.swap_remove::<T>(index);
 }
 
 fn column_move_row<T: Send + Sync + Default + 'static>(
-    source: &mut (dyn Any + Send + Sync),
+    source: &mut ErasedColumn,
     index: usize,
-    destination: &mut (dyn Any + Send + Sync),
+    destination: &mut ErasedColumn,
 ) {
-    let value = std::mem::take(&mut column_vec_mut::<T>(source)[index]);
-    column_vec_mut::<T>(destination).push(value);
+    source.move_row::<T>(index, destination);
 }
 
 fn column_swap_remove_into<T: Send + Sync + Default + 'static>(
-    source: &mut (dyn Any + Send + Sync),
+    source: &mut ErasedColumn,
     index: usize,
-    destination: &mut (dyn Any + Send + Sync),
+    destination: &mut ErasedColumn,
 ) {
-    let value = column_vec_mut::<T>(source).swap_remove(index);
-    column_vec_mut::<T>(destination).push(value);
+    source.swap_remove_into::<T>(index, destination);
 }
 
 /// The per-type operations a column needs, as a plain record of function
@@ -161,11 +490,11 @@ pub struct ComponentInfo {
     pub type_name: &'static str,
     pub mask: u64,
     pub new_column: fn() -> ErasedColumn,
-    pub push_default: fn(&mut (dyn Any + Send + Sync), usize),
-    pub swap_remove: fn(&mut (dyn Any + Send + Sync), usize),
-    pub move_row: fn(&mut (dyn Any + Send + Sync), usize, &mut (dyn Any + Send + Sync)),
-    pub swap_remove_into: fn(&mut (dyn Any + Send + Sync), usize, &mut (dyn Any + Send + Sync)),
-    pub column_len: fn(&(dyn Any + Send + Sync)) -> usize,
+    pub push_default: fn(&mut ErasedColumn, usize),
+    pub swap_remove: fn(&mut ErasedColumn, usize),
+    pub move_row: fn(&mut ErasedColumn, usize, &mut ErasedColumn),
+    pub swap_remove_into: fn(&mut ErasedColumn, usize, &mut ErasedColumn),
+    pub column_len: fn(&ErasedColumn) -> usize,
 }
 
 /// A typed handle to a registered component: the component's index, its mask
@@ -414,7 +743,7 @@ impl DynComponentArrays {
     #[inline]
     pub fn column<T: 'static>(&self, key: ComponentKey<T>) -> &[T] {
         let position = column_position(self.mask, key.mask);
-        column_vec::<T>(self.columns[position].data.as_ref())
+        column_vec::<T>(&self.columns[position].data)
     }
 
     /// Mutable raw column access. Does not stamp change ticks, and costs a
@@ -423,7 +752,7 @@ impl DynComponentArrays {
     #[inline]
     pub fn column_mut<T: 'static>(&mut self, key: ComponentKey<T>) -> &mut [T] {
         let position = column_position(self.mask, key.mask);
-        column_vec_mut::<T>(self.columns[position].data.as_mut())
+        column_vec_mut::<T>(&mut self.columns[position].data)
     }
 
     pub fn has_component(&self, mask: u64) -> bool {
@@ -463,8 +792,8 @@ impl DynComponentArrays {
             .get_disjoint_mut([first_position, second_position])
             .expect("columns_pair components must be distinct");
         (
-            column_vec_mut::<A>(first_slot.data.as_mut()).as_mut_slice(),
-            column_vec::<B>(second_slot.data.as_ref()).as_slice(),
+            column_vec_mut::<A>(&mut first_slot.data),
+            column_vec::<B>(&second_slot.data),
         )
     }
 
@@ -483,8 +812,8 @@ impl DynComponentArrays {
             .get_disjoint_mut([first_position, second_position])
             .expect("columns_pair_mut components must be distinct");
         (
-            column_vec_mut::<A>(first_slot.data.as_mut()).as_mut_slice(),
-            column_vec_mut::<B>(second_slot.data.as_mut()).as_mut_slice(),
+            column_vec_mut::<A>(&mut first_slot.data),
+            column_vec_mut::<B>(&mut second_slot.data),
         )
     }
 }
@@ -502,7 +831,7 @@ enum DynCommand {
 
 struct EventSlot {
     type_id: TypeId,
-    data: ErasedColumn,
+    data: BoxedAny,
     update: fn(&mut (dyn Any + Send + Sync)),
 }
 
@@ -602,7 +931,7 @@ impl EventBus {
     /// two-frame window. The containers call this from their `step`.
     pub fn update(&mut self) {
         for slot in &mut self.slots {
-            (slot.update)(slot.data.as_mut());
+            (slot.update)(&mut *slot.data);
         }
     }
 }
@@ -612,7 +941,7 @@ impl EventBus {
 /// identical machinery; the containers add the expect and scope forms.
 #[derive(Default)]
 pub struct ResourceMap {
-    pub entries: HashMap<TypeId, ErasedColumn>,
+    pub entries: HashMap<TypeId, BoxedAny>,
 }
 
 impl ResourceMap {
@@ -1077,7 +1406,7 @@ impl DynWorld {
             table.entity_indices.reserve(count);
             for column in &mut table.columns {
                 let info = &self.registry.components[column.component_index as usize];
-                (info.push_default)(column.data.as_mut(), count);
+                (info.push_default)(&mut column.data, count);
                 let filled_length = column.changed.len() + count;
                 column.changed.resize(filled_length, current_tick);
                 column.added.resize(filled_length, current_tick);
@@ -1128,7 +1457,7 @@ impl DynWorld {
 
         for column in &mut table.columns {
             let info = &self.registry.components[column.component_index as usize];
-            (info.swap_remove)(column.data.as_mut(), array_index);
+            (info.swap_remove)(&mut column.data, array_index);
             column.changed.swap_remove(array_index);
             column.added.swap_remove(array_index);
         }
@@ -1266,7 +1595,7 @@ impl DynWorld {
                 let destination_position = column_position(destination.mask, component_mask);
                 let destination_column = &mut destination.columns[destination_position];
                 let info = &self.registry.components[destination_column.component_index as usize];
-                (info.push_default)(destination_column.data.as_mut(), 1);
+                (info.push_default)(&mut destination_column.data, 1);
                 destination_column.changed.push(tick);
                 destination_column.peak_changed = tick;
                 destination_column.added.push(tick);
@@ -1285,9 +1614,9 @@ impl DynWorld {
                 let info = &self.registry.components
                     [source.columns[source_position].component_index as usize];
                 (info.swap_remove_into)(
-                    source.columns[source_position].data.as_mut(),
+                    &mut source.columns[source_position].data,
                     from_index,
-                    destination.columns[destination_position].data.as_mut(),
+                    &mut destination.columns[destination_position].data,
                 );
                 source.columns[source_position]
                     .changed
@@ -1310,7 +1639,7 @@ impl DynWorld {
                 let source_position = column_position(source.mask, component_mask);
                 let info = &self.registry.components
                     [source.columns[source_position].component_index as usize];
-                (info.swap_remove)(source.columns[source_position].data.as_mut(), from_index);
+                (info.swap_remove)(&mut source.columns[source_position].data, from_index);
                 source.columns[source_position]
                     .changed
                     .swap_remove(from_index);
@@ -1400,7 +1729,7 @@ impl DynWorld {
             let table = &mut self.tables[table_index];
             for column in &mut table.columns {
                 let info = &self.registry.components[column.component_index as usize];
-                (info.push_default)(column.data.as_mut(), 1);
+                (info.push_default)(&mut column.data, 1);
                 column.changed.push(current_tick);
                 column.peak_changed = current_tick;
                 column.added.push(current_tick);
@@ -1470,7 +1799,7 @@ impl DynWorld {
             return None;
         }
         let position = column_position(table.mask, key.mask);
-        Some(&column_vec::<T>(table.columns[position].data.as_ref())[array_index])
+        Some(&column_vec::<T>(&table.columns[position].data)[array_index])
     }
 
     #[inline]
@@ -1490,7 +1819,7 @@ impl DynWorld {
         let column = &mut table.columns[position];
         column.changed[array_index] = current_tick;
         column.peak_changed = current_tick;
-        Some(&mut column_vec_mut::<T>(column.data.as_mut())[array_index])
+        Some(&mut column_vec_mut::<T>(&mut column.data)[array_index])
     }
 
     /// Explicitly stamps change ticks for the masked components on one
@@ -1529,7 +1858,7 @@ impl DynWorld {
             if table.mask & key.mask != 0 {
                 let position = column_position(table.mask, key.mask);
                 let column = &mut table.columns[position];
-                column_vec_mut::<T>(column.data.as_mut())[array_index] = value;
+                column_vec_mut::<T>(&mut column.data)[array_index] = value;
                 column.changed[array_index] = current_tick;
                 column.peak_changed = current_tick;
                 return;
@@ -1541,7 +1870,7 @@ impl DynWorld {
             let table = &mut self.tables[table_index];
             let position = column_position(table.mask, key.mask);
             let column = &mut table.columns[position];
-            column_vec_mut::<T>(column.data.as_mut())[array_index] = value;
+            column_vec_mut::<T>(&mut column.data)[array_index] = value;
             column.changed[array_index] = current_tick;
             column.peak_changed = current_tick;
         }
@@ -1561,11 +1890,7 @@ impl DynWorld {
         let table = &mut self.tables[table_index];
         let position = column_position(table.mask, key.mask);
         let column = &mut table.columns[position];
-        let vector = column_vec_mut::<T>(column.data.as_mut());
-        vector.reserve(count);
-        for _ in 0..count {
-            vector.push(value.clone());
-        }
+        column.data.extend_clone::<T>(count, value);
     }
 
     pub fn component_mask(&self, entity: Entity) -> Option<u64> {
@@ -3260,7 +3585,7 @@ mod snapshot {
                     let codec = self.registry.codecs[column.component_index as usize]
                         .as_ref()
                         .ok_or(SnapshotError::MissingCodec(info.type_name))?;
-                    columns.push((codec.encode_column)(column.data.as_ref())?);
+                    columns.push((codec.encode_column)(&column.data)?);
                 }
                 tables.push(DynTableSnapshot {
                     mask: table.mask,
@@ -3340,7 +3665,7 @@ mod snapshot {
                         SnapshotError::Codec("missing column payload".to_string())
                     })?;
                     column.data = (codec.decode_column)(payload)?;
-                    let decoded_rows = (info.column_len)(column.data.as_ref());
+                    let decoded_rows = (info.column_len)(&column.data);
                     if decoded_rows != table_snapshot.entities.len() {
                         return Err(SnapshotError::Codec(format!(
                             "column {} decoded {decoded_rows} rows for {} entities",
@@ -3844,10 +4169,7 @@ impl<T: Send + Sync + Default + 'static> QueryElement for &T {
         _current_tick: u32,
     ) -> Self::Fetch<'table> {
         let slot = slot.expect("required query element column missing");
-        (
-            column_vec::<T>(slot.data.as_ref()).as_slice(),
-            slot.changed.as_slice(),
-        )
+        (column_vec::<T>(&slot.data), slot.changed.as_slice())
     }
 
     fn changed_newer(fetch: &Self::Fetch<'_>, index: usize, since_tick: u32) -> bool {
@@ -3867,10 +4189,7 @@ impl<T: Send + Sync + Default + 'static> QueryElement for &T {
         _current_tick: u32,
     ) -> Self::ParFetch<'table> {
         let slot = slot.expect("required query element column missing");
-        (
-            column_vec::<T>(slot.data.as_ref()).as_slice(),
-            slot.changed.as_slice(),
-        )
+        (column_vec::<T>(&slot.data), slot.changed.as_slice())
     }
 
     fn par_split<'table>(
@@ -3934,7 +4253,7 @@ impl<T: Send + Sync + Default + 'static> QueryElement for &mut T {
             ..
         } = slot;
         (
-            column_vec_mut::<T>(data.as_mut()).as_mut_slice(),
+            column_vec_mut::<T>(data),
             changed.as_mut_slice(),
             current_tick,
             peak_changed,
@@ -3964,7 +4283,7 @@ impl<T: Send + Sync + Default + 'static> QueryElement for &mut T {
         slot.peak_changed = current_tick;
         let ColumnSlot { data, changed, .. } = slot;
         (
-            column_vec_mut::<T>(data.as_mut()).as_mut_slice(),
+            column_vec_mut::<T>(data),
             changed.as_mut_slice(),
             current_tick,
         )
@@ -4204,7 +4523,7 @@ impl<T: Send + Sync + Default + 'static> ReadQueryElement for &T {
     fn read_fetch<'table>(slot: Option<&'table ColumnSlot>) -> Self::ReadFetch<'table> {
         let slot = slot.expect("required query element column missing");
         (
-            column_vec::<T>(slot.data.as_ref()).as_slice(),
+            column_vec::<T>(&slot.data),
             slot.changed.as_slice(),
             slot.added.as_slice(),
         )
@@ -8122,6 +8441,53 @@ mod tests {
             .changed::<Position>()
             .for_each(|_entity, _position| changed += 1);
         assert_eq!(changed, 200);
+    }
+
+    #[test]
+    fn test_column_storage_drops_every_value_exactly_once() {
+        use std::sync::atomic::{AtomicIsize, Ordering};
+        static LIVE: AtomicIsize = AtomicIsize::new(0);
+
+        struct Tracked(u64);
+        impl Default for Tracked {
+            fn default() -> Self {
+                LIVE.fetch_add(1, Ordering::Relaxed);
+                Tracked(0)
+            }
+        }
+        impl Clone for Tracked {
+            fn clone(&self) -> Self {
+                LIVE.fetch_add(1, Ordering::Relaxed);
+                Tracked(self.0)
+            }
+        }
+        impl Drop for Tracked {
+            fn drop(&mut self) {
+                LIVE.fetch_sub(1, Ordering::Relaxed);
+            }
+        }
+
+        LIVE.store(0, Ordering::Relaxed);
+        {
+            let mut world = DynWorld::new();
+            let mut entities: Vec<_> = (0..200)
+                .map(|_| world.spawn((Tracked::default(),)))
+                .collect();
+            world.spawn_bundles((Tracked::default(), Position { x: 0.0, y: 0.0 }), 200);
+            for &entity in &entities {
+                world.set(entity, Velocity { x: 1.0, y: 0.0 });
+            }
+            for &entity in entities.iter().take(120) {
+                world.queue_despawn_entity(entity);
+            }
+            world.apply_commands();
+            entities.clear();
+        }
+        assert_eq!(
+            LIVE.load(Ordering::Relaxed),
+            0,
+            "every Tracked value must be constructed and dropped exactly once"
+        );
     }
 
     #[test]

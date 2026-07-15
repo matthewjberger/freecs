@@ -932,6 +932,14 @@ When a component or resource has a `#[cfg(...)]` attribute, all related generate
 - `serde` (default): derives `Serialize`/`Deserialize` on `Entity`. Disable with `default-features = false` if you don't need it.
 - `dynamic` (off by default): the runtime-registered [dynamic world](#dynamic-worlds) entry point. Costs the default build nothing.
 - `snapshot` (off by default, implies `dynamic` and `serde`): serializable snapshots of dynamic worlds and groups, with per-type column codecs registered alongside components.
+- `raw_storage` (off by default, implies `dynamic`): swaps the dynamic world's component columns from `Box<dyn Any>` + `Vec<T>` to a contiguous byte buffer read through pointer casts, which drops the per-access downcast and speeds up the storage-bound paths (spawn, archetype migration, fragmented iteration). It is a pure under-the-hood change: the public API and observable behavior are identical, the whole dynamic test suite passes byte-for-byte under both storage backends, and every `unsafe` is confined to one `RawColumn` type that is verified with `miri`. Leave it off to keep the crate provably `unsafe`-free; turn it on when you want maximum speed and accept an encapsulated, tested `unsafe` core.
+
+Verify a build against both backends the way the crate does:
+
+```sh
+cargo test --features dynamic                 # safe storage (default)
+cargo test --features "dynamic raw_storage"   # contiguous raw storage
+```
 
 ## Dynamic Worlds
 

@@ -21,6 +21,7 @@ serde = ["dep:serde"]
 dynamic = []
 snapshot = ["dynamic", "serde", "dep:postcard"]
 audio = []
+raw_storage = ["dynamic"]
 
 [dependencies]
 paste = { package = "pastey", version = "0.2" }
