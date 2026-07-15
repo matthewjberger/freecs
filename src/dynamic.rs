@@ -1067,12 +1067,9 @@ impl DynWorld {
             for column in &mut table.columns {
                 let info = &self.registry.components[column.component_index as usize];
                 (info.push_default)(column.data.as_mut(), count);
-                column.changed.reserve(count);
-                column.added.reserve(count);
-                for _ in 0..count {
-                    column.changed.push(current_tick);
-                    column.added.push(current_tick);
-                }
+                let filled_length = column.changed.len() + count;
+                column.changed.resize(filled_length, current_tick);
+                column.added.resize(filled_length, current_tick);
                 column.peak_changed = current_tick;
                 column.peak_added = current_tick;
             }
@@ -1499,6 +1496,27 @@ impl DynWorld {
             column_vec_mut::<T>(column.data.as_mut())[array_index] = value;
             column.changed[array_index] = current_tick;
             column.peak_changed = current_tick;
+        }
+    }
+
+    /// Writes `value` into a contiguous row range of one column in one table,
+    /// resolving the column once instead of per row. The rows must already
+    /// exist and carry the component; the batch spawn paths use this to fill a
+    /// freshly grown table without a per-entity type lookup.
+    pub fn fill_column_range<T: Send + Sync + Default + Clone + 'static>(
+        &mut self,
+        table_index: usize,
+        start: usize,
+        count: usize,
+        value: &T,
+    ) {
+        let key = self.component_key::<T>();
+        let table = &mut self.tables[table_index];
+        let position = column_position(table.mask, key.mask);
+        let column = &mut table.columns[position];
+        let vector = column_vec_mut::<T>(column.data.as_mut());
+        for slot in &mut vector[start..start + count] {
+            *slot = value.clone();
         }
     }
 
@@ -2259,11 +2277,13 @@ impl DynWorld {
     /// The typed bulk spawn: `count` entities each carrying a clone of the
     /// bundle. For per-entity initialization at batch speed, use the keyed
     /// [`spawn_batch`](Self::spawn_batch) instead.
-    pub fn spawn_bundles<B: Bundle + Clone>(&mut self, bundle: B, count: usize) -> Vec<Entity> {
+    pub fn spawn_bundles<B: CloneBundle>(&mut self, bundle: B, count: usize) -> Vec<Entity> {
         let mask = B::component_mask(self);
         let entities = self.spawn_entities(mask, count);
-        for &entity in &entities {
-            bundle.clone().write(self, entity);
+        if let Some(&first) = entities.first() {
+            let (table_index, start) =
+                get_location(&self.entity_locations, first).expect("just spawned");
+            bundle.fill_range(self, table_index, start, count);
         }
         entities
     }
@@ -5922,6 +5942,13 @@ pub trait Bundle: sealed::SealedBundle {
     fn write_group(self, ecs: &mut DynEcs, entity: Entity);
 }
 
+/// A [`Bundle`] whose components are `Clone`, so a whole batch of freshly
+/// spawned rows can be filled column by column from one bundle value. Sealed
+/// through [`Bundle`]; every clonable tuple bundle implements it.
+pub trait CloneBundle: Bundle + Clone {
+    fn fill_range(&self, world: &mut DynWorld, table_index: usize, start: usize, count: usize);
+}
+
 macro_rules! impl_bundle {
     ($($element:ident),+) => {
         impl<$($element: Send + Sync + Default + 'static),+> sealed::SealedBundle for ($($element,)+) {}
@@ -5951,6 +5978,14 @@ macro_rules! impl_bundle {
             fn write_group(self, ecs: &mut DynEcs, entity: Entity) {
                 let ($($element,)+) = self;
                 $(ecs.set(entity, $element);)+
+            }
+        }
+
+        impl<$($element: Send + Sync + Default + Clone + 'static),+> CloneBundle for ($($element,)+) {
+            #[allow(non_snake_case)]
+            fn fill_range(&self, world: &mut DynWorld, table_index: usize, start: usize, count: usize) {
+                let ($($element,)+) = self;
+                $(world.fill_column_range(table_index, start, count, $element);)+
             }
         }
     };
@@ -7621,6 +7656,29 @@ mod tests {
             assert_eq!(world.get::<Position>(entity).unwrap().x, 4.0);
             assert_eq!(world.get::<Velocity>(entity).unwrap().x, 1.0);
         }
+    }
+
+    #[test]
+    fn test_spawn_bundles_bulk_fill_stamps_every_row() {
+        let mut world = DynWorld::new();
+        let entities = world.spawn_bundles(
+            (Position { x: 7.0, y: 2.0 }, Velocity { x: 3.0, y: 0.0 }),
+            500,
+        );
+
+        assert_eq!(entities.len(), 500);
+        assert_eq!(world.entity_count(), 500);
+
+        let mut positions = 0;
+        world
+            .query::<(&Position, &Velocity)>()
+            .for_each(|_entity, (position, velocity)| {
+                assert_eq!(position.x, 7.0);
+                assert_eq!(position.y, 2.0);
+                assert_eq!(velocity.x, 3.0);
+                positions += 1;
+            });
+        assert_eq!(positions, 500);
     }
 
     #[test]
