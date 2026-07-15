@@ -3728,6 +3728,16 @@ pub trait QueryElement: sealed::SealedElement {
     fn changed_newer(fetch: &Self::Fetch<'_>, index: usize, since_tick: u32) -> bool;
     fn item<'fetch>(fetch: &'fetch mut Self::Fetch<'_>, index: usize) -> Self::Item<'fetch>;
     fn stamp_peaks(fetch: &mut Self::Fetch<'_>);
+    type ParFetch<'table>: Send;
+    fn par_fetch<'table>(
+        slot: Option<&'table mut ColumnSlot>,
+        current_tick: u32,
+    ) -> Self::ParFetch<'table>;
+    fn par_split<'table>(
+        fetch: Self::ParFetch<'table>,
+        mid: usize,
+    ) -> (Self::ParFetch<'table>, Self::ParFetch<'table>);
+    fn par_item<'fetch>(fetch: &'fetch mut Self::ParFetch<'_>, index: usize) -> Self::Item<'fetch>;
 }
 
 impl<T: Send + Sync + Default + 'static> sealed::SealedElement for &T {}
@@ -3770,6 +3780,32 @@ impl<T: Send + Sync + Default + 'static> QueryElement for &T {
     }
 
     fn stamp_peaks(_fetch: &mut Self::Fetch<'_>) {}
+
+    type ParFetch<'table> = (&'table [T], &'table [u32]);
+
+    fn par_fetch<'table>(
+        slot: Option<&'table mut ColumnSlot>,
+        _current_tick: u32,
+    ) -> Self::ParFetch<'table> {
+        let slot = slot.expect("required query element column missing");
+        (
+            column_vec::<T>(slot.data.as_ref()).as_slice(),
+            slot.changed.as_slice(),
+        )
+    }
+
+    fn par_split<'table>(
+        fetch: Self::ParFetch<'table>,
+        mid: usize,
+    ) -> (Self::ParFetch<'table>, Self::ParFetch<'table>) {
+        let (left_data, right_data) = fetch.0.split_at(mid);
+        let (left_changed, right_changed) = fetch.1.split_at(mid);
+        ((left_data, left_changed), (right_data, right_changed))
+    }
+
+    fn par_item<'fetch>(fetch: &'fetch mut Self::ParFetch<'_>, index: usize) -> Self::Item<'fetch> {
+        &fetch.0[index]
+    }
 }
 
 impl<T: Send + Sync + Default + 'static> sealed::SealedElement for &mut T {}
@@ -3826,6 +3862,39 @@ impl<T: Send + Sync + Default + 'static> QueryElement for &mut T {
     fn stamp_peaks(fetch: &mut Self::Fetch<'_>) {
         *fetch.3 = fetch.2;
     }
+
+    type ParFetch<'table> = (&'table mut [T], &'table mut [u32], u32);
+
+    fn par_fetch<'table>(
+        slot: Option<&'table mut ColumnSlot>,
+        current_tick: u32,
+    ) -> Self::ParFetch<'table> {
+        let slot = slot.expect("required query element column missing");
+        slot.peak_changed = current_tick;
+        let ColumnSlot { data, changed, .. } = slot;
+        (
+            column_vec_mut::<T>(data.as_mut()).as_mut_slice(),
+            changed.as_mut_slice(),
+            current_tick,
+        )
+    }
+
+    fn par_split<'table>(
+        fetch: Self::ParFetch<'table>,
+        mid: usize,
+    ) -> (Self::ParFetch<'table>, Self::ParFetch<'table>) {
+        let (left_data, right_data) = fetch.0.split_at_mut(mid);
+        let (left_changed, right_changed) = fetch.1.split_at_mut(mid);
+        (
+            (left_data, left_changed, fetch.2),
+            (right_data, right_changed, fetch.2),
+        )
+    }
+
+    fn par_item<'fetch>(fetch: &'fetch mut Self::ParFetch<'_>, index: usize) -> Self::Item<'fetch> {
+        fetch.1[index] = fetch.2;
+        &mut fetch.0[index]
+    }
 }
 
 impl<T: Send + Sync + Default + 'static> sealed::SealedElement for Option<&T> {}
@@ -3866,6 +3935,32 @@ impl<T: Send + Sync + Default + 'static> QueryElement for Option<&T> {
     }
 
     fn stamp_peaks(_fetch: &mut Self::Fetch<'_>) {}
+
+    type ParFetch<'table> = Option<(&'table [T], &'table [u32])>;
+
+    fn par_fetch<'table>(
+        slot: Option<&'table mut ColumnSlot>,
+        current_tick: u32,
+    ) -> Self::ParFetch<'table> {
+        slot.map(|slot| <&T as QueryElement>::par_fetch(Some(slot), current_tick))
+    }
+
+    fn par_split<'table>(
+        fetch: Self::ParFetch<'table>,
+        mid: usize,
+    ) -> (Self::ParFetch<'table>, Self::ParFetch<'table>) {
+        match fetch {
+            Some(inner) => {
+                let (left, right) = <&T as QueryElement>::par_split(inner, mid);
+                (Some(left), Some(right))
+            }
+            None => (None, None),
+        }
+    }
+
+    fn par_item<'fetch>(fetch: &'fetch mut Self::ParFetch<'_>, index: usize) -> Self::Item<'fetch> {
+        fetch.as_ref().map(|inner| &inner.0[index])
+    }
 }
 
 impl<T: Send + Sync + Default + 'static> sealed::SealedElement for Option<&mut T> {}
@@ -3915,6 +4010,35 @@ impl<T: Send + Sync + Default + 'static> QueryElement for Option<&mut T> {
         if let Some(fetch) = fetch {
             *fetch.3 = fetch.2;
         }
+    }
+
+    type ParFetch<'table> = Option<(&'table mut [T], &'table mut [u32], u32)>;
+
+    fn par_fetch<'table>(
+        slot: Option<&'table mut ColumnSlot>,
+        current_tick: u32,
+    ) -> Self::ParFetch<'table> {
+        slot.map(|slot| <&mut T as QueryElement>::par_fetch(Some(slot), current_tick))
+    }
+
+    fn par_split<'table>(
+        fetch: Self::ParFetch<'table>,
+        mid: usize,
+    ) -> (Self::ParFetch<'table>, Self::ParFetch<'table>) {
+        match fetch {
+            Some(inner) => {
+                let (left, right) = <&mut T as QueryElement>::par_split(inner, mid);
+                (Some(left), Some(right))
+            }
+            None => (None, None),
+        }
+    }
+
+    fn par_item<'fetch>(fetch: &'fetch mut Self::ParFetch<'_>, index: usize) -> Self::Item<'fetch> {
+        fetch.as_mut().map(|inner| {
+            inner.1[index] = inner.2;
+            &mut inner.0[index]
+        })
     }
 }
 
@@ -4074,6 +4198,18 @@ pub trait QueryTuple: sealed::SealedQueryTuple {
     ) -> bool;
     fn item<'fetch>(fetch: &'fetch mut Self::Fetch<'_>, index: usize) -> Self::Item<'fetch>;
     fn stamp_peaks(fetch: &mut Self::Fetch<'_>);
+    type ParFetch<'table>: Send;
+    fn par_fetch<'table>(
+        table_mask: u64,
+        columns: &'table mut [ColumnSlot],
+        element_masks: &[u64; 8],
+        current_tick: u32,
+    ) -> Self::ParFetch<'table>;
+    fn par_split<'table>(
+        fetch: Self::ParFetch<'table>,
+        mid: usize,
+    ) -> (Self::ParFetch<'table>, Self::ParFetch<'table>);
+    fn par_item<'fetch>(fetch: &'fetch mut Self::ParFetch<'_>, index: usize) -> Self::Item<'fetch>;
 }
 
 /// The read-only half of [`QueryTuple`], tuples of `&T` and `Option<&T>`
@@ -4574,6 +4710,38 @@ macro_rules! impl_query_tuple {
             fn stamp_peaks(fetch: &mut Self::Fetch<'_>) {
                 $($element::stamp_peaks(&mut fetch.$position);)+
             }
+
+            type ParFetch<'table> = ($($element::ParFetch<'table>,)+);
+
+            #[allow(non_snake_case)]
+            fn par_fetch<'table>(
+                table_mask: u64,
+                columns: &'table mut [ColumnSlot],
+                element_masks: &[u64; 8],
+                current_tick: u32,
+            ) -> Self::ParFetch<'table> {
+                let positions = [$(
+                    if table_mask & element_masks[$position] != 0 {
+                        Some(column_position(table_mask, element_masks[$position]))
+                    } else {
+                        None
+                    },
+                )+];
+                let [$($element,)+] = distribute_slots(columns, positions);
+                ($($element::par_fetch($element, current_tick),)+)
+            }
+
+            fn par_split<'table>(
+                fetch: Self::ParFetch<'table>,
+                mid: usize,
+            ) -> (Self::ParFetch<'table>, Self::ParFetch<'table>) {
+                let pairs = ($($element::par_split(fetch.$position, mid),)+);
+                (($(pairs.$position.0,)+), ($(pairs.$position.1,)+))
+            }
+
+            fn par_item<'fetch>(fetch: &'fetch mut Self::ParFetch<'_>, index: usize) -> Self::Item<'fetch> {
+                ($($element::par_item(&mut fetch.$position, index),)+)
+            }
         }
     };
 }
@@ -4595,6 +4763,34 @@ impl_query_tuple!(
     (G, 6),
     (H, 7)
 );
+
+/// Splits one archetype's rows into halves down to a chunk size and runs the
+/// halves on the rayon pool, so a single large archetype uses every core. The
+/// `ParFetch` split hands each task a disjoint sub-slice of every column, so
+/// no `unsafe` and no aliasing. Peaks are stamped eagerly by `par_fetch`; only
+/// the unfiltered query path reaches here, where every row is visited.
+#[cfg(not(target_family = "wasm"))]
+fn par_query_rows<Q, F>(entities: &[Entity], fetch: Q::ParFetch<'_>, length: usize, f: &F)
+where
+    Q: QueryTuple,
+    F: for<'item> Fn(Entity, Q::Item<'item>) + Send + Sync,
+{
+    const PARALLEL_ROW_CHUNK: usize = 1024;
+    if length <= PARALLEL_ROW_CHUNK {
+        let mut fetch = fetch;
+        for (index, &entity) in entities.iter().enumerate() {
+            f(entity, Q::par_item(&mut fetch, index));
+        }
+    } else {
+        let middle = length / 2;
+        let (left_fetch, right_fetch) = Q::par_split(fetch, middle);
+        let (left_entities, right_entities) = entities.split_at(middle);
+        crate::rayon::join(
+            || par_query_rows::<Q, F>(left_entities, left_fetch, middle, f),
+            || par_query_rows::<Q, F>(right_entities, right_fetch, length - middle, f),
+        );
+    }
+}
 
 macro_rules! impl_bare_element_query {
     ($($element:ty),+) => {
@@ -4890,6 +5086,37 @@ macro_rules! impl_bare_element_query {
 
                 fn stamp_peaks(fetch: &mut Self::Fetch<'_>) {
                     <$element as QueryElement>::stamp_peaks(fetch);
+                }
+
+                type ParFetch<'table> = <$element as QueryElement>::ParFetch<'table>;
+
+                fn par_fetch<'table>(
+                    table_mask: u64,
+                    columns: &'table mut [ColumnSlot],
+                    element_masks: &[u64; 8],
+                    current_tick: u32,
+                ) -> Self::ParFetch<'table> {
+                    let position = if table_mask & element_masks[0] != 0 {
+                        Some(column_position(table_mask, element_masks[0]))
+                    } else {
+                        None
+                    };
+                    let [slot] = distribute_slots(columns, [position]);
+                    <$element as QueryElement>::par_fetch(slot, current_tick)
+                }
+
+                fn par_split<'table>(
+                    fetch: Self::ParFetch<'table>,
+                    mid: usize,
+                ) -> (Self::ParFetch<'table>, Self::ParFetch<'table>) {
+                    <$element as QueryElement>::par_split(fetch, mid)
+                }
+
+                fn par_item<'fetch>(
+                    fetch: &'fetch mut Self::ParFetch<'_>,
+                    index: usize,
+                ) -> Self::Item<'fetch> {
+                    <$element as QueryElement>::par_item(fetch, index)
                 }
             }
         )+
@@ -5520,9 +5747,9 @@ impl<'world, Q: QueryTuple> DynQuery<'world, Q> {
                     columns,
                     ..
                 } = table;
-                let mut fetch = Q::fetch(table_mask, columns, &element_masks, current_tick);
 
                 if has_row_filters {
+                    let mut fetch = Q::fetch(table_mask, columns, &element_masks, current_tick);
                     let mut visited = false;
                     for (index, &entity) in entity_indices.iter().enumerate() {
                         if (tag_include != 0 || tag_exclude != 0)
@@ -5554,12 +5781,9 @@ impl<'world, Q: QueryTuple> DynQuery<'world, Q> {
                         Q::stamp_peaks(&mut fetch);
                     }
                 } else {
-                    for (index, &entity) in entity_indices.iter().enumerate() {
-                        f(entity, Q::item(&mut fetch, index));
-                    }
-                    if !entity_indices.is_empty() {
-                        Q::stamp_peaks(&mut fetch);
-                    }
+                    let length = entity_indices.len();
+                    let fetch = Q::par_fetch(table_mask, columns, &element_masks, current_tick);
+                    par_query_rows::<Q, F>(entity_indices.as_slice(), fetch, length, &f);
                 }
             });
     }
@@ -7679,6 +7903,73 @@ mod tests {
                 positions += 1;
             });
         assert_eq!(positions, 500);
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    #[test]
+    fn test_par_for_each_covers_large_single_archetype() {
+        let mut world = DynWorld::new();
+        let count = 5000;
+        world.spawn_bundles(
+            (Position { x: 1.0, y: 0.0 }, Velocity { x: 2.0, y: 0.0 }),
+            count,
+        );
+
+        world.query::<(&mut Position, &Velocity)>().par_for_each(
+            |_entity, (position, velocity)| {
+                position.x += velocity.x;
+            },
+        );
+
+        let mut visited = 0;
+        let mut wrong = 0;
+        world.query::<&Position>().for_each(|_entity, position| {
+            visited += 1;
+            if (position.x - 3.0).abs() > 1e-3 {
+                wrong += 1;
+            }
+        });
+        assert_eq!(visited, count);
+        assert_eq!(wrong, 0);
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    #[test]
+    fn test_par_for_each_bare_and_optional_elements() {
+        let mut world = DynWorld::new();
+        world.spawn_bundles((Position { x: 5.0, y: 0.0 },), 3000);
+        world.spawn_bundles(
+            (Position { x: 5.0, y: 0.0 }, Velocity { x: 1.0, y: 0.0 }),
+            3000,
+        );
+
+        world
+            .query::<&mut Position>()
+            .par_for_each(|_entity, position| position.x *= 2.0);
+        world
+            .query::<(&mut Position, Option<&Velocity>)>()
+            .par_for_each(|_entity, (position, velocity)| {
+                if let Some(velocity) = velocity {
+                    position.x += velocity.x;
+                }
+            });
+
+        let mut without_velocity = 0;
+        let mut with_velocity = 0;
+        world.query::<(&Position, Option<&Velocity>)>().for_each(
+            |_entity, (position, velocity)| match velocity {
+                None => {
+                    assert!((position.x - 10.0).abs() < 1e-3);
+                    without_velocity += 1;
+                }
+                Some(_) => {
+                    assert!((position.x - 11.0).abs() < 1e-3);
+                    with_velocity += 1;
+                }
+            },
+        );
+        assert_eq!(without_velocity, 3000);
+        assert_eq!(with_velocity, 3000);
     }
 
     #[test]
