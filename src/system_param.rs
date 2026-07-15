@@ -62,8 +62,11 @@
 //! [`DynWorld`]. So an engine wrapper that implements `ResourceHost` can
 //! register `fn(Res<A>, ResMut<B>, &mut MyWorld)` on its own
 //! `Schedule<MyWorld>`, pulling resources out of the host's map while the
-//! `&mut MyWorld` stays free for the wrapper's own queries. [`Query`] and
-//! [`ParamSet`] parameters resolve against [`DynWorld`] specifically.
+//! `&mut MyWorld` stays free for the wrapper's own queries. [`Query`]
+//! parameters resolve against [`DynWorld`], and an unfiltered `Query<Q>` also
+//! resolves against a [`DynEcs`] group through
+//! `query_join`. [`ParamSet`], multiple query parameters, and type-level
+//! query filters are [`DynWorld`] only.
 //!
 //! ```rust
 //! use freecs::dynamic::DynWorld;
@@ -98,7 +101,9 @@
 
 use crate::Entity;
 use crate::Schedule;
-use crate::dynamic::{DynQuery, DynWorld, QueryTuple, ResourceHost, ResourceHostExt};
+use crate::dynamic::{
+    DynEcs, DynJoin, DynQuery, DynWorld, QueryTuple, ResourceHost, ResourceHostExt,
+};
 use std::cell::RefCell;
 use std::marker::PhantomData;
 
@@ -251,6 +256,7 @@ impl_query_filter_tuple!(A, B, C, D);
 enum QueryState<'world, Q: QueryTuple> {
     Eager(DynQuery<'world, Q>),
     Lazy(&'world RefCell<&'world mut DynWorld>),
+    Join(DynJoin<'world, Q>),
 }
 
 /// A query system parameter over tuple `Q` with type-level filter `F`. The
@@ -272,6 +278,7 @@ impl<'world, Q: QueryTuple, F: QueryFilter> Query<'world, Q, F> {
                 let world: &mut DynWorld = &mut guard;
                 F::apply(world.query::<Q>()).for_each(f);
             }
+            QueryState::Join(join) => join.for_each(f),
         }
     }
 
@@ -288,6 +295,7 @@ impl<'world, Q: QueryTuple, F: QueryFilter> Query<'world, Q, F> {
                 let world: &mut DynWorld = &mut guard;
                 F::apply(world.query::<Q>()).par_for_each(f);
             }
+            QueryState::Join(join) => join.par_for_each(f),
         }
     }
 }
@@ -307,6 +315,30 @@ impl<'a, Q: QueryTuple, F: QueryFilter> WorldParam for Query<'a, Q, F> {
     fn build(world: &mut DynWorld) -> Query<'_, Q, F> {
         Query {
             state: QueryState::Eager(world.query::<Q>()),
+            filter: PhantomData,
+        }
+    }
+}
+
+/// A query parameter resolved against a [`DynEcs`] group through
+/// [`query_join`](crate::dynamic::DynEcs::query_join), so a system over a
+/// `Schedule<DynEcs>` can take a `Query`. Group queries join across member
+/// worlds under the driver rule, and carry no type-level filter, so only the
+/// unfiltered [`Query<Q>`](Query) is an `EcsParam`. Filter a group query by
+/// taking the group as a `&mut DynEcs` host argument and calling
+/// `query_join` with its builder methods.
+pub trait EcsParam {
+    /// The parameter value handed to the system for a given borrow.
+    type Item<'ecs>;
+    /// Resolves the parameter against the group.
+    fn build_ecs(ecs: &mut DynEcs) -> Self::Item<'_>;
+}
+
+impl<'a, Q: QueryTuple> EcsParam for Query<'a, Q, ()> {
+    type Item<'ecs> = Query<'ecs, Q, ()>;
+    fn build_ecs(ecs: &mut DynEcs) -> Query<'_, Q, ()> {
+        Query {
+            state: QueryState::Join(ecs.query_join::<Q>()),
             filter: PhantomData,
         }
     }
@@ -617,6 +649,53 @@ impl_query_system!(R0 r0, R1 r1, R2 r2, R3 r3, R4 r4);
 impl_query_system!(R0 r0, R1 r1, R2 r2, R3 r3, R4 r4, R5 r5);
 impl_query_system!(R0 r0, R1 r1, R2 r2, R3 r3, R4 r4, R5 r5, R6 r6);
 
+impl<Func, Q> IntoSystem<DynEcs, QuerySystemMarker<(), Q>> for Func
+where
+    Q: EcsParam,
+    Func: FnMut(Q) + for<'ecs> FnMut(Q::Item<'ecs>) + Send + 'static,
+{
+    fn into_runner(mut self) -> impl FnMut(&mut DynEcs) + Send + 'static {
+        move |ecs: &mut DynEcs| {
+            let query = Q::build_ecs(ecs);
+            self(query);
+        }
+    }
+}
+
+macro_rules! impl_ecs_query_system {
+    ($($resource:ident $binding:ident),+) => {
+        impl<Func, $($resource,)+ Q>
+            IntoSystem<DynEcs, QuerySystemMarker<($($resource,)+), Q>> for Func
+        where
+            $($resource: ResourceParam,)+
+            Q: EcsParam,
+            Func: FnMut($($resource,)+ Q)
+                + for<'ecs> FnMut($($resource::Item<'ecs>,)+ Q::Item<'ecs>)
+                + Send
+                + 'static,
+        {
+            #[allow(non_snake_case)]
+            fn into_runner(mut self) -> impl FnMut(&mut DynEcs) + Send + 'static {
+                move |ecs: &mut DynEcs| {
+                    ecs.resources_scope::<($($resource::Resource,)+), _>(|ecs, bundle| {
+                        let ($($binding,)+) = bundle;
+                        let query = Q::build_ecs(ecs);
+                        self($($resource::build($binding),)+ query);
+                    });
+                }
+            }
+        }
+    };
+}
+
+impl_ecs_query_system!(R0 r0);
+impl_ecs_query_system!(R0 r0, R1 r1);
+impl_ecs_query_system!(R0 r0, R1 r1, R2 r2);
+impl_ecs_query_system!(R0 r0, R1 r1, R2 r2, R3 r3);
+impl_ecs_query_system!(R0 r0, R1 r1, R2 r2, R3 r3, R4 r4);
+impl_ecs_query_system!(R0 r0, R1 r1, R2 r2, R3 r3, R4 r4, R5 r5);
+impl_ecs_query_system!(R0 r0, R1 r1, R2 r2, R3 r3, R4 r4, R5 r5, R6 r6);
+
 /// The marker for a system with resource parameters and two or more
 /// world-borrowing query parameters resolved through a shared world cell.
 pub struct MultiQuerySystemMarker<R, Q>(PhantomData<fn() -> (R, Q)>);
@@ -686,7 +765,7 @@ impl_multi_query_resourced!((R0 r0, R1 r1, R2 r2), (Q0 q0, Q1 q1, Q2 q2));
 mod tests {
     use super::*;
     use crate::Schedule;
-    use crate::dynamic::{DynWorld, ResourceMap};
+    use crate::dynamic::{ComponentRegistry, DynEcs, DynWorld, ResourceMap};
 
     struct Engine {
         resources: ResourceMap,
@@ -1043,6 +1122,49 @@ mod tests {
         run(&mut world, count_positions);
 
         assert_eq!(world.resource::<Score>().unwrap().0, 2);
+    }
+
+    #[test]
+    fn query_param_runs_over_a_group() {
+        fn movement(query: Query<(&mut Position, &Velocity)>) {
+            query.for_each(|_entity, (position, velocity)| position.x += velocity.x);
+        }
+
+        let mut registry = ComponentRegistry::new();
+        registry.register::<Position>();
+        registry.register::<Velocity>();
+        let mut ecs = DynEcs::new();
+        ecs.add_world(registry);
+        let entity = ecs.spawn_with((Position { x: 1.0, y: 0.0 }, Velocity { x: 3.0, y: 0.0 }));
+
+        let mut schedule = Schedule::<DynEcs>::new();
+        schedule.add_system("movement", movement);
+        schedule.run(&mut ecs);
+
+        assert_eq!(ecs.get::<Position>(entity).unwrap().x, 4.0);
+    }
+
+    #[test]
+    fn resource_and_query_over_a_group() {
+        fn tick(mut score: ResMut<Score>, query: Query<(&mut Position, &Velocity)>) {
+            query.for_each(|_entity, (position, velocity)| position.x += velocity.x);
+            score.0 += 1;
+        }
+
+        let mut registry = ComponentRegistry::new();
+        registry.register::<Position>();
+        registry.register::<Velocity>();
+        let mut ecs = DynEcs::new();
+        ecs.add_world(registry);
+        ecs.insert_resource(Score(0));
+        let entity = ecs.spawn_with((Position { x: 0.0, y: 0.0 }, Velocity { x: 5.0, y: 0.0 }));
+
+        let mut schedule = Schedule::<DynEcs>::new();
+        schedule.add_system("tick", tick);
+        schedule.run(&mut ecs);
+
+        assert_eq!(ecs.resource::<Score>().unwrap().0, 1);
+        assert_eq!(ecs.get::<Position>(entity).unwrap().x, 5.0);
     }
 
     #[test]

@@ -1262,7 +1262,10 @@ any `ResourceHost`, not just `DynWorld`. An engine that wraps `DynWorld` or
 `fn(Res<Input>, ResMut<Settings>, &mut MyWorld)` on its own
 `Schedule<MyWorld>`, so resource parameters replace the `resource_scope`
 boilerplate while the `&mut MyWorld` stays free for the wrapper's own queries.
-`Query` and `ParamSet` parameters resolve against `DynWorld` specifically.
+A `Query` parameter resolves against `DynWorld`, and an unfiltered `Query<Q>`
+also resolves against a `DynEcs` group through `query_join`, so systems on a
+`Schedule<DynEcs>` can take one too. `ParamSet`, multiple query parameters,
+and type-level query filters are `DynWorld` only.
 
 #### Events
 
