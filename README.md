@@ -1192,6 +1192,55 @@ schedule.run(&mut world);
 world.step();
 ```
 
+For Bevy-style ergonomics, the `system_param` module turns a plain function
+whose arguments are `Res`, `ResMut`, and `Query` into a runnable system, so
+the take/put scope disappears from the call site. `add_system` on a
+`Schedule<DynWorld>` infers the shape from the signature.
+
+```rust
+use freecs::system_param::{Query, Res, ResMut, ScheduleExt};
+
+struct DeltaTime(f32);
+struct Score(u32);
+
+fn movement(dt: Res<DeltaTime>, mut score: ResMut<Score>, query: Query<(&mut Position, &Velocity)>) {
+    query.for_each(|_entity, (position, velocity)| {
+        position.x += velocity.x * dt.0;
+        position.y += velocity.y * dt.0;
+    });
+    score.0 += 1;
+}
+
+let mut world = DynWorld::new();
+world.insert_resource(DeltaTime(0.016));
+world.insert_resource(Score(0));
+
+let mut schedule = freecs::Schedule::new();
+schedule.add_system("movement", movement);
+schedule.run(&mut world);
+```
+
+Resource parameters resolve out of the world's `ResourceMap` through the same
+take/put `resources_scope` uses, so they never alias the query's table
+borrow. Type-level filters (`With`, `Without`, `Changed`, `Added`, and tuples
+of them) narrow a query as `Query<(&mut Position,), With<Player>>`. The one
+world-borrowing parameter, a `Query` or a `ParamSet`, comes last. Two
+simultaneous queries go through `ParamSet`, which lends one member at a time
+through `p0()` and `p1()`.
+
+```rust
+use freecs::system_param::{ParamSet, Query, ScheduleExt};
+
+fn resolve(mut set: ParamSet<(Query<&mut Position>, Query<&Velocity>)>) {
+    let mut sample = (0.0, 0.0);
+    set.p1().for_each(|_entity, velocity| sample = (velocity.x, velocity.y));
+    set.p0().for_each(|_entity, position| {
+        position.x += sample.0;
+        position.y += sample.1;
+    });
+}
+```
+
 #### Events
 
 Events buffer for two frames. The default consumption is `consume_events`
