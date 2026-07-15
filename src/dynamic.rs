@@ -1990,6 +1990,15 @@ impl DynWorld {
         self.resources.insert(value);
     }
 
+    /// Inserts several resources at once from a tuple, each replacing any
+    /// existing resource of its type. Equivalent to one
+    /// [`insert_resource`](Self::insert_resource) per element, so
+    /// `world.insert_resources((DeltaTime(0.016), Score(0)))` stands in for
+    /// two calls.
+    pub fn insert_resources<B: ResourceBundle>(&mut self, bundle: B) {
+        bundle.put(&mut self.resources);
+    }
+
     pub fn resource<T: Send + Sync + 'static>(&self) -> Option<&T> {
         self.resources.get::<T>()
     }
@@ -2655,6 +2664,13 @@ impl DynEcs {
     /// [`DynWorld::insert_resource`].
     pub fn insert_resource<T: Send + Sync + 'static>(&mut self, value: T) {
         self.resources.insert(value);
+    }
+
+    /// Inserts several group-level resources at once from a tuple, each
+    /// replacing any existing resource of its type. Equivalent to one
+    /// [`insert_resource`](Self::insert_resource) per element.
+    pub fn insert_resources<B: ResourceBundle>(&mut self, bundle: B) {
+        bundle.put(&mut self.resources);
     }
 
     pub fn resource<T: Send + Sync + 'static>(&self) -> Option<&T> {

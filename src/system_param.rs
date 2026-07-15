@@ -29,8 +29,7 @@
 //! }
 //!
 //! let mut world = DynWorld::new();
-//! world.insert_resource(DeltaTime(0.5));
-//! world.insert_resource(Score(0));
+//! world.insert_resources((DeltaTime(0.5), Score(0)));
 //! world.spawn((Position { x: 0.0, y: 0.0 }, Velocity { x: 2.0, y: 4.0 }));
 //!
 //! let mut schedule = Schedule::new();
@@ -398,12 +397,20 @@ pub trait IntoSystem<Marker>: Sized {
 /// per run.
 pub trait ScheduleExt {
     /// Adds a system-parameter function under `name`, like
-    /// [`Schedule::push`](crate::Schedule::push) for plain systems.
+    /// [`Schedule::push`](crate::Schedule::push) for plain systems. Returns
+    /// `&mut Self`, so calls chain in builder style.
     fn add_system<Marker>(
         &mut self,
         name: &'static str,
         system: impl IntoSystem<Marker>,
     ) -> &mut Self;
+
+    /// Adds a tuple of system-parameter functions in one call, each named
+    /// after its function type, so `schedule.add_systems((movement, score))`
+    /// stands in for one [`add_system`](Self::add_system) per system. Reach
+    /// for `add_system` when a system needs an explicit name for later
+    /// [`replace`](crate::Schedule::replace) or removal.
+    fn add_systems<Marker>(&mut self, systems: impl IntoSystems<Marker>) -> &mut Self;
 }
 
 impl ScheduleExt for Schedule<DynWorld> {
@@ -414,7 +421,78 @@ impl ScheduleExt for Schedule<DynWorld> {
     ) -> &mut Self {
         self.push(name, system.into_runner())
     }
+
+    fn add_systems<Marker>(&mut self, systems: impl IntoSystems<Marker>) -> &mut Self {
+        systems.register(self);
+        self
+    }
 }
+
+fn add_named_system<Marker>(schedule: &mut Schedule<DynWorld>, system: impl IntoSystem<Marker>) {
+    let base = std::any::type_name_of_val(&system);
+    let name = if schedule.contains(base) {
+        let mut suffix = 2;
+        loop {
+            let candidate = format!("{base}#{suffix}");
+            if !schedule.contains(&candidate) {
+                break Box::leak(candidate.into_boxed_str()) as &'static str;
+            }
+            suffix += 1;
+        }
+    } else {
+        base
+    };
+    schedule.push(name, system.into_runner());
+}
+
+/// A tuple of system-parameter functions registered together by
+/// [`ScheduleExt::add_systems`]. Implemented for tuples of up to eight
+/// systems, each of which is an [`IntoSystem`].
+pub trait IntoSystems<Marker> {
+    /// Registers each system in the tuple onto `schedule`.
+    fn register(self, schedule: &mut Schedule<DynWorld>);
+}
+
+macro_rules! impl_into_systems {
+    ($(($system:ident, $marker:ident)),+) => {
+        impl<$($system, $marker,)+> IntoSystems<($($marker,)+)> for ($($system,)+)
+        where
+            $($system: IntoSystem<$marker>,)+
+        {
+            #[allow(non_snake_case)]
+            fn register(self, schedule: &mut Schedule<DynWorld>) {
+                let ($($system,)+) = self;
+                $(add_named_system(schedule, $system);)+
+            }
+        }
+    };
+}
+
+impl_into_systems!((S0, M0));
+impl_into_systems!((S0, M0), (S1, M1));
+impl_into_systems!((S0, M0), (S1, M1), (S2, M2));
+impl_into_systems!((S0, M0), (S1, M1), (S2, M2), (S3, M3));
+impl_into_systems!((S0, M0), (S1, M1), (S2, M2), (S3, M3), (S4, M4));
+impl_into_systems!((S0, M0), (S1, M1), (S2, M2), (S3, M3), (S4, M4), (S5, M5));
+impl_into_systems!(
+    (S0, M0),
+    (S1, M1),
+    (S2, M2),
+    (S3, M3),
+    (S4, M4),
+    (S5, M5),
+    (S6, M6)
+);
+impl_into_systems!(
+    (S0, M0),
+    (S1, M1),
+    (S2, M2),
+    (S3, M3),
+    (S4, M4),
+    (S5, M5),
+    (S6, M6),
+    (S7, M7)
+);
 
 /// The marker for a system whose parameters are all resources.
 pub struct ResourceSystemMarker<R>(PhantomData<fn() -> R>);
@@ -824,6 +902,46 @@ mod tests {
         assert_eq!(world.resource::<Score>().unwrap().0, 2);
         let position = world.query_ref::<&Position>().single().unwrap().1.clone();
         assert_eq!(position, Position { x: 2.0, y: 0.0 });
+    }
+
+    #[test]
+    fn add_systems_registers_a_tuple() {
+        let mut world = DynWorld::new();
+        world.insert_resource(Score(0));
+        world.spawn((Position { x: 0.0, y: 0.0 }, Velocity { x: 1.0, y: 0.0 }));
+
+        fn movement(query: Query<(&mut Position, &Velocity)>) {
+            query.for_each(|_entity, (position, velocity)| position.x += velocity.x);
+        }
+        fn scoring(mut score: ResMut<Score>) {
+            score.0 += 1;
+        }
+
+        let mut schedule = Schedule::new();
+        schedule.add_systems((movement, scoring));
+        assert_eq!(schedule.len(), 2);
+        schedule.run(&mut world);
+
+        assert_eq!(world.resource::<Score>().unwrap().0, 1);
+        assert_eq!(world.query_ref::<&Position>().single().unwrap().1.x, 1.0);
+    }
+
+    #[test]
+    fn add_systems_dedups_repeated_registration() {
+        fn noop(_query: Query<&Position>) {}
+
+        let mut schedule = Schedule::<DynWorld>::new();
+        schedule.add_systems((noop,));
+        schedule.add_systems((noop,));
+        assert_eq!(schedule.len(), 2);
+    }
+
+    #[test]
+    fn insert_resources_batches_a_tuple() {
+        let mut world = DynWorld::new();
+        world.insert_resources((DeltaTime(0.5), Score(7)));
+        assert_eq!(world.resource::<DeltaTime>().unwrap().0, 0.5);
+        assert_eq!(world.resource::<Score>().unwrap().0, 7);
     }
 
     #[test]

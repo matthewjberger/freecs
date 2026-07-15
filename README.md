@@ -137,8 +137,9 @@ struct Player;
 struct DeltaTime(f32);
 struct Score(u32);
 
-// Typed queries take mutability from the tuple. Option elements match
-// entities with or without the component.
+// A system is a function. Resources come first (`Res` reads, `ResMut`
+// writes), then a `Query`. Queries take mutability from the tuple, and
+// `Option` elements match entities with or without the component.
 fn physics(dt: Res<DeltaTime>, mut score: ResMut<Score>, query: Query<(&mut Position, &Velocity, Option<&mut Health>)>) {
     query.for_each(|_entity, (position, velocity, health)| {
         position.x += velocity.x * dt.0;
@@ -152,8 +153,7 @@ fn physics(dt: Res<DeltaTime>, mut score: ResMut<Score>, query: Query<(&mut Posi
 
 fn main() {
     let mut world = DynWorld::new();
-    world.insert_resource(DeltaTime(0.016));
-    world.insert_resource(Score(0));
+    world.insert_resources((DeltaTime(0.016), Score(0)));
 
     let player = world.spawn((
         Position { x: 0.0, y: 0.0 },
@@ -162,8 +162,9 @@ fn main() {
     ));
     world.add_tag_type::<Player>(player);
 
+    // add_system names one system; add_systems registers a tuple at once.
     let mut schedule = Schedule::new();
-    schedule.add_system("physics", physics);
+    schedule.add_systems((physics,));
     schedule.run(&mut world);
 
     // Read-only queries on &world are real iterators.
@@ -1201,7 +1202,8 @@ world.step();
 To drop the take/put boilerplate, the `system_param` module turns a plain function
 whose arguments are `Res`, `ResMut`, and `Query` into a runnable system, so
 the take/put scope disappears from the call site. `add_system` on a
-`Schedule<DynWorld>` infers the shape from the signature.
+`Schedule<DynWorld>` names one system and infers its shape from the signature;
+`add_systems` registers a tuple at once, naming each after its function type.
 
 ```rust
 use freecs::system_param::{Query, Res, ResMut, ScheduleExt};
@@ -1218,11 +1220,10 @@ fn movement(dt: Res<DeltaTime>, mut score: ResMut<Score>, query: Query<(&mut Pos
 }
 
 let mut world = DynWorld::new();
-world.insert_resource(DeltaTime(0.016));
-world.insert_resource(Score(0));
+world.insert_resources((DeltaTime(0.016), Score(0)));
 
 let mut schedule = freecs::Schedule::new();
-schedule.add_system("movement", movement);
+schedule.add_systems((movement,));
 schedule.run(&mut world);
 ```
 
