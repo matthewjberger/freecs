@@ -1,4 +1,4 @@
-//! Bevy-style system parameters over [`DynWorld`]: functions whose
+//! System-parameter functions over [`DynWorld`]: functions whose
 //! arguments are [`Res`], [`ResMut`], and [`Query`] resolve into runnable
 //! systems the existing [`Schedule`] accepts, with no
 //! `unsafe` and no new executor.

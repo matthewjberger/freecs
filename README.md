@@ -94,7 +94,7 @@ freecs = "3"
 
 freecs has two entry points over the same archetype storage. Reach for the
 dynamic world by default. Typed tuple queries with change and added filters,
-Bevy-style `Res`/`ResMut`/`Query` system functions, cross-world joins,
+ergonomic `Res`/`ResMut`/`Query` system functions, cross-world joins,
 prepared queries, hierarchies, exactly-once events, snapshots and deltas, and
 the whole grouped multi-world substrate live there, its typed queries compile
 to the same slice loops the macro emits, and new surface lands on the dynamic
@@ -1198,7 +1198,7 @@ schedule.run(&mut world);
 world.step();
 ```
 
-For Bevy-style ergonomics, the `system_param` module turns a plain function
+To drop the take/put boilerplate, the `system_param` module turns a plain function
 whose arguments are `Res`, `ResMut`, and `Query` into a runnable system, so
 the take/put scope disappears from the call site. `add_system` on a
 `Schedule<DynWorld>` infers the shape from the signature.
