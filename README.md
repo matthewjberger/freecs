@@ -138,16 +138,17 @@ struct DeltaTime(f32);
 struct Score(u32);
 
 // A system is a function. Resources come first (`Res` reads, `ResMut`
-// writes), then a `Query`. Queries take mutability from the tuple, and
-// `Option` elements match entities with or without the component.
-fn physics(dt: Res<DeltaTime>, mut score: ResMut<Score>, query: Query<(&mut Position, &Velocity, Option<&mut Health>)>) {
-    query.for_each(|_entity, (position, velocity, health)| {
+// writes), then a `Query` that takes its mutability from the tuple.
+fn movement(dt: Res<DeltaTime>, query: Query<(&mut Position, &Velocity)>) {
+    query.for_each(|_entity, (position, velocity)| {
         position.x += velocity.x * dt.0;
         position.y += velocity.y * dt.0;
-        if let Some(health) = health {
-            health.value *= 0.98;
-        }
     });
+}
+
+// A single-component query skips the tuple, and its closure the nesting.
+fn decay(mut score: ResMut<Score>, query: Query<&mut Health>) {
+    query.for_each(|_entity, health| health.value *= 0.98);
     score.0 += 1;
 }
 
@@ -162,17 +163,18 @@ fn main() {
     ));
     world.add_tag_type::<Player>(player);
 
-    // add_system names one system; add_systems registers a tuple at once.
+    // One tuple registers every system; each is named after its function.
     let mut schedule = Schedule::new();
-    schedule.add_systems((physics,));
+    schedule.add_systems((movement, decay));
     schedule.run(&mut world);
 
-    // Read-only queries on &world are real iterators.
+    // Read-only queries on &world are real iterators. A single element can
+    // skip the tuple, so `&Position` yields `(entity, &Position)` directly.
     let player_positions: Vec<_> = world
-        .query_ref::<(&Position,)>()
+        .query_ref::<&Position>()
         .with_tag_type::<Player>()
         .iter()
-        .map(|(entity, (position,))| (entity, position.x, position.y))
+        .map(|(entity, position)| (entity, position.x, position.y))
         .collect();
     println!("{player_positions:?}");
 

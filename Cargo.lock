@@ -293,7 +293,7 @@ dependencies = [
 
 [[package]]
 name = "freecs"
-version = "3.21.1"
+version = "3.22.1"
 dependencies = [
  "criterion",
  "macroquad",
