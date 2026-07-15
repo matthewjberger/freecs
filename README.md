@@ -1137,8 +1137,10 @@ Hot systems freeze a configured query into a `PreparedQuery` with
 (`PreparedQueryRef`) does the same for iterators. Prepared masks are plain
 copyable data.
 
-Heavy passes go parallel with `par_for_each`, table-granular like the
-keyed tier's `par_for_each_mut`, with the same filters and stamping:
+Heavy passes go parallel with `par_for_each`. Matching archetypes run
+concurrently, and an unfiltered query also splits the rows within each
+archetype across the pool, so one large archetype uses every core.
+Filtered queries stay archetype-granular. Same filters and stamping:
 
 ```rust
 world

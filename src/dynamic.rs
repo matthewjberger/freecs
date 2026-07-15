@@ -5724,9 +5724,10 @@ impl<'world, Q: QueryTuple> DynQuery<'world, Q> {
         }
     }
 
-    /// The parallel form of [`for_each`](Self::for_each): matching tables
-    /// run concurrently while rows within a table stay sequential, so
-    /// parallelism is table-granular like [`DynWorld::par_for_each_mut`].
+    /// The parallel form of [`for_each`](Self::for_each): matching tables run
+    /// concurrently, and an unfiltered query also splits the rows within each
+    /// table across the pool, so one large archetype still uses every core.
+    /// Filtered (tag/changed/added) queries stay table-granular.
     /// Same filter set and stamping semantics; the closure is `Fn` because
     /// tables run on worker threads, and the `added` filter builds one
     /// scratch buffer per table task.
