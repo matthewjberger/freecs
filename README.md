@@ -1256,6 +1256,14 @@ fn resolve(positions: Query<&mut Position>, velocities: Query<&Velocity>) {
 `ParamSet<(Query<…>, Query<…>)>` is the alternative when you would rather name
 a grouped set and reach its members through `p0()` and `p1()`.
 
+Resource-only systems and systems ending in a `&mut W` host argument run over
+any `ResourceHost`, not just `DynWorld`. An engine that wraps `DynWorld` or
+`DynEcs` in its own world type and implements `ResourceHost` can register
+`fn(Res<Input>, ResMut<Settings>, &mut MyWorld)` on its own
+`Schedule<MyWorld>`, so resource parameters replace the `resource_scope`
+boilerplate while the `&mut MyWorld` stays free for the wrapper's own queries.
+`Query` and `ParamSet` parameters resolve against `DynWorld` specifically.
+
 #### Events
 
 Events buffer for two frames. The default consumption is `consume_events`

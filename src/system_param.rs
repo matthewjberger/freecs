@@ -57,6 +57,14 @@
 //! [`ParamSet`] groups queries behind `p0()`/`p1()` accessors when you would
 //! rather name a set than list the queries.
 //!
+//! Resource-only systems, and systems that end in a `&mut W` host argument,
+//! run over any [`ResourceHost`], not just
+//! [`DynWorld`]. So an engine wrapper that implements `ResourceHost` can
+//! register `fn(Res<A>, ResMut<B>, &mut MyWorld)` on its own
+//! `Schedule<MyWorld>`, pulling resources out of the host's map while the
+//! `&mut MyWorld` stays free for the wrapper's own queries. [`Query`] and
+//! [`ParamSet`] parameters resolve against [`DynWorld`] specifically.
+//!
 //! ```rust
 //! use freecs::dynamic::DynWorld;
 //! use freecs::system_param::{Query, ScheduleExt};
@@ -90,7 +98,7 @@
 
 use crate::Entity;
 use crate::Schedule;
-use crate::dynamic::{DynQuery, DynWorld, QueryTuple};
+use crate::dynamic::{DynQuery, DynWorld, QueryTuple, ResourceHost, ResourceHostExt};
 use std::cell::RefCell;
 use std::marker::PhantomData;
 
@@ -383,26 +391,28 @@ impl<'world, P0: WorldParam, P1: WorldParam, P2: WorldParam> ParamSet<'world, (P
 }
 
 /// Converts a system-parameter function into a runner the
-/// [`Schedule`] accepts. `Marker` is inferred from the
-/// function's parameter types, so a plain `fn(Res<A>, ResMut<B>, Query<C>)`
-/// registers directly. Register through [`ScheduleExt::add_system`].
-pub trait IntoSystem<Marker>: Sized {
+/// [`Schedule`] accepts, over a world type `W`. `Marker` is inferred from
+/// the function's parameter types. Resource-only systems (`fn(Res<A>,
+/// ResMut<B>)`) and systems that take the host as a final `&mut W` argument
+/// work over any [`ResourceHost`]; systems with [`Query`]/[`ParamSet`]
+/// parameters resolve against [`DynWorld`] specifically. Register through
+/// [`ScheduleExt::add_system`].
+pub trait IntoSystem<W, Marker>: Sized {
     /// Wraps the function into a closure that resolves its parameters from
     /// the world on each call.
-    fn into_runner(self) -> impl FnMut(&mut DynWorld) + Send + 'static;
+    fn into_runner(self) -> impl FnMut(&mut W) + Send + 'static;
 }
 
-/// Registers system-parameter functions on a [`Schedule`]
-/// over a [`DynWorld`], resolving [`Res`]/[`ResMut`]/[`Query`] parameters
-/// per run.
-pub trait ScheduleExt {
+/// Registers system-parameter functions on a [`Schedule<W>`](crate::Schedule),
+/// resolving [`Res`]/[`ResMut`]/[`Query`] parameters per run.
+pub trait ScheduleExt<W> {
     /// Adds a system-parameter function under `name`, like
     /// [`Schedule::push`](crate::Schedule::push) for plain systems. Returns
     /// `&mut Self`, so calls chain in builder style.
     fn add_system<Marker>(
         &mut self,
         name: &'static str,
-        system: impl IntoSystem<Marker>,
+        system: impl IntoSystem<W, Marker>,
     ) -> &mut Self;
 
     /// Adds a tuple of system-parameter functions in one call, each named
@@ -410,25 +420,25 @@ pub trait ScheduleExt {
     /// stands in for one [`add_system`](Self::add_system) per system. Reach
     /// for `add_system` when a system needs an explicit name for later
     /// [`replace`](crate::Schedule::replace) or removal.
-    fn add_systems<Marker>(&mut self, systems: impl IntoSystems<Marker>) -> &mut Self;
+    fn add_systems<Marker>(&mut self, systems: impl IntoSystems<W, Marker>) -> &mut Self;
 }
 
-impl ScheduleExt for Schedule<DynWorld> {
+impl<W> ScheduleExt<W> for Schedule<W> {
     fn add_system<Marker>(
         &mut self,
         name: &'static str,
-        system: impl IntoSystem<Marker>,
+        system: impl IntoSystem<W, Marker>,
     ) -> &mut Self {
         self.push(name, system.into_runner())
     }
 
-    fn add_systems<Marker>(&mut self, systems: impl IntoSystems<Marker>) -> &mut Self {
+    fn add_systems<Marker>(&mut self, systems: impl IntoSystems<W, Marker>) -> &mut Self {
         systems.register(self);
         self
     }
 }
 
-fn add_named_system<Marker>(schedule: &mut Schedule<DynWorld>, system: impl IntoSystem<Marker>) {
+fn add_named_system<W, Marker>(schedule: &mut Schedule<W>, system: impl IntoSystem<W, Marker>) {
     let base = std::any::type_name_of_val(&system);
     let name = if schedule.contains(base) {
         let mut suffix = 2;
@@ -448,19 +458,19 @@ fn add_named_system<Marker>(schedule: &mut Schedule<DynWorld>, system: impl Into
 /// A tuple of system-parameter functions registered together by
 /// [`ScheduleExt::add_systems`]. Implemented for tuples of up to eight
 /// systems, each of which is an [`IntoSystem`].
-pub trait IntoSystems<Marker> {
+pub trait IntoSystems<W, Marker> {
     /// Registers each system in the tuple onto `schedule`.
-    fn register(self, schedule: &mut Schedule<DynWorld>);
+    fn register(self, schedule: &mut Schedule<W>);
 }
 
 macro_rules! impl_into_systems {
     ($(($system:ident, $marker:ident)),+) => {
-        impl<$($system, $marker,)+> IntoSystems<($($marker,)+)> for ($($system,)+)
+        impl<W, $($system, $marker,)+> IntoSystems<W, ($($marker,)+)> for ($($system,)+)
         where
-            $($system: IntoSystem<$marker>,)+
+            $($system: IntoSystem<W, $marker>,)+
         {
             #[allow(non_snake_case)]
-            fn register(self, schedule: &mut Schedule<DynWorld>) {
+            fn register(self, schedule: &mut Schedule<W>) {
                 let ($($system,)+) = self;
                 $(add_named_system(schedule, $system);)+
             }
@@ -501,7 +511,7 @@ pub struct ResourceSystemMarker<R>(PhantomData<fn() -> R>);
 /// world-borrowing parameter.
 pub struct QuerySystemMarker<R, Q>(PhantomData<fn() -> (R, Q)>);
 
-impl<Func, Q> IntoSystem<QuerySystemMarker<(), Q>> for Func
+impl<Func, Q> IntoSystem<DynWorld, QuerySystemMarker<(), Q>> for Func
 where
     Q: WorldParam,
     Func: FnMut(Q) + for<'world> FnMut(Q::Item<'world>) + Send + 'static,
@@ -514,11 +524,16 @@ where
     }
 }
 
+/// The marker for a system whose parameters are all resources followed by a
+/// final `&mut W` host argument.
+pub struct HostSystemMarker<R>(PhantomData<fn() -> R>);
+
 macro_rules! impl_resource_system {
     ($($resource:ident $binding:ident),+) => {
-        impl<Func, $($resource,)+> IntoSystem<ResourceSystemMarker<($($resource,)+)>>
+        impl<W, Func, $($resource,)+> IntoSystem<W, ResourceSystemMarker<($($resource,)+)>>
             for Func
         where
+            W: ResourceHost + 'static,
             $($resource: ResourceParam,)+
             Func: FnMut($($resource,)+)
                 + for<'world> FnMut($($resource::Item<'world>,)+)
@@ -526,11 +541,32 @@ macro_rules! impl_resource_system {
                 + 'static,
         {
             #[allow(non_snake_case)]
-            fn into_runner(mut self) -> impl FnMut(&mut DynWorld) + Send + 'static {
-                move |world: &mut DynWorld| {
+            fn into_runner(mut self) -> impl FnMut(&mut W) + Send + 'static {
+                move |world: &mut W| {
                     world.resources_scope::<($($resource::Resource,)+), _>(|_world, bundle| {
                         let ($($binding,)+) = bundle;
                         self($($resource::build($binding),)+);
+                    });
+                }
+            }
+        }
+
+        impl<W, Func, $($resource,)+> IntoSystem<W, HostSystemMarker<($($resource,)+)>>
+            for Func
+        where
+            W: ResourceHost + 'static,
+            $($resource: ResourceParam,)+
+            Func: FnMut($($resource,)+ &mut W)
+                + for<'world> FnMut($($resource::Item<'world>,)+ &'world mut W)
+                + Send
+                + 'static,
+        {
+            #[allow(non_snake_case)]
+            fn into_runner(mut self) -> impl FnMut(&mut W) + Send + 'static {
+                move |world: &mut W| {
+                    world.resources_scope::<($($resource::Resource,)+), _>(|world, bundle| {
+                        let ($($binding,)+) = bundle;
+                        self($($resource::build($binding),)+ world);
                     });
                 }
             }
@@ -541,7 +577,7 @@ macro_rules! impl_resource_system {
 macro_rules! impl_query_system {
     ($($resource:ident $binding:ident),+) => {
         impl<Func, $($resource,)+ Q>
-            IntoSystem<QuerySystemMarker<($($resource,)+), Q>> for Func
+            IntoSystem<DynWorld, QuerySystemMarker<($($resource,)+), Q>> for Func
         where
             $($resource: ResourceParam,)+
             Q: WorldParam,
@@ -587,7 +623,8 @@ pub struct MultiQuerySystemMarker<R, Q>(PhantomData<fn() -> (R, Q)>);
 
 macro_rules! impl_multi_query_bare {
     ($($query:ident $qbind:ident),+) => {
-        impl<Func, $($query,)+> IntoSystem<MultiQuerySystemMarker<(), ($($query,)+)>> for Func
+        impl<Func, $($query,)+>
+            IntoSystem<DynWorld, MultiQuerySystemMarker<(), ($($query,)+)>> for Func
         where
             $($query: MultiQueryParam,)+
             Func: FnMut($($query,)+)
@@ -610,7 +647,7 @@ macro_rules! impl_multi_query_bare {
 macro_rules! impl_multi_query_resourced {
     (($($resource:ident $rbind:ident),+), ($($query:ident $qbind:ident),+)) => {
         impl<Func, $($resource,)+ $($query,)+>
-            IntoSystem<MultiQuerySystemMarker<($($resource,)+), ($($query,)+)>> for Func
+            IntoSystem<DynWorld, MultiQuerySystemMarker<($($resource,)+), ($($query,)+)>> for Func
         where
             $($resource: ResourceParam,)+
             $($query: MultiQueryParam,)+
@@ -649,7 +686,18 @@ impl_multi_query_resourced!((R0 r0, R1 r1, R2 r2), (Q0 q0, Q1 q1, Q2 q2));
 mod tests {
     use super::*;
     use crate::Schedule;
-    use crate::dynamic::DynWorld;
+    use crate::dynamic::{DynWorld, ResourceMap};
+
+    struct Engine {
+        resources: ResourceMap,
+        frames: u32,
+    }
+
+    impl ResourceHost for Engine {
+        fn resource_map_mut(&mut self) -> &mut ResourceMap {
+            &mut self.resources
+        }
+    }
 
     #[derive(Default, Clone, Debug, PartialEq)]
     struct Position {
@@ -672,7 +720,7 @@ mod tests {
     struct Score(u32);
     struct Frozen;
 
-    fn run<Marker>(world: &mut DynWorld, system: impl IntoSystem<Marker>) {
+    fn run<Marker>(world: &mut DynWorld, system: impl IntoSystem<DynWorld, Marker>) {
         let mut runner = system.into_runner();
         runner(world);
     }
@@ -942,6 +990,59 @@ mod tests {
         world.insert_resources((DeltaTime(0.5), Score(7)));
         assert_eq!(world.resource::<DeltaTime>().unwrap().0, 0.5);
         assert_eq!(world.resource::<Score>().unwrap().0, 7);
+    }
+
+    #[test]
+    fn resource_system_runs_on_custom_host() {
+        let mut engine = Engine {
+            resources: ResourceMap::default(),
+            frames: 0,
+        };
+        engine.resources.insert(Score(0));
+
+        let mut schedule = Schedule::<Engine>::new();
+        schedule.add_system("bump", |mut score: ResMut<Score>| score.0 += 3);
+        schedule.run(&mut engine);
+
+        assert_eq!(engine.resources.get::<Score>().unwrap().0, 3);
+    }
+
+    #[test]
+    fn host_system_gets_resources_and_the_host() {
+        fn tick(mut score: ResMut<Score>, engine: &mut Engine) {
+            score.0 += 1;
+            engine.frames += 1;
+        }
+
+        let mut engine = Engine {
+            resources: ResourceMap::default(),
+            frames: 0,
+        };
+        engine.resources.insert(Score(10));
+
+        let mut schedule = Schedule::<Engine>::new();
+        schedule.add_system("tick", tick);
+        schedule.run(&mut engine);
+        schedule.run(&mut engine);
+
+        assert_eq!(engine.resources.get::<Score>().unwrap().0, 12);
+        assert_eq!(engine.frames, 2);
+    }
+
+    #[test]
+    fn host_system_on_dynworld_can_query() {
+        fn count_positions(mut score: ResMut<Score>, world: &mut DynWorld) {
+            score.0 += world.query_ref::<&Position>().iter().count() as u32;
+        }
+
+        let mut world = DynWorld::new();
+        world.insert_resource(Score(0));
+        world.spawn((Position { x: 0.0, y: 0.0 },));
+        world.spawn((Position { x: 1.0, y: 1.0 },));
+
+        run(&mut world, count_positions);
+
+        assert_eq!(world.resource::<Score>().unwrap().0, 2);
     }
 
     #[test]
