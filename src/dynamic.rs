@@ -3740,6 +3740,9 @@ pub trait QueryElement: sealed::SealedElement {
     fn par_item<'fetch>(fetch: &'fetch mut Self::ParFetch<'_>, index: usize) -> Self::Item<'fetch>;
     fn mark_changed_all(fetch: &mut Self::Fetch<'_>);
     fn item_marked<'fetch>(fetch: &'fetch mut Self::Fetch<'_>, index: usize) -> Self::Item<'fetch>;
+    fn slice_iter<'fetch>(
+        fetch: Self::ParFetch<'fetch>,
+    ) -> impl Iterator<Item = Self::Item<'fetch>> + 'fetch;
 }
 
 impl<T: Send + Sync + Default + 'static> sealed::SealedElement for &T {}
@@ -3813,6 +3816,12 @@ impl<T: Send + Sync + Default + 'static> QueryElement for &T {
 
     fn item_marked<'fetch>(fetch: &'fetch mut Self::Fetch<'_>, index: usize) -> Self::Item<'fetch> {
         &fetch.0[index]
+    }
+
+    fn slice_iter<'fetch>(
+        fetch: Self::ParFetch<'fetch>,
+    ) -> impl Iterator<Item = Self::Item<'fetch>> + 'fetch {
+        IntoIterator::into_iter(fetch.0)
     }
 }
 
@@ -3911,6 +3920,14 @@ impl<T: Send + Sync + Default + 'static> QueryElement for &mut T {
     fn item_marked<'fetch>(fetch: &'fetch mut Self::Fetch<'_>, index: usize) -> Self::Item<'fetch> {
         &mut fetch.0[index]
     }
+
+    fn slice_iter<'fetch>(
+        fetch: Self::ParFetch<'fetch>,
+    ) -> impl Iterator<Item = Self::Item<'fetch>> + 'fetch {
+        let (data, changed, tick) = fetch;
+        changed.fill(tick);
+        IntoIterator::into_iter(data)
+    }
 }
 
 impl<T: Send + Sync + Default + 'static> sealed::SealedElement for Option<&T> {}
@@ -3982,6 +3999,14 @@ impl<T: Send + Sync + Default + 'static> QueryElement for Option<&T> {
 
     fn item_marked<'fetch>(fetch: &'fetch mut Self::Fetch<'_>, index: usize) -> Self::Item<'fetch> {
         fetch.as_ref().map(|inner| &inner.0[index])
+    }
+
+    fn slice_iter<'fetch>(
+        _fetch: Self::ParFetch<'fetch>,
+    ) -> impl Iterator<Item = Self::Item<'fetch>> + 'fetch {
+        std::iter::from_fn(|| {
+            unreachable!("optional query elements never use the all-required fast path")
+        })
     }
 }
 
@@ -4071,6 +4096,14 @@ impl<T: Send + Sync + Default + 'static> QueryElement for Option<&mut T> {
 
     fn item_marked<'fetch>(fetch: &'fetch mut Self::Fetch<'_>, index: usize) -> Self::Item<'fetch> {
         fetch.as_mut().map(|inner| &mut inner.0[index])
+    }
+
+    fn slice_iter<'fetch>(
+        _fetch: Self::ParFetch<'fetch>,
+    ) -> impl Iterator<Item = Self::Item<'fetch>> + 'fetch {
+        std::iter::from_fn(|| {
+            unreachable!("optional query elements never use the all-required fast path")
+        })
     }
 }
 
@@ -4244,6 +4277,10 @@ pub trait QueryTuple: sealed::SealedQueryTuple {
     fn par_item<'fetch>(fetch: &'fetch mut Self::ParFetch<'_>, index: usize) -> Self::Item<'fetch>;
     fn mark_changed_all(fetch: &mut Self::Fetch<'_>);
     fn item_marked<'fetch>(fetch: &'fetch mut Self::Fetch<'_>, index: usize) -> Self::Item<'fetch>;
+    const ALL_REQUIRED: bool;
+    fn fast_for_each<FN>(fetch: Self::ParFetch<'_>, entities: &[Entity], f: &mut FN)
+    where
+        FN: for<'item> FnMut(Entity, Self::Item<'item>);
 }
 
 /// The read-only half of [`QueryTuple`], tuples of `&T` and `Option<&T>`
@@ -4784,6 +4821,19 @@ macro_rules! impl_query_tuple {
             fn item_marked<'fetch>(fetch: &'fetch mut Self::Fetch<'_>, index: usize) -> Self::Item<'fetch> {
                 ($($element::item_marked(&mut fetch.$position, index),)+)
             }
+
+            const ALL_REQUIRED: bool = true $(&& $element::REQUIRED)+;
+
+            #[allow(non_snake_case)]
+            fn fast_for_each<FN>(fetch: Self::ParFetch<'_>, entities: &[Entity], f: &mut FN)
+            where
+                FN: for<'item> FnMut(Entity, Self::Item<'item>),
+            {
+                let mut iterators = ($($element::slice_iter(fetch.$position),)+);
+                for &entity in entities {
+                    f(entity, ($(iterators.$position.next().unwrap(),)+));
+                }
+            }
         }
     };
 }
@@ -4812,12 +4862,13 @@ impl_query_tuple!(
 /// no `unsafe` and no aliasing. Peaks are stamped eagerly by `par_fetch`; only
 /// the unfiltered query path reaches here, where every row is visited.
 #[cfg(not(target_family = "wasm"))]
-fn par_query_rows<Q, F>(entities: &[Entity], fetch: Q::ParFetch<'_>, length: usize, f: &F)
+fn par_query_rows<Q, F>(entities: &[Entity], fetch: Q::ParFetch<'_>, f: &F)
 where
     Q: QueryTuple,
     F: for<'item> Fn(Entity, Q::Item<'item>) + Send + Sync,
 {
     const PARALLEL_ROW_CHUNK: usize = 1024;
+    let length = entities.len();
     if length <= PARALLEL_ROW_CHUNK {
         let mut fetch = fetch;
         for (index, &entity) in entities.iter().enumerate() {
@@ -4828,8 +4879,8 @@ where
         let (left_fetch, right_fetch) = Q::par_split(fetch, middle);
         let (left_entities, right_entities) = entities.split_at(middle);
         crate::rayon::join(
-            || par_query_rows::<Q, F>(left_entities, left_fetch, middle, f),
-            || par_query_rows::<Q, F>(right_entities, right_fetch, length - middle, f),
+            || par_query_rows::<Q, F>(left_entities, left_fetch, f),
+            || par_query_rows::<Q, F>(right_entities, right_fetch, f),
         );
     }
 }
@@ -5170,6 +5221,18 @@ macro_rules! impl_bare_element_query {
                     index: usize,
                 ) -> Self::Item<'fetch> {
                     <$element as QueryElement>::item_marked(fetch, index)
+                }
+
+                const ALL_REQUIRED: bool = <$element as QueryElement>::REQUIRED;
+
+                fn fast_for_each<FN>(fetch: Self::ParFetch<'_>, entities: &[Entity], f: &mut FN)
+                where
+                    FN: for<'item> FnMut(Entity, Self::Item<'item>),
+                {
+                    let mut iterator = <$element as QueryElement>::slice_iter(fetch);
+                    for &entity in entities {
+                        f(entity, iterator.next().unwrap());
+                    }
                 }
             }
         )+
@@ -5679,9 +5742,10 @@ impl<'world, Q: QueryTuple> DynQuery<'world, Q> {
 
             let table_mask = table.mask;
             let entity_indices = &table.entity_indices;
-            let mut fetch = Q::fetch(table_mask, &mut table.columns, &element_masks, current_tick);
 
             if has_row_filters {
+                let mut fetch =
+                    Q::fetch(table_mask, &mut table.columns, &element_masks, current_tick);
                 let mut visited = false;
                 for (index, &entity) in entity_indices.iter().enumerate() {
                     if (tag_include != 0 || tag_exclude != 0)
@@ -5712,7 +5776,13 @@ impl<'world, Q: QueryTuple> DynQuery<'world, Q> {
                 if visited {
                     Q::stamp_peaks(&mut fetch);
                 }
+            } else if Q::ALL_REQUIRED && !entity_indices.is_empty() {
+                let slice_fetch =
+                    Q::par_fetch(table_mask, &mut table.columns, &element_masks, current_tick);
+                Q::fast_for_each(slice_fetch, entity_indices.as_slice(), &mut f);
             } else {
+                let mut fetch =
+                    Q::fetch(table_mask, &mut table.columns, &element_masks, current_tick);
                 Q::mark_changed_all(&mut fetch);
                 for (index, &entity) in entity_indices.iter().enumerate() {
                     f(entity, Q::item_marked(&mut fetch, index));
@@ -5836,9 +5906,8 @@ impl<'world, Q: QueryTuple> DynQuery<'world, Q> {
                         Q::stamp_peaks(&mut fetch);
                     }
                 } else {
-                    let length = entity_indices.len();
                     let fetch = Q::par_fetch(table_mask, columns, &element_masks, current_tick);
-                    par_query_rows::<Q, F>(entity_indices.as_slice(), fetch, length, &f);
+                    par_query_rows::<Q, F>(entity_indices.as_slice(), fetch, &f);
                 }
             });
     }
@@ -7979,6 +8048,43 @@ mod tests {
             .changed::<Position>()
             .for_each(|_entity, _position| changed += 1);
         assert_eq!(changed, 200);
+    }
+
+    #[test]
+    fn test_all_required_fast_iteration_visits_every_row() {
+        let mut world = DynWorld::new();
+        world.spawn_bundles(
+            (Position { x: 1.0, y: 0.0 }, Velocity { x: 2.0, y: 0.0 }),
+            1500,
+        );
+        world.spawn_bundles((Position { x: 5.0, y: 0.0 },), 700);
+
+        world
+            .query::<(&mut Position, &Velocity)>()
+            .for_each(|_entity, (position, velocity)| position.x += velocity.x);
+        world
+            .query::<&mut Position>()
+            .for_each(|_entity, position| position.y += 1.0);
+
+        let mut moved = 0;
+        let mut still = 0;
+        world.query::<(&Position, Option<&Velocity>)>().for_each(
+            |_entity, (position, velocity)| {
+                assert!((position.y - 1.0).abs() < 1e-3);
+                match velocity {
+                    Some(_) => {
+                        assert!((position.x - 3.0).abs() < 1e-3);
+                        moved += 1;
+                    }
+                    None => {
+                        assert!((position.x - 5.0).abs() < 1e-3);
+                        still += 1;
+                    }
+                }
+            },
+        );
+        assert_eq!(moved, 1500);
+        assert_eq!(still, 700);
     }
 
     #[cfg(not(target_family = "wasm"))]
