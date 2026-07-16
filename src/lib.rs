@@ -6231,10 +6231,18 @@ mod tests {
         assert_eq!(channel.read_frame(), &[1, 2], "a broadcast read repeats");
         channel.update();
 
-        assert_eq!(channel.read_frame(), &[3], "frame one expired, frame two settled");
+        assert_eq!(
+            channel.read_frame(),
+            &[3],
+            "frame one expired, frame two settled"
+        );
         channel.update();
 
-        assert_eq!(channel.read_frame(), &[] as &[u32], "an empty frame settles empty");
+        assert_eq!(
+            channel.read_frame(),
+            &[] as &[u32],
+            "an empty frame settles empty"
+        );
     }
 
     #[test]
