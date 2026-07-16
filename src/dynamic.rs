@@ -1138,6 +1138,15 @@ impl EventBus {
             .unwrap_or(&[])
     }
 
+    /// The events of type `T` settled at the last [`update`](Self::update): the
+    /// previous frame's frozen set, broadcast to every reader without a cursor.
+    /// See [`EventChannel::read_frame`](crate::EventChannel::read_frame).
+    pub fn read_frame<T: Send + Sync + 'static>(&self) -> &[T] {
+        self.channel::<T>()
+            .map(|channel| channel.read_frame())
+            .unwrap_or(&[])
+    }
+
     pub fn read_since<T: Send + Sync + 'static>(&self, cursor: u64) -> &[T] {
         self.channel::<T>()
             .map(|channel| channel.events_since(cursor))
@@ -2687,6 +2696,13 @@ impl DynWorld {
         self.events.read::<T>()
     }
 
+    /// The `T` events settled at the last frame [`step`](Self::step): the
+    /// previous frame's frozen set, broadcast without a cursor. See
+    /// [`EventChannel::read_frame`](crate::EventChannel::read_frame).
+    pub fn read_frame_events<T: Send + Sync + 'static>(&self) -> &[T] {
+        self.events.read_frame::<T>()
+    }
+
     pub fn read_events_since<T: Send + Sync + 'static>(&self, cursor: u64) -> &[T] {
         self.events.read_since::<T>(cursor)
     }
@@ -3385,6 +3401,13 @@ impl DynEcs {
     /// Everything still buffered for `T` at the group level, oldest first.
     pub fn read_events<T: Send + Sync + 'static>(&self) -> &[T] {
         self.events.read::<T>()
+    }
+
+    /// The group-level `T` events settled at the last [`step`](Self::step): the
+    /// previous frame's frozen set, broadcast without a cursor. See
+    /// [`EventChannel::read_frame`](crate::EventChannel::read_frame).
+    pub fn read_frame_events<T: Send + Sync + 'static>(&self) -> &[T] {
+        self.events.read_frame::<T>()
     }
 
     pub fn read_events_since<T: Send + Sync + 'static>(&self, cursor: u64) -> &[T] {

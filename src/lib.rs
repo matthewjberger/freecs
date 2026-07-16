@@ -1268,6 +1268,25 @@ impl<T> EventChannel<T> {
         self.events.iter()
     }
 
+    /// The events settled at the last [`update`](Self::update): the previous
+    /// frame's complete set, frozen and broadcast to every reader without a
+    /// cursor. Events sent since that `update` (this frame's sends) are
+    /// excluded, so the slice does not change as more events arrive during the
+    /// frame. A reader that calls this once per frame therefore sees each
+    /// frame's events exactly once, one frame after they were sent, regardless
+    /// of where in the frame it reads and of interleaving with senders. This is
+    /// the broadcast, single-frame counterpart to the cursor-based
+    /// [`consume`](Self::consume): use it when every reader must observe the
+    /// same frozen set for a frame, as a deferred event pipeline does.
+    #[inline]
+    pub fn read_frame(&self) -> &[T] {
+        let end = self
+            .previous_update_sequence
+            .saturating_sub(self.base_sequence)
+            .min(self.events.len() as u64) as usize;
+        &self.events[..end]
+    }
+
     /// Returns a reference to the oldest buffered event, if any.
     pub fn peek(&self) -> Option<&T> {
         self.events.first()
@@ -6185,6 +6204,37 @@ mod tests {
 
         channel.update();
         assert!(channel.is_empty());
+    }
+
+    #[test]
+    fn test_event_channel_read_frame_is_settled_prior_frame() {
+        let mut channel: EventChannel<u32> = EventChannel::new();
+
+        assert_eq!(channel.read_frame(), &[] as &[u32]);
+
+        channel.send(1);
+        channel.send(2);
+        assert_eq!(
+            channel.read_frame(),
+            &[] as &[u32],
+            "this frame's sends are not settled yet"
+        );
+        channel.update();
+
+        assert_eq!(channel.read_frame(), &[1, 2]);
+        channel.send(3);
+        assert_eq!(
+            channel.read_frame(),
+            &[1, 2],
+            "a later send does not change the settled frame"
+        );
+        assert_eq!(channel.read_frame(), &[1, 2], "a broadcast read repeats");
+        channel.update();
+
+        assert_eq!(channel.read_frame(), &[3], "frame one expired, frame two settled");
+        channel.update();
+
+        assert_eq!(channel.read_frame(), &[] as &[u32], "an empty frame settles empty");
     }
 
     #[test]
