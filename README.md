@@ -1346,10 +1346,9 @@ struct, one per event type per consumer.
 The `state` feature adds an optional state machine for programs that gate
 systems on a screen or mode. You supply the state type (any `Copy + PartialEq`
 value); freecs supplies the current-and-next holder, the transition step, the
-`StateTransition` event, and the gating combinators. This is a deliberate
-merge of the ECS layer's run conditions and system parameters with the state
-model Bevy keeps in a separate crate, kept behind a feature so the default
-build carries none of it.
+`StateTransition` event, and the gating combinators. It combines the ECS
+layer's run conditions and system parameters with a small state model, kept
+behind a feature so the default build carries none of it.
 
 `insert_state` stores the state, `add_state_transitions` registers the
 transition step on a schedule, `next_state` requests a change (applied on the

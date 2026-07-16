@@ -1,9 +1,9 @@
 //! An optional state machine over the dynamic layer, behind the `state`
 //! feature: a current-and-next value per state type, transitions that emit an
 //! event, run-condition gating of systems, and enter and exit combinators.
-//! The state type is yours; the machinery is a deliberate blend of the run
-//! conditions and system parameters of the ECS layer with the state model
-//! Bevy keeps in a separate crate.
+//! The state type is yours; the machinery combines the run conditions and
+//! system parameters of the ECS layer with a small state model, all in this
+//! one optional feature.
 //!
 //! A state type is any `Copy + PartialEq` value, usually an enum. Insert one
 //! with [`insert_state`], drive it with [`apply_state_transition`] pushed onto
