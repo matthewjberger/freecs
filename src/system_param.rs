@@ -98,12 +98,45 @@
 //!
 //! assert_eq!(world.get::<Position>(world.query_ref::<&Position>().single().unwrap().0).unwrap().x, 1.0);
 //! ```
+//!
+//! [`EventReader`] and [`EventWriter`] are extract parameters over the host's
+//! event bus. A writer buffers its sends and flushes them after the system
+//! returns; a reader keeps its own cursor in the runner, so it sees each event
+//! once and coexists with a [`Query`] borrowing the world in the same system.
+//!
+//! ```rust
+//! use freecs::Schedule;
+//! use freecs::dynamic::DynWorld;
+//! use freecs::system_param::{EventReader, EventWriter, ResMut, ScheduleExt};
+//!
+//! #[derive(Clone)]
+//! struct Damaged { amount: u32 }
+//! struct Total(u32);
+//!
+//! fn emit(mut writer: EventWriter<Damaged>) {
+//!     writer.send(Damaged { amount: 3 });
+//!     writer.send(Damaged { amount: 4 });
+//! }
+//! fn accumulate(reader: EventReader<Damaged>, mut total: ResMut<Total>) {
+//!     for event in &reader {
+//!         total.0 += event.amount;
+//!     }
+//! }
+//!
+//! let mut world = DynWorld::new();
+//! world.insert_resource(Total(0));
+//!
+//! let mut schedule = Schedule::new();
+//! schedule.add_system("emit", emit);
+//! schedule.add_system("accumulate", accumulate);
+//! schedule.run(&mut world);
+//!
+//! assert_eq!(world.resource::<Total>().unwrap().0, 7);
+//! ```
 
 use crate::Entity;
 use crate::Schedule;
-use crate::dynamic::{
-    DynEcs, DynJoin, DynQuery, DynWorld, QueryTuple, ResourceHost, ResourceHostExt,
-};
+use crate::dynamic::{DynEcs, DynJoin, DynQuery, DynWorld, EventBus, QueryTuple, ResourceHost};
 use std::cell::RefCell;
 use std::marker::PhantomData;
 
@@ -139,31 +172,183 @@ impl<T> std::ops::DerefMut for ResMut<'_, T> {
     }
 }
 
-/// A resource system parameter: [`Res`] or [`ResMut`]. Each names one
-/// resource type, taken out of the world's map for the system call and put
-/// back afterward.
-pub trait ResourceParam {
-    /// The resource type this parameter reads.
-    type Resource: Send + Sync + 'static;
-    /// The parameter value handed to the system for a given borrow.
-    type Item<'world>;
-    /// Wraps the taken-out resource as the parameter value.
-    fn build(resource: &mut Self::Resource) -> Self::Item<'_>;
+/// A host that owns an [`EventBus`], so [`EventReader`] and [`EventWriter`]
+/// parameters resolve against it. [`DynWorld`] and [`DynEcs`] both embed one;
+/// a bare [`ResourceHost`] does not, which is why event parameters are
+/// offered over those two containers rather than any host.
+pub trait EventHost {
+    /// The host's event bus, for reading and writing events.
+    fn event_bus_mut(&mut self) -> &mut EventBus;
 }
 
-impl<'a, T: Send + Sync + 'static> ResourceParam for Res<'a, T> {
-    type Resource = T;
-    type Item<'world> = Res<'world, T>;
-    fn build(resource: &mut T) -> Res<'_, T> {
-        Res { value: resource }
+impl EventHost for DynWorld {
+    fn event_bus_mut(&mut self) -> &mut EventBus {
+        &mut self.events
     }
 }
 
-impl<'a, T: Send + Sync + 'static> ResourceParam for ResMut<'a, T> {
-    type Resource = T;
-    type Item<'world> = ResMut<'world, T>;
-    fn build(resource: &mut T) -> ResMut<'_, T> {
-        ResMut { value: resource }
+impl EventHost for DynEcs {
+    fn event_bus_mut(&mut self) -> &mut EventBus {
+        &mut self.events
+    }
+}
+
+/// A system parameter resolved by taking data out of the host before the
+/// system runs and writing data back after. [`Res`], [`ResMut`],
+/// [`EventReader`], and [`EventWriter`] are the extract parameters. Each
+/// carries a [`State`](Self::State) kept in the runner between runs (an event
+/// reader's cursor, say), produces an [`Owned`](Self::Owned) value the
+/// parameter borrows for the call, and flushes through [`apply`](Self::apply)
+/// afterward. Extract parameters lead a system's argument list, ahead of a
+/// [`Query`], [`ParamSet`], or trailing `&mut W` host argument. Because the
+/// owned value is lifted out of the host before the run, an extract parameter
+/// never aliases the world a query borrows.
+pub trait ExtractParam<W> {
+    /// Per-system state kept in the runner across runs.
+    type State: Send + 'static;
+    /// The owned value produced for one run; the parameter borrows it.
+    type Owned;
+    /// The parameter value handed to the system for a given borrow.
+    type Item<'item>;
+    /// The initial state for a freshly registered system.
+    fn init() -> Self::State;
+    /// Lifts the owned value out of the host before the run.
+    fn extract(state: &mut Self::State, host: &mut W) -> Self::Owned;
+    /// Wraps the owned value as the parameter value.
+    fn build(owned: &mut Self::Owned) -> Self::Item<'_>;
+    /// Writes back after the run: a resource returns to the map, buffered
+    /// events flush to the bus, a reader does nothing.
+    fn apply(state: &mut Self::State, owned: Self::Owned, host: &mut W);
+}
+
+impl<W: ResourceHost, T: Send + Sync + 'static> ExtractParam<W> for Res<'_, T> {
+    type State = ();
+    type Owned = T;
+    type Item<'item> = Res<'item, T>;
+    fn init() -> Self::State {}
+    fn extract(_state: &mut (), host: &mut W) -> T {
+        host.resource_map_mut().remove::<T>().unwrap_or_else(|| {
+            panic!(
+                "system requires resource {} to be present",
+                std::any::type_name::<T>()
+            )
+        })
+    }
+    fn build(owned: &mut T) -> Res<'_, T> {
+        Res { value: owned }
+    }
+    fn apply(_state: &mut (), owned: T, host: &mut W) {
+        host.resource_map_mut().insert(owned);
+    }
+}
+
+impl<W: ResourceHost, T: Send + Sync + 'static> ExtractParam<W> for ResMut<'_, T> {
+    type State = ();
+    type Owned = T;
+    type Item<'item> = ResMut<'item, T>;
+    fn init() -> Self::State {}
+    fn extract(_state: &mut (), host: &mut W) -> T {
+        host.resource_map_mut().remove::<T>().unwrap_or_else(|| {
+            panic!(
+                "system requires resource {} to be present",
+                std::any::type_name::<T>()
+            )
+        })
+    }
+    fn build(owned: &mut T) -> ResMut<'_, T> {
+        ResMut { value: owned }
+    }
+    fn apply(_state: &mut (), owned: T, host: &mut W) {
+        host.resource_map_mut().insert(owned);
+    }
+}
+
+/// A system parameter that reads events of type `T` from the host's event
+/// bus, delivering each event to this system exactly once across frames. The
+/// reader keeps its own cursor in the runner, so two systems reading the same
+/// event type advance independently and neither disturbs the bus's two-frame
+/// buffer. Events are copied out for the run, so `T` is [`Clone`], and a
+/// [`Query`] in the same system borrows the world freely alongside it.
+pub struct EventReader<'a, T: Clone + Send + Sync + 'static> {
+    events: &'a [T],
+}
+
+impl<T: Clone + Send + Sync + 'static> EventReader<'_, T> {
+    /// Visits the events delivered to this reader this run, oldest first.
+    pub fn iter(&self) -> std::slice::Iter<'_, T> {
+        self.events.iter()
+    }
+
+    /// The number of events delivered to this reader this run.
+    pub fn len(&self) -> usize {
+        self.events.len()
+    }
+
+    /// Whether no events were delivered to this reader this run.
+    pub fn is_empty(&self) -> bool {
+        self.events.is_empty()
+    }
+}
+
+impl<'a, T: Clone + Send + Sync + 'static> IntoIterator for &'a EventReader<'_, T> {
+    type Item = &'a T;
+    type IntoIter = std::slice::Iter<'a, T>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.events.iter()
+    }
+}
+
+impl<W: EventHost, T: Clone + Send + Sync + 'static> ExtractParam<W> for EventReader<'_, T> {
+    type State = u64;
+    type Owned = Vec<T>;
+    type Item<'item> = EventReader<'item, T>;
+    fn init() -> u64 {
+        0
+    }
+    fn extract(state: &mut u64, host: &mut W) -> Vec<T> {
+        host.event_bus_mut().consume::<T>(state).to_vec()
+    }
+    fn build(owned: &mut Vec<T>) -> EventReader<'_, T> {
+        EventReader { events: owned }
+    }
+    fn apply(_state: &mut u64, _owned: Vec<T>, _host: &mut W) {}
+}
+
+/// A system parameter that writes events of type `T` to the host's event bus.
+/// Sends are buffered during the run and flushed to the bus after the system
+/// returns, so a writer and a [`Query`] coexist without contending for the
+/// world. Readers pick the events up through the bus's two-frame buffer.
+pub struct EventWriter<'a, T: Send + Sync + 'static> {
+    pending: &'a mut Vec<T>,
+}
+
+impl<T: Send + Sync + 'static> EventWriter<'_, T> {
+    /// Buffers one event to flush to the bus after the system runs.
+    pub fn send(&mut self, event: T) {
+        self.pending.push(event);
+    }
+
+    /// Buffers a batch of events to flush after the system runs.
+    pub fn send_batch(&mut self, events: impl IntoIterator<Item = T>) {
+        self.pending.extend(events);
+    }
+}
+
+impl<W: EventHost, T: Send + Sync + 'static> ExtractParam<W> for EventWriter<'_, T> {
+    type State = ();
+    type Owned = Vec<T>;
+    type Item<'item> = EventWriter<'item, T>;
+    fn init() -> Self::State {}
+    fn extract(_state: &mut (), _host: &mut W) -> Vec<T> {
+        Vec::new()
+    }
+    fn build(owned: &mut Vec<T>) -> EventWriter<'_, T> {
+        EventWriter { pending: owned }
+    }
+    fn apply(_state: &mut (), owned: Vec<T>, host: &mut W) {
+        for event in owned {
+            host.event_bus_mut().send::<T>(event);
+        }
     }
 }
 
@@ -447,6 +632,21 @@ pub trait ScheduleExt<W> {
         system: impl IntoSystem<W, Marker>,
     ) -> &mut Self;
 
+    /// Adds a system-parameter function that runs only on the passes where
+    /// `condition` holds, the param-system form of
+    /// [`Schedule::push_if`](crate::Schedule::push_if). The condition reads
+    /// the world each pass; a false skips the system for that pass without
+    /// removing it. This is how a run condition composes with resource,
+    /// query, and event parameters, so gating a system on a state the host
+    /// carries stays declarative: pass `|world| in_state(world, ...)` as the
+    /// condition. The state machinery itself belongs to the host, not here.
+    fn add_system_if<Marker>(
+        &mut self,
+        name: &'static str,
+        condition: impl Fn(&W) -> bool + Send + 'static,
+        system: impl IntoSystem<W, Marker>,
+    ) -> &mut Self;
+
     /// Adds a tuple of system-parameter functions in one call, each named
     /// after its function type, so `schedule.add_systems((movement, score))`
     /// stands in for one [`add_system`](Self::add_system) per system. Reach
@@ -462,6 +662,15 @@ impl<W> ScheduleExt<W> for Schedule<W> {
         system: impl IntoSystem<W, Marker>,
     ) -> &mut Self {
         self.push(name, system.into_runner())
+    }
+
+    fn add_system_if<Marker>(
+        &mut self,
+        name: &'static str,
+        condition: impl Fn(&W) -> bool + Send + 'static,
+        system: impl IntoSystem<W, Marker>,
+    ) -> &mut Self {
+        self.push_if(name, condition, system.into_runner())
     }
 
     fn add_systems<Marker>(&mut self, systems: impl IntoSystems<W, Marker>) -> &mut Self {
@@ -536,12 +745,12 @@ impl_into_systems!(
     (S7, M7)
 );
 
-/// The marker for a system whose parameters are all resources.
-pub struct ResourceSystemMarker<R>(PhantomData<fn() -> R>);
+/// The marker for a system whose parameters are all extract parameters.
+pub struct ExtractSystemMarker<E>(PhantomData<fn() -> E>);
 
-/// The marker for a system with resource parameters and one trailing
+/// The marker for a system with extract parameters and one trailing
 /// world-borrowing parameter.
-pub struct QuerySystemMarker<R, Q>(PhantomData<fn() -> (R, Q)>);
+pub struct QuerySystemMarker<E, Q>(PhantomData<fn() -> (E, Q)>);
 
 impl<Func, Q> IntoSystem<DynWorld, QuerySystemMarker<(), Q>> for Func
 where
@@ -556,98 +765,130 @@ where
     }
 }
 
-/// The marker for a system whose parameters are all resources followed by a
-/// final `&mut W` host argument.
-pub struct HostSystemMarker<R>(PhantomData<fn() -> R>);
+/// The marker for a system whose parameters are all extract parameters
+/// followed by a final `&mut W` host argument.
+pub struct HostSystemMarker<E>(PhantomData<fn() -> E>);
 
-macro_rules! impl_resource_system {
-    ($($resource:ident $binding:ident),+) => {
-        impl<W, Func, $($resource,)+> IntoSystem<W, ResourceSystemMarker<($($resource,)+)>>
+macro_rules! impl_extract_system {
+    ($($param:ident $state:ident $owned:ident),+) => {
+        impl<W, Func, $($param,)+> IntoSystem<W, ExtractSystemMarker<($($param,)+)>>
             for Func
         where
-            W: ResourceHost + 'static,
-            $($resource: ResourceParam,)+
-            Func: FnMut($($resource,)+)
-                + for<'world> FnMut($($resource::Item<'world>,)+)
+            W: 'static,
+            $($param: ExtractParam<W>,)+
+            Func: FnMut($($param,)+)
+                + for<'item> FnMut($($param::Item<'item>,)+)
                 + Send
                 + 'static,
         {
-            #[allow(non_snake_case)]
             fn into_runner(mut self) -> impl FnMut(&mut W) + Send + 'static {
-                move |world: &mut W| {
-                    world.resources_scope::<($($resource::Resource,)+), _>(|_world, bundle| {
-                        let ($($binding,)+) = bundle;
-                        self($($resource::build($binding),)+);
-                    });
+                $(let mut $state = <$param as ExtractParam<W>>::init();)+
+                move |host: &mut W| {
+                    $(let mut $owned = <$param as ExtractParam<W>>::extract(&mut $state, host);)+
+                    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        self($(<$param as ExtractParam<W>>::build(&mut $owned),)+);
+                    }));
+                    $(<$param as ExtractParam<W>>::apply(&mut $state, $owned, host);)+
+                    if let Err(panic) = result {
+                        std::panic::resume_unwind(panic);
+                    }
                 }
             }
         }
 
-        impl<W, Func, $($resource,)+> IntoSystem<W, HostSystemMarker<($($resource,)+)>>
+        impl<W, Func, $($param,)+> IntoSystem<W, HostSystemMarker<($($param,)+)>>
             for Func
         where
-            W: ResourceHost + 'static,
-            $($resource: ResourceParam,)+
-            Func: FnMut($($resource,)+ &mut W)
-                + for<'world> FnMut($($resource::Item<'world>,)+ &'world mut W)
+            W: 'static,
+            $($param: ExtractParam<W>,)+
+            Func: FnMut($($param,)+ &mut W)
+                + for<'item> FnMut($($param::Item<'item>,)+ &'item mut W)
                 + Send
                 + 'static,
         {
-            #[allow(non_snake_case)]
             fn into_runner(mut self) -> impl FnMut(&mut W) + Send + 'static {
-                move |world: &mut W| {
-                    world.resources_scope::<($($resource::Resource,)+), _>(|world, bundle| {
-                        let ($($binding,)+) = bundle;
-                        self($($resource::build($binding),)+ world);
-                    });
+                $(let mut $state = <$param as ExtractParam<W>>::init();)+
+                move |host: &mut W| {
+                    $(let mut $owned = <$param as ExtractParam<W>>::extract(&mut $state, host);)+
+                    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        self($(<$param as ExtractParam<W>>::build(&mut $owned),)+ host);
+                    }));
+                    $(<$param as ExtractParam<W>>::apply(&mut $state, $owned, host);)+
+                    if let Err(panic) = result {
+                        std::panic::resume_unwind(panic);
+                    }
                 }
             }
         }
     };
 }
 
-macro_rules! impl_query_system {
-    ($($resource:ident $binding:ident),+) => {
-        impl<Func, $($resource,)+ Q>
-            IntoSystem<DynWorld, QuerySystemMarker<($($resource,)+), Q>> for Func
+macro_rules! impl_extract_query_system {
+    ($($param:ident $state:ident $owned:ident),+) => {
+        impl<Func, $($param,)+ Q>
+            IntoSystem<DynWorld, QuerySystemMarker<($($param,)+), Q>> for Func
         where
-            $($resource: ResourceParam,)+
+            $($param: ExtractParam<DynWorld>,)+
             Q: WorldParam,
-            Func: FnMut($($resource,)+ Q)
-                + for<'world> FnMut($($resource::Item<'world>,)+ Q::Item<'world>)
+            Func: FnMut($($param,)+ Q)
+                + for<'item> FnMut($($param::Item<'item>,)+ Q::Item<'item>)
                 + Send
                 + 'static,
         {
-            #[allow(non_snake_case)]
             fn into_runner(mut self) -> impl FnMut(&mut DynWorld) + Send + 'static {
+                $(let mut $state = <$param as ExtractParam<DynWorld>>::init();)+
                 move |world: &mut DynWorld| {
-                    world.resources_scope::<($($resource::Resource,)+), _>(|world, bundle| {
-                        let ($($binding,)+) = bundle;
+                    $(let mut $owned =
+                        <$param as ExtractParam<DynWorld>>::extract(&mut $state, world);)+
+                    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                         let query = Q::build(world);
-                        self($($resource::build($binding),)+ query);
-                    });
+                        self($(<$param as ExtractParam<DynWorld>>::build(&mut $owned),)+ query);
+                    }));
+                    $(<$param as ExtractParam<DynWorld>>::apply(&mut $state, $owned, world);)+
+                    if let Err(panic) = result {
+                        std::panic::resume_unwind(panic);
+                    }
                 }
             }
         }
     };
 }
 
-impl_resource_system!(R0 r0);
-impl_resource_system!(R0 r0, R1 r1);
-impl_resource_system!(R0 r0, R1 r1, R2 r2);
-impl_resource_system!(R0 r0, R1 r1, R2 r2, R3 r3);
-impl_resource_system!(R0 r0, R1 r1, R2 r2, R3 r3, R4 r4);
-impl_resource_system!(R0 r0, R1 r1, R2 r2, R3 r3, R4 r4, R5 r5);
-impl_resource_system!(R0 r0, R1 r1, R2 r2, R3 r3, R4 r4, R5 r5, R6 r6);
-impl_resource_system!(R0 r0, R1 r1, R2 r2, R3 r3, R4 r4, R5 r5, R6 r6, R7 r7);
+impl_extract_system!(P0 state0 owned0);
+impl_extract_system!(P0 state0 owned0, P1 state1 owned1);
+impl_extract_system!(P0 state0 owned0, P1 state1 owned1, P2 state2 owned2);
+impl_extract_system!(P0 state0 owned0, P1 state1 owned1, P2 state2 owned2, P3 state3 owned3);
+impl_extract_system!(
+    P0 state0 owned0, P1 state1 owned1, P2 state2 owned2, P3 state3 owned3, P4 state4 owned4
+);
+impl_extract_system!(
+    P0 state0 owned0, P1 state1 owned1, P2 state2 owned2, P3 state3 owned3, P4 state4 owned4,
+    P5 state5 owned5
+);
+impl_extract_system!(
+    P0 state0 owned0, P1 state1 owned1, P2 state2 owned2, P3 state3 owned3, P4 state4 owned4,
+    P5 state5 owned5, P6 state6 owned6
+);
+impl_extract_system!(
+    P0 state0 owned0, P1 state1 owned1, P2 state2 owned2, P3 state3 owned3, P4 state4 owned4,
+    P5 state5 owned5, P6 state6 owned6, P7 state7 owned7
+);
 
-impl_query_system!(R0 r0);
-impl_query_system!(R0 r0, R1 r1);
-impl_query_system!(R0 r0, R1 r1, R2 r2);
-impl_query_system!(R0 r0, R1 r1, R2 r2, R3 r3);
-impl_query_system!(R0 r0, R1 r1, R2 r2, R3 r3, R4 r4);
-impl_query_system!(R0 r0, R1 r1, R2 r2, R3 r3, R4 r4, R5 r5);
-impl_query_system!(R0 r0, R1 r1, R2 r2, R3 r3, R4 r4, R5 r5, R6 r6);
+impl_extract_query_system!(P0 state0 owned0);
+impl_extract_query_system!(P0 state0 owned0, P1 state1 owned1);
+impl_extract_query_system!(P0 state0 owned0, P1 state1 owned1, P2 state2 owned2);
+impl_extract_query_system!(P0 state0 owned0, P1 state1 owned1, P2 state2 owned2, P3 state3 owned3);
+impl_extract_query_system!(
+    P0 state0 owned0, P1 state1 owned1, P2 state2 owned2, P3 state3 owned3, P4 state4 owned4
+);
+impl_extract_query_system!(
+    P0 state0 owned0, P1 state1 owned1, P2 state2 owned2, P3 state3 owned3, P4 state4 owned4,
+    P5 state5 owned5
+);
+impl_extract_query_system!(
+    P0 state0 owned0, P1 state1 owned1, P2 state2 owned2, P3 state3 owned3, P4 state4 owned4,
+    P5 state5 owned5, P6 state6 owned6
+);
 
 impl<Func, Q> IntoSystem<DynEcs, QuerySystemMarker<(), Q>> for Func
 where
@@ -662,39 +903,53 @@ where
     }
 }
 
-macro_rules! impl_ecs_query_system {
-    ($($resource:ident $binding:ident),+) => {
-        impl<Func, $($resource,)+ Q>
-            IntoSystem<DynEcs, QuerySystemMarker<($($resource,)+), Q>> for Func
+macro_rules! impl_extract_ecs_query_system {
+    ($($param:ident $state:ident $owned:ident),+) => {
+        impl<Func, $($param,)+ Q>
+            IntoSystem<DynEcs, QuerySystemMarker<($($param,)+), Q>> for Func
         where
-            $($resource: ResourceParam,)+
+            $($param: ExtractParam<DynEcs>,)+
             Q: EcsParam,
-            Func: FnMut($($resource,)+ Q)
-                + for<'ecs> FnMut($($resource::Item<'ecs>,)+ Q::Item<'ecs>)
+            Func: FnMut($($param,)+ Q)
+                + for<'item> FnMut($($param::Item<'item>,)+ Q::Item<'item>)
                 + Send
                 + 'static,
         {
-            #[allow(non_snake_case)]
             fn into_runner(mut self) -> impl FnMut(&mut DynEcs) + Send + 'static {
+                $(let mut $state = <$param as ExtractParam<DynEcs>>::init();)+
                 move |ecs: &mut DynEcs| {
-                    ecs.resources_scope::<($($resource::Resource,)+), _>(|ecs, bundle| {
-                        let ($($binding,)+) = bundle;
+                    $(let mut $owned = <$param as ExtractParam<DynEcs>>::extract(&mut $state, ecs);)+
+                    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                         let query = Q::build_ecs(ecs);
-                        self($($resource::build($binding),)+ query);
-                    });
+                        self($(<$param as ExtractParam<DynEcs>>::build(&mut $owned),)+ query);
+                    }));
+                    $(<$param as ExtractParam<DynEcs>>::apply(&mut $state, $owned, ecs);)+
+                    if let Err(panic) = result {
+                        std::panic::resume_unwind(panic);
+                    }
                 }
             }
         }
     };
 }
 
-impl_ecs_query_system!(R0 r0);
-impl_ecs_query_system!(R0 r0, R1 r1);
-impl_ecs_query_system!(R0 r0, R1 r1, R2 r2);
-impl_ecs_query_system!(R0 r0, R1 r1, R2 r2, R3 r3);
-impl_ecs_query_system!(R0 r0, R1 r1, R2 r2, R3 r3, R4 r4);
-impl_ecs_query_system!(R0 r0, R1 r1, R2 r2, R3 r3, R4 r4, R5 r5);
-impl_ecs_query_system!(R0 r0, R1 r1, R2 r2, R3 r3, R4 r4, R5 r5, R6 r6);
+impl_extract_ecs_query_system!(P0 state0 owned0);
+impl_extract_ecs_query_system!(P0 state0 owned0, P1 state1 owned1);
+impl_extract_ecs_query_system!(P0 state0 owned0, P1 state1 owned1, P2 state2 owned2);
+impl_extract_ecs_query_system!(
+    P0 state0 owned0, P1 state1 owned1, P2 state2 owned2, P3 state3 owned3
+);
+impl_extract_ecs_query_system!(
+    P0 state0 owned0, P1 state1 owned1, P2 state2 owned2, P3 state3 owned3, P4 state4 owned4
+);
+impl_extract_ecs_query_system!(
+    P0 state0 owned0, P1 state1 owned1, P2 state2 owned2, P3 state3 owned3, P4 state4 owned4,
+    P5 state5 owned5
+);
+impl_extract_ecs_query_system!(
+    P0 state0 owned0, P1 state1 owned1, P2 state2 owned2, P3 state3 owned3, P4 state4 owned4,
+    P5 state5 owned5, P6 state6 owned6
+);
 
 /// The marker for a system with resource parameters and two or more
 /// world-borrowing query parameters resolved through a shared world cell.
@@ -723,27 +978,35 @@ macro_rules! impl_multi_query_bare {
     };
 }
 
-macro_rules! impl_multi_query_resourced {
-    (($($resource:ident $rbind:ident),+), ($($query:ident $qbind:ident),+)) => {
-        impl<Func, $($resource,)+ $($query,)+>
-            IntoSystem<DynWorld, MultiQuerySystemMarker<($($resource,)+), ($($query,)+)>> for Func
+macro_rules! impl_extract_multi_query {
+    (($($param:ident $state:ident $owned:ident),+), ($($query:ident $qbind:ident),+)) => {
+        impl<Func, $($param,)+ $($query,)+>
+            IntoSystem<DynWorld, MultiQuerySystemMarker<($($param,)+), ($($query,)+)>> for Func
         where
-            $($resource: ResourceParam,)+
+            $($param: ExtractParam<DynWorld>,)+
             $($query: MultiQueryParam,)+
-            Func: FnMut($($resource,)+ $($query,)+)
-                + for<'world> FnMut($($resource::Item<'world>,)+ $($query::Item<'world>,)+)
+            Func: FnMut($($param,)+ $($query,)+)
+                + for<'item> FnMut($($param::Item<'item>,)+ $($query::Item<'item>,)+)
                 + Send
                 + 'static,
         {
-            #[allow(non_snake_case)]
             fn into_runner(mut self) -> impl FnMut(&mut DynWorld) + Send + 'static {
+                $(let mut $state = <$param as ExtractParam<DynWorld>>::init();)+
                 move |world: &mut DynWorld| {
-                    world.resources_scope::<($($resource::Resource,)+), _>(|world, bundle| {
-                        let ($($rbind,)+) = bundle;
-                        let cell = RefCell::new(world);
+                    $(let mut $owned =
+                        <$param as ExtractParam<DynWorld>>::extract(&mut $state, world);)+
+                    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        let cell = RefCell::new(&mut *world);
                         $(let $qbind = $query::build_lazy(&cell);)+
-                        self($($resource::build($rbind),)+ $($qbind,)+);
-                    });
+                        self(
+                            $(<$param as ExtractParam<DynWorld>>::build(&mut $owned),)+
+                            $($qbind,)+
+                        );
+                    }));
+                    $(<$param as ExtractParam<DynWorld>>::apply(&mut $state, $owned, world);)+
+                    if let Err(panic) = result {
+                        std::panic::resume_unwind(panic);
+                    }
                 }
             }
         }
@@ -754,12 +1017,15 @@ impl_multi_query_bare!(Q0 q0, Q1 q1);
 impl_multi_query_bare!(Q0 q0, Q1 q1, Q2 q2);
 impl_multi_query_bare!(Q0 q0, Q1 q1, Q2 q2, Q3 q3);
 
-impl_multi_query_resourced!((R0 r0), (Q0 q0, Q1 q1));
-impl_multi_query_resourced!((R0 r0), (Q0 q0, Q1 q1, Q2 q2));
-impl_multi_query_resourced!((R0 r0, R1 r1), (Q0 q0, Q1 q1));
-impl_multi_query_resourced!((R0 r0, R1 r1), (Q0 q0, Q1 q1, Q2 q2));
-impl_multi_query_resourced!((R0 r0, R1 r1, R2 r2), (Q0 q0, Q1 q1));
-impl_multi_query_resourced!((R0 r0, R1 r1, R2 r2), (Q0 q0, Q1 q1, Q2 q2));
+impl_extract_multi_query!((P0 state0 owned0), (Q0 q0, Q1 q1));
+impl_extract_multi_query!((P0 state0 owned0), (Q0 q0, Q1 q1, Q2 q2));
+impl_extract_multi_query!((P0 state0 owned0, P1 state1 owned1), (Q0 q0, Q1 q1));
+impl_extract_multi_query!((P0 state0 owned0, P1 state1 owned1), (Q0 q0, Q1 q1, Q2 q2));
+impl_extract_multi_query!((P0 state0 owned0, P1 state1 owned1, P2 state2 owned2), (Q0 q0, Q1 q1));
+impl_extract_multi_query!(
+    (P0 state0 owned0, P1 state1 owned1, P2 state2 owned2),
+    (Q0 q0, Q1 q1, Q2 q2)
+);
 
 #[cfg(test)]
 mod tests {
@@ -797,7 +1063,15 @@ mod tests {
 
     struct DeltaTime(f32);
     struct Score(u32);
+    struct Tally(u32);
+    struct Seen(Vec<u32>);
+    struct Enabled(bool);
     struct Frozen;
+
+    #[derive(Clone, Debug, PartialEq)]
+    struct Collision {
+        entity: u32,
+    }
 
     fn run<Marker>(world: &mut DynWorld, system: impl IntoSystem<DynWorld, Marker>) {
         let mut runner = system.into_runner();
@@ -1243,5 +1517,218 @@ mod tests {
     fn missing_resource_panics() {
         let mut world = DynWorld::new();
         run(&mut world, |_delta: Res<DeltaTime>| {});
+    }
+
+    fn emit_pair(mut writer: EventWriter<Collision>) {
+        writer.send(Collision { entity: 1 });
+        writer.send(Collision { entity: 2 });
+    }
+
+    #[test]
+    fn writer_flushes_after_run_and_reader_consumes_once() {
+        let mut world = DynWorld::new();
+        world.insert_resource(Score(0));
+
+        fn tally(reader: EventReader<Collision>, mut score: ResMut<Score>) {
+            score.0 += reader.len() as u32;
+        }
+
+        let mut schedule = Schedule::new();
+        schedule.add_system("emit", emit_pair);
+        schedule.add_system("tally", tally);
+
+        schedule.run(&mut world);
+        assert_eq!(world.resource::<Score>().unwrap().0, 2);
+
+        world.step();
+        schedule.run(&mut world);
+        assert_eq!(
+            world.resource::<Score>().unwrap().0,
+            4,
+            "the reader consumes only the events sent this frame"
+        );
+    }
+
+    #[test]
+    fn reader_coexists_with_a_query() {
+        let mut world = DynWorld::new();
+        world.events.send::<Collision>(Collision { entity: 0 });
+        world.spawn((Position { x: 0.0, y: 0.0 },));
+
+        fn shift(reader: EventReader<Collision>, query: Query<&mut Position>) {
+            let delta = reader.len() as f32;
+            query.for_each(|_entity, position| position.x += delta);
+        }
+
+        let mut schedule = Schedule::new();
+        schedule.add_system("shift", shift);
+        schedule.run(&mut world);
+
+        assert_eq!(world.query_ref::<&Position>().single().unwrap().1.x, 1.0);
+    }
+
+    #[test]
+    fn resource_reader_and_query_in_one_system() {
+        let mut world = DynWorld::new();
+        world.insert_resource(DeltaTime(2.0));
+        world.events.send::<Collision>(Collision { entity: 7 });
+        world.spawn((Position { x: 0.0, y: 0.0 }, Velocity { x: 1.0, y: 0.0 }));
+
+        fn integrate(
+            delta: Res<DeltaTime>,
+            reader: EventReader<Collision>,
+            query: Query<(&mut Position, &Velocity)>,
+        ) {
+            let bump = reader.len() as f32;
+            query.for_each(|_entity, (position, velocity)| {
+                position.x += velocity.x * delta.0 + bump;
+            });
+        }
+
+        let mut schedule = Schedule::new();
+        schedule.add_system("integrate", integrate);
+        schedule.run(&mut world);
+
+        assert_eq!(world.query_ref::<&Position>().single().unwrap().1.x, 3.0);
+    }
+
+    #[test]
+    fn writer_coexists_with_a_query() {
+        let mut world = DynWorld::new();
+        world.spawn((Position { x: 3.0, y: 0.0 },));
+        world.spawn((Position { x: 5.0, y: 0.0 },));
+
+        fn report(mut writer: EventWriter<Collision>, query: Query<&Position>) {
+            query.for_each(|_entity, position| {
+                writer.send(Collision {
+                    entity: position.x as u32,
+                });
+            });
+        }
+
+        let mut schedule = Schedule::new();
+        schedule.add_system("report", report);
+        schedule.run(&mut world);
+
+        let mut ids: Vec<u32> = world
+            .events
+            .read::<Collision>()
+            .iter()
+            .map(|collision| collision.entity)
+            .collect();
+        ids.sort();
+        assert_eq!(ids, vec![3, 5]);
+    }
+
+    #[test]
+    fn two_readers_keep_independent_cursors() {
+        let mut world = DynWorld::new();
+        world.insert_resource(Score(0));
+        world.insert_resource(Tally(0));
+        world.events.send::<Collision>(Collision { entity: 1 });
+        world.events.send::<Collision>(Collision { entity: 2 });
+        world.events.send::<Collision>(Collision { entity: 3 });
+
+        fn reader_a(reader: EventReader<Collision>, mut score: ResMut<Score>) {
+            score.0 += reader.len() as u32;
+        }
+        fn reader_b(reader: EventReader<Collision>, mut tally: ResMut<Tally>) {
+            tally.0 += reader.len() as u32;
+        }
+
+        let mut schedule = Schedule::new();
+        schedule.add_system("reader_a", reader_a);
+        schedule.add_system("reader_b", reader_b);
+        schedule.run(&mut world);
+
+        assert_eq!(world.resource::<Score>().unwrap().0, 3);
+        assert_eq!(world.resource::<Tally>().unwrap().0, 3);
+    }
+
+    #[test]
+    fn reader_iterates_each_event_once() {
+        let mut world = DynWorld::new();
+        world.insert_resource(Seen(Vec::new()));
+        world.events.send::<Collision>(Collision { entity: 10 });
+        world.events.send::<Collision>(Collision { entity: 20 });
+
+        fn collect(reader: EventReader<Collision>, mut seen: ResMut<Seen>) {
+            for collision in &reader {
+                seen.0.push(collision.entity);
+            }
+        }
+
+        let mut schedule = Schedule::new();
+        schedule.add_system("collect", collect);
+        schedule.run(&mut world);
+
+        assert_eq!(world.resource::<Seen>().unwrap().0, vec![10, 20]);
+    }
+
+    #[test]
+    fn reader_is_empty_before_any_send() {
+        let mut world = DynWorld::new();
+        world.insert_resource(Score(0));
+
+        fn tally(reader: EventReader<Collision>, mut score: ResMut<Score>) {
+            assert!(reader.is_empty());
+            score.0 += reader.len() as u32;
+        }
+
+        let mut schedule = Schedule::new();
+        schedule.add_system("tally", tally);
+        schedule.run(&mut world);
+
+        assert_eq!(world.resource::<Score>().unwrap().0, 0);
+    }
+
+    #[test]
+    fn events_flow_over_a_group() {
+        let mut ecs = DynEcs::new();
+        ecs.insert_resource(Score(0));
+
+        fn tally(reader: EventReader<Collision>, mut score: ResMut<Score>) {
+            score.0 += reader.len() as u32;
+        }
+
+        let mut schedule = Schedule::<DynEcs>::new();
+        schedule.add_system("emit", emit_pair);
+        schedule.add_system("tally", tally);
+        schedule.run(&mut ecs);
+
+        assert_eq!(ecs.resource::<Score>().unwrap().0, 2);
+    }
+
+    #[test]
+    fn add_system_if_gates_a_param_system() {
+        let mut world = DynWorld::new();
+        world.insert_resource(Score(0));
+        world.insert_resource(Enabled(false));
+
+        fn bump(mut score: ResMut<Score>) {
+            score.0 += 1;
+        }
+
+        let mut schedule = Schedule::new();
+        schedule.add_system_if(
+            "bump",
+            |world: &DynWorld| world.resource::<Enabled>().unwrap().0,
+            bump,
+        );
+
+        schedule.run(&mut world);
+        assert_eq!(
+            world.resource::<Score>().unwrap().0,
+            0,
+            "the system is skipped while the condition is false"
+        );
+
+        world.resource_mut::<Enabled>().unwrap().0 = true;
+        schedule.run(&mut world);
+        assert_eq!(
+            world.resource::<Score>().unwrap().0,
+            1,
+            "the system runs once the condition holds"
+        );
     }
 }

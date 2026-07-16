@@ -1216,6 +1216,10 @@ whose arguments are `Res`, `ResMut`, and `Query` into a runnable system, so
 the take/put scope disappears from the call site. `add_system` on a
 `Schedule<DynWorld>` names one system and infers its shape from the signature;
 `add_systems` registers a tuple at once, naming each after its function type.
+`add_system_if` gates a system on a run condition, the param-system form of
+`Schedule::push_if`, so a system can run only when the host is in a given
+state: pass `|world| in_state(world, …)` as the condition. The state itself is
+the host's concern; freecs only checks the condition each pass.
 
 ```rust
 use freecs::system_param::{Query, Res, ResMut, ScheduleExt};
@@ -1276,6 +1280,38 @@ A `Query` parameter resolves against `DynWorld`, and an unfiltered `Query<Q>`
 also resolves against a `DynEcs` group through `query_join`, so systems on a
 `Schedule<DynEcs>` can take one too. `ParamSet`, multiple query parameters,
 and type-level query filters are `DynWorld` only.
+
+`EventReader<T>` and `EventWriter<T>` are the event-facing extract parameters,
+resolved against the event bus that both `DynWorld` and `DynEcs` embed. A
+writer buffers its sends and flushes them to the bus after the system returns;
+a reader keeps its own `u64` cursor in the runner, so it sees each event once
+across frames, two readers of the same type advance independently, and a
+`Query` in the same system borrows the world alongside it. Events are copied
+out for the run, so the event type is `Clone`.
+
+```rust
+use freecs::system_param::{EventReader, EventWriter, Query, ScheduleExt};
+
+#[derive(Clone)]
+struct Collision { entity: u32 }
+
+fn detect(query: Query<&Position>, mut writer: EventWriter<Collision>) {
+    query.for_each(|_entity, position| {
+        if position.x < 0.0 {
+            writer.send(Collision { entity: 0 });
+        }
+    });
+}
+
+fn respond(reader: EventReader<Collision>) {
+    for _collision in &reader {
+        // handle each collision exactly once
+    }
+}
+
+let mut schedule = freecs::Schedule::new();
+schedule.add_systems((detect, respond));
+```
 
 #### Events
 
