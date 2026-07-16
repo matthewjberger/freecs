@@ -271,6 +271,22 @@ impl ErasedColumn {
         }
     }
 
+    /// Swap-removes one row by raw byte move, no type parameter and no vtable
+    /// hop. Sound because `RawColumn` carries the element size, alignment, and
+    /// drop glue captured at registration.
+    #[cfg(feature = "raw_storage")]
+    fn swap_remove_raw(&mut self, index: usize) {
+        self.storage.swap_remove(index);
+    }
+
+    /// Moves one row's bytes into `destination` and swap-removes the source
+    /// slot, no type parameter and no vtable hop.
+    #[cfg(feature = "raw_storage")]
+    fn swap_remove_into_raw(&mut self, index: usize, destination: &mut ErasedColumn) {
+        self.storage
+            .swap_remove_into(index, &mut destination.storage);
+    }
+
     fn len<T: 'static>(&self) -> usize {
         #[cfg(not(feature = "raw_storage"))]
         {
@@ -875,8 +891,10 @@ impl ColumnSlot {
         }
     }
 
-    /// The added tick carried by a row during migration, or `0` when change
-    /// detection is disabled under `raw_storage`.
+    /// The added tick carried by a row during migration. Only the safe
+    /// backend threads this through; `raw_storage` migrations move bytes
+    /// without touching tick columns.
+    #[cfg(not(feature = "raw_storage"))]
     #[inline]
     fn carried_added(&self, index: usize) -> u32 {
         self.added.get(index).copied().unwrap_or(0)
@@ -1765,17 +1783,25 @@ impl DynWorld {
 
                 let source_position = column_position(source.mask, component_mask);
                 let destination_position = column_position(destination.mask, component_mask);
-                let carried_added = source.columns[source_position].carried_added(from_index);
-                let info = &self.registry.components
-                    [source.columns[source_position].component_index as usize];
-                (info.swap_remove_into)(
-                    &mut source.columns[source_position].data,
+                #[cfg(not(feature = "raw_storage"))]
+                {
+                    let carried_added = source.columns[source_position].carried_added(from_index);
+                    let info = &self.registry.components
+                        [source.columns[source_position].component_index as usize];
+                    (info.swap_remove_into)(
+                        &mut source.columns[source_position].data,
+                        from_index,
+                        &mut destination.columns[destination_position].data,
+                    );
+                    source.columns[source_position].track_swap_remove(from_index);
+                    let destination_column = &mut destination.columns[destination_position];
+                    destination_column.track_push(tick, carried_added);
+                }
+                #[cfg(feature = "raw_storage")]
+                source.columns[source_position].data.swap_remove_into_raw(
                     from_index,
                     &mut destination.columns[destination_position].data,
                 );
-                source.columns[source_position].track_swap_remove(from_index);
-                let destination_column = &mut destination.columns[destination_position];
-                destination_column.track_push(tick, carried_added);
             }
 
             let mut removed = source.mask & !destination.mask;
@@ -1784,10 +1810,17 @@ impl DynWorld {
                 removed &= removed - 1;
 
                 let source_position = column_position(source.mask, component_mask);
-                let info = &self.registry.components
-                    [source.columns[source_position].component_index as usize];
-                (info.swap_remove)(&mut source.columns[source_position].data, from_index);
-                source.columns[source_position].track_swap_remove(from_index);
+                #[cfg(not(feature = "raw_storage"))]
+                {
+                    let info = &self.registry.components
+                        [source.columns[source_position].component_index as usize];
+                    (info.swap_remove)(&mut source.columns[source_position].data, from_index);
+                    source.columns[source_position].track_swap_remove(from_index);
+                }
+                #[cfg(feature = "raw_storage")]
+                source.columns[source_position]
+                    .data
+                    .swap_remove_raw(from_index);
             }
 
             destination.entity_indices.push(entity);
@@ -4457,7 +4490,10 @@ impl<T: Send + Sync + Default + 'static> QueryElement for &mut T {
         current_tick: u32,
     ) -> Self::ParFetch<'table> {
         let slot = slot.expect("required query element column missing");
-        slot.peak_changed = current_tick;
+        #[cfg(not(feature = "raw_storage"))]
+        {
+            slot.peak_changed = current_tick;
+        }
         let ColumnSlot { data, changed, .. } = slot;
         (
             column_vec_mut::<T>(data),
@@ -8511,6 +8547,7 @@ mod tests {
         assert!(world.is_alive(plain));
     }
 
+    #[cfg(not(feature = "raw_storage"))]
     #[test]
     fn test_mutable_query_stamps_peak_only_when_rows_are_visited() {
         let mut world = DynWorld::new();
