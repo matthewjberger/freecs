@@ -3739,6 +3739,9 @@ mod snapshot {
     where
         T: serde::Serialize + Send + Sync + Default + 'static,
     {
+        let column = column
+            .downcast_ref::<ErasedColumn>()
+            .expect("snapshot column codec received a value that is not an ErasedColumn");
         postcard::to_allocvec(column_vec::<T>(column))
             .map_err(|error| SnapshotError::Codec(error.to_string()))
     }
@@ -3747,9 +3750,13 @@ mod snapshot {
     where
         T: serde::de::DeserializeOwned + Send + Sync + Default + 'static,
     {
-        let column: Vec<T> =
+        let values: Vec<T> =
             postcard::from_bytes(bytes).map_err(|error| SnapshotError::Codec(error.to_string()))?;
-        Ok(Box::new(column))
+        let mut column = ErasedColumn::new::<T>();
+        for value in values {
+            column.push::<T>(value);
+        }
+        Ok(column)
     }
 
     #[derive(Debug, Clone, PartialEq)]
