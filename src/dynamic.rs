@@ -5054,6 +5054,7 @@ fn lookup_masks_from(elements: &[(Option<u64>, bool)]) -> Option<([u64; 8], u64)
     Some((masks, required))
 }
 
+#[cfg(not(feature = "raw_storage"))]
 fn distribute_slots<const COUNT: usize>(
     columns: &mut [ColumnSlot],
     positions: [Option<usize>; COUNT],
@@ -5068,6 +5069,25 @@ fn distribute_slots<const COUNT: usize>(
         }
     }
     slots
+}
+
+/// Resolves each element's column by direct index rather than scanning every
+/// column of the table. A query tuple's components are distinct, so their
+/// `column_position`s are distinct in-bounds indices, which is exactly the
+/// condition for handing out disjoint mutable borrows from the raw pointer.
+#[cfg(feature = "raw_storage")]
+fn distribute_slots<const COUNT: usize>(
+    columns: &mut [ColumnSlot],
+    positions: [Option<usize>; COUNT],
+) -> [Option<&mut ColumnSlot>; COUNT] {
+    let base = columns.as_mut_ptr();
+    let length = columns.len();
+    std::array::from_fn(|element_index| {
+        positions[element_index].map(|position| {
+            debug_assert!(position < length, "query column position out of bounds");
+            unsafe { &mut *base.add(position) }
+        })
+    })
 }
 
 macro_rules! impl_query_tuple {
