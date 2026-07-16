@@ -204,28 +204,61 @@ where
     }
 }
 
+/// The marker for a plain world system, `FnMut(&mut W)`, in a gate.
+pub struct PlainMarker;
+
+/// The marker for a system-parameter function in a gate.
+pub struct ParamMarker<Marker>(PhantomData<fn() -> Marker>);
+
+/// One gateable system: a plain world system `FnMut(&mut W)` or a
+/// system-parameter function ([`IntoSystem`](crate::system_param::IntoSystem)).
+/// A single gated system and each member of a gated tuple resolve through
+/// this, so a tuple may freely mix the two shapes.
+pub trait GatedSystem<W, Marker> {
+    /// Lowers the system to a runner the gate calls when its condition holds.
+    fn into_gated_runner(self) -> impl FnMut(&mut W) + Send + 'static;
+}
+
+impl<W, F> GatedSystem<W, PlainMarker> for F
+where
+    F: FnMut(&mut W) + Send + 'static,
+{
+    fn into_gated_runner(self) -> impl FnMut(&mut W) + Send + 'static {
+        self
+    }
+}
+
+impl<W, Marker, F> GatedSystem<W, ParamMarker<Marker>> for F
+where
+    F: IntoSystem<W, Marker>,
+{
+    fn into_gated_runner(self) -> impl FnMut(&mut W) + Send + 'static {
+        self.into_runner()
+    }
+}
+
 /// The marker for a single system passed where a group is accepted.
 pub struct SingleMarker<Marker>(PhantomData<fn() -> Marker>);
 
 /// The marker for a tuple of systems passed as one gated group.
 pub struct GroupMarker<Marker>(PhantomData<fn() -> Marker>);
 
-/// One system or a tuple of them, lowered to a single runner so a gate checks
-/// its condition once and then runs the whole group. A single
-/// [`IntoSystem`](crate::system_param::IntoSystem) resolves through
-/// [`SingleMarker`]; a tuple through [`GroupMarker`], running its members in
-/// order. Implemented for tuples of up to sixteen systems.
+/// One [`GatedSystem`] or a tuple of them, lowered to a single runner so a
+/// gate checks its condition once and then runs the whole group in order. A
+/// single system resolves through [`SingleMarker`]; a tuple through
+/// [`GroupMarker`]. A tuple may mix plain world systems and system-parameter
+/// functions. Implemented for tuples of up to sixteen systems.
 pub trait IntoGroupRunner<W, Marker> {
     /// Builds the group's runner, initializing each member's system once.
     fn into_group_runner(self) -> impl FnMut(&mut W) + Send + 'static;
 }
 
-impl<W, Marker, F> IntoGroupRunner<W, SingleMarker<Marker>> for F
+impl<W, Marker, S> IntoGroupRunner<W, SingleMarker<Marker>> for S
 where
-    F: IntoSystem<W, Marker>,
+    S: GatedSystem<W, Marker>,
 {
     fn into_group_runner(self) -> impl FnMut(&mut W) + Send + 'static {
-        self.into_runner()
+        self.into_gated_runner()
     }
 }
 
@@ -234,11 +267,11 @@ macro_rules! impl_group_runner_tuple {
         impl<W, $($system, $marker,)+> IntoGroupRunner<W, GroupMarker<($($marker,)+)>>
             for ($($system,)+)
         where
-            $($system: IntoSystem<W, $marker>,)+
+            $($system: GatedSystem<W, $marker>,)+
         {
             fn into_group_runner(self) -> impl FnMut(&mut W) + Send + 'static {
                 let ($($runner,)+) = self;
-                $(let mut $runner = $runner.into_runner();)+
+                $(let mut $runner = $runner.into_gated_runner();)+
                 move |world: &mut W| {
                     $($runner(world);)+
                 }
@@ -511,6 +544,47 @@ mod tests {
         schedule.push(
             "group",
             while_in(Screen::Playing, (tick, count_enter, tick)),
+        );
+
+        schedule.run(&mut world);
+        assert_eq!(world.resource::<Ticks>().unwrap().0, 2);
+        assert_eq!(world.resource::<Entered>().unwrap().0, 1);
+    }
+
+    fn plain_tick(world: &mut DynWorld) {
+        world.resource_mut::<Ticks>().unwrap().0 += 1;
+    }
+
+    #[test]
+    fn while_in_gates_a_plain_world_system() {
+        let mut world = DynWorld::new();
+        insert_state(&mut world, Screen::Playing);
+        world.insert_resource(Ticks(0));
+        let mut schedule = state_schedule();
+        schedule.push("plain", while_in(Screen::Playing, plain_tick));
+
+        schedule.run(&mut world);
+        assert_eq!(world.resource::<Ticks>().unwrap().0, 1);
+
+        next_state(&mut world, Screen::Title);
+        schedule.run(&mut world);
+        assert_eq!(
+            world.resource::<Ticks>().unwrap().0,
+            1,
+            "the plain world system is skipped off its state"
+        );
+    }
+
+    #[test]
+    fn while_in_gates_a_tuple_mixing_plain_and_param_systems() {
+        let mut world = DynWorld::new();
+        insert_state(&mut world, Screen::Playing);
+        world.insert_resource(Ticks(0));
+        world.insert_resource(Entered(0));
+        let mut schedule = state_schedule();
+        schedule.push(
+            "mixed",
+            while_in(Screen::Playing, (plain_tick, count_enter, tick)),
         );
 
         schedule.run(&mut world);

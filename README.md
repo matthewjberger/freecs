@@ -1355,8 +1355,10 @@ build carries none of it.
 transition step on a schedule, `next_state` requests a change (applied on the
 next transition step, so no frame sees a mid-frame flip), and `while_in`,
 `while_in_any`, and `run_if` gate a system or a whole tuple of systems in one
-schedule entry. `on_enter` and `on_exit` run once per transition by reading
-the emitted `StateTransition` event through their own cursor.
+schedule entry. A gated system is either a plain `fn(&mut World)` world system
+or a system-parameter function, and a tuple may mix the two. `on_enter` and
+`on_exit` run once per transition by reading the emitted `StateTransition`
+event through their own cursor.
 
 ```rust
 use freecs::Schedule;
