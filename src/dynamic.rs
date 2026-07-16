@@ -2819,11 +2819,7 @@ impl DynWorld {
         {
             let table = &mut self.tables[table_index];
             for column in &mut table.columns {
-                let filled_length = column.changed.len() + count;
-                column.changed.resize(filled_length, current_tick);
-                column.added.resize(filled_length, current_tick);
-                column.peak_changed = current_tick;
-                column.peak_added = current_tick;
+                column.track_extend(count, current_tick);
             }
             table.entity_indices.extend_from_slice(&entities);
         }
@@ -4295,6 +4291,18 @@ pub trait QueryElement: sealed::SealedElement {
     fn slice_iter<'fetch>(
         fetch: Self::ParFetch<'fetch>,
     ) -> impl Iterator<Item = Self::Item<'fetch>> + 'fetch;
+    /// Row access without bounds checks, the `raw_storage` fast-path
+    /// counterpart of [`par_item`](Self::par_item). Change stamping is
+    /// already disabled under `raw_storage`, so this only reads or hands out
+    /// the element at `index`.
+    ///
+    /// # Safety
+    /// `index` must be less than the fetched column's length.
+    #[cfg(feature = "raw_storage")]
+    unsafe fn par_item_unchecked<'fetch>(
+        fetch: &'fetch mut Self::ParFetch<'_>,
+        index: usize,
+    ) -> Self::Item<'fetch>;
 }
 
 impl<T: Send + Sync + Default + 'static> sealed::SealedElement for &T {}
@@ -4371,6 +4379,14 @@ impl<T: Send + Sync + Default + 'static> QueryElement for &T {
         fetch: Self::ParFetch<'fetch>,
     ) -> impl Iterator<Item = Self::Item<'fetch>> + 'fetch {
         IntoIterator::into_iter(fetch.0)
+    }
+
+    #[cfg(feature = "raw_storage")]
+    unsafe fn par_item_unchecked<'fetch>(
+        fetch: &'fetch mut Self::ParFetch<'_>,
+        index: usize,
+    ) -> Self::Item<'fetch> {
+        unsafe { fetch.0.get_unchecked(index) }
     }
 }
 
@@ -4484,6 +4500,14 @@ impl<T: Send + Sync + Default + 'static> QueryElement for &mut T {
         changed.fill(tick);
         IntoIterator::into_iter(data)
     }
+
+    #[cfg(feature = "raw_storage")]
+    unsafe fn par_item_unchecked<'fetch>(
+        fetch: &'fetch mut Self::ParFetch<'_>,
+        index: usize,
+    ) -> Self::Item<'fetch> {
+        unsafe { fetch.0.get_unchecked_mut(index) }
+    }
 }
 
 impl<T: Send + Sync + Default + 'static> sealed::SealedElement for Option<&T> {}
@@ -4566,6 +4590,16 @@ impl<T: Send + Sync + Default + 'static> QueryElement for Option<&T> {
         std::iter::from_fn(|| {
             unreachable!("optional query elements never use the all-required fast path")
         })
+    }
+
+    #[cfg(feature = "raw_storage")]
+    unsafe fn par_item_unchecked<'fetch>(
+        fetch: &'fetch mut Self::ParFetch<'_>,
+        index: usize,
+    ) -> Self::Item<'fetch> {
+        fetch
+            .as_ref()
+            .map(|inner| unsafe { inner.0.get_unchecked(index) })
     }
 }
 
@@ -4670,6 +4704,16 @@ impl<T: Send + Sync + Default + 'static> QueryElement for Option<&mut T> {
         std::iter::from_fn(|| {
             unreachable!("optional query elements never use the all-required fast path")
         })
+    }
+
+    #[cfg(feature = "raw_storage")]
+    unsafe fn par_item_unchecked<'fetch>(
+        fetch: &'fetch mut Self::ParFetch<'_>,
+        index: usize,
+    ) -> Self::Item<'fetch> {
+        fetch
+            .as_mut()
+            .map(|inner| unsafe { inner.0.get_unchecked_mut(index) })
     }
 }
 
@@ -4857,6 +4901,15 @@ pub trait QueryTuple: sealed::SealedQueryTuple {
         mid: usize,
     ) -> (Self::ParFetch<'table>, Self::ParFetch<'table>);
     fn par_item<'fetch>(fetch: &'fetch mut Self::ParFetch<'_>, index: usize) -> Self::Item<'fetch>;
+    /// Row access without bounds checks, used by the `raw_storage` fast path.
+    ///
+    /// # Safety
+    /// `index` must be less than every fetched column's length.
+    #[cfg(feature = "raw_storage")]
+    unsafe fn par_item_unchecked<'fetch>(
+        fetch: &'fetch mut Self::ParFetch<'_>,
+        index: usize,
+    ) -> Self::Item<'fetch>;
     fn mark_changed_all(fetch: &mut Self::Fetch<'_>);
     fn item_marked<'fetch>(fetch: &'fetch mut Self::Fetch<'_>, index: usize) -> Self::Item<'fetch>;
     const ALL_REQUIRED: bool;
@@ -5396,6 +5449,14 @@ macro_rules! impl_query_tuple {
                 ($($element::par_item(&mut fetch.$position, index),)+)
             }
 
+            #[cfg(feature = "raw_storage")]
+            unsafe fn par_item_unchecked<'fetch>(
+                fetch: &'fetch mut Self::ParFetch<'_>,
+                index: usize,
+            ) -> Self::Item<'fetch> {
+                ($(unsafe { $element::par_item_unchecked(&mut fetch.$position, index) },)+)
+            }
+
             fn mark_changed_all(fetch: &mut Self::Fetch<'_>) {
                 $($element::mark_changed_all(&mut fetch.$position);)+
             }
@@ -5411,9 +5472,20 @@ macro_rules! impl_query_tuple {
             where
                 FN: for<'item> FnMut(Entity, Self::Item<'item>),
             {
-                let mut iterators = ($($element::slice_iter(fetch.$position),)+);
-                for &entity in entities {
-                    f(entity, ($(iterators.$position.next().unwrap(),)+));
+                #[cfg(feature = "raw_storage")]
+                {
+                    let mut fetch = fetch;
+                    for index in 0..entities.len() {
+                        let entity = unsafe { *entities.get_unchecked(index) };
+                        f(entity, unsafe { Self::par_item_unchecked(&mut fetch, index) });
+                    }
+                }
+                #[cfg(not(feature = "raw_storage"))]
+                {
+                    let mut iterators = ($($element::slice_iter(fetch.$position),)+);
+                    for &entity in entities {
+                        f(entity, ($(iterators.$position.next().unwrap(),)+));
+                    }
                 }
             }
         }
@@ -5453,6 +5525,12 @@ where
     let length = entities.len();
     if length <= PARALLEL_ROW_CHUNK {
         let mut fetch = fetch;
+        #[cfg(feature = "raw_storage")]
+        for index in 0..length {
+            let entity = unsafe { *entities.get_unchecked(index) };
+            f(entity, unsafe { Q::par_item_unchecked(&mut fetch, index) });
+        }
+        #[cfg(not(feature = "raw_storage"))]
         for (index, &entity) in entities.iter().enumerate() {
             f(entity, Q::par_item(&mut fetch, index));
         }
@@ -5794,6 +5872,14 @@ macro_rules! impl_bare_element_query {
                     <$element as QueryElement>::par_item(fetch, index)
                 }
 
+                #[cfg(feature = "raw_storage")]
+                unsafe fn par_item_unchecked<'fetch>(
+                    fetch: &'fetch mut Self::ParFetch<'_>,
+                    index: usize,
+                ) -> Self::Item<'fetch> {
+                    unsafe { <$element as QueryElement>::par_item_unchecked(fetch, index) }
+                }
+
                 fn mark_changed_all(fetch: &mut Self::Fetch<'_>) {
                     <$element as QueryElement>::mark_changed_all(fetch);
                 }
@@ -5811,9 +5897,22 @@ macro_rules! impl_bare_element_query {
                 where
                     FN: for<'item> FnMut(Entity, Self::Item<'item>),
                 {
-                    let mut iterator = <$element as QueryElement>::slice_iter(fetch);
-                    for &entity in entities {
-                        f(entity, iterator.next().unwrap());
+                    #[cfg(feature = "raw_storage")]
+                    {
+                        let mut fetch = fetch;
+                        for index in 0..entities.len() {
+                            let entity = unsafe { *entities.get_unchecked(index) };
+                            f(entity, unsafe {
+                                <$element as QueryElement>::par_item_unchecked(&mut fetch, index)
+                            });
+                        }
+                    }
+                    #[cfg(not(feature = "raw_storage"))]
+                    {
+                        let mut iterator = <$element as QueryElement>::slice_iter(fetch);
+                        for &entity in entities {
+                            f(entity, iterator.next().unwrap());
+                        }
                     }
                 }
             }
@@ -8623,6 +8722,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(feature = "raw_storage"))]
     fn test_unfiltered_mutable_iteration_marks_changes() {
         let mut world = DynWorld::new();
         world.spawn_bundles(
