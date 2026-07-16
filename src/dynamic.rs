@@ -1825,7 +1825,7 @@ impl DynWorld {
         from_table: usize,
         from_index: usize,
         to_table: usize,
-    ) {
+    ) -> (usize, usize) {
         let tick = self.current_tick;
         let swapped_entity;
         {
@@ -1913,6 +1913,7 @@ impl DynWorld {
         {
             location.array_index = from_index as u32;
         }
+        (to_table, new_index)
     }
 
     pub fn add_components(&mut self, entity: Entity, mask: u64) -> bool {
@@ -2097,12 +2098,88 @@ impl DynWorld {
         true
     }
 
+    /// Resolves the table an entity moves to when `mask` is added, creating
+    /// and caching the edge on first use.
+    #[cfg(feature = "raw_storage")]
+    fn resolve_add_target(&mut self, table_index: usize, mask: u64) -> usize {
+        let current_mask = self.tables[table_index].mask;
+        let cached = if mask.count_ones() == 1 {
+            self.table_edges[table_index]
+                .add_edges
+                .get(mask.trailing_zeros() as usize)
+                .copied()
+                .flatten()
+        } else {
+            self.table_edges[table_index]
+                .multi_add_cache
+                .get(&mask)
+                .copied()
+        };
+        cached.unwrap_or_else(|| {
+            let new_index = self.get_or_create_table(current_mask | mask);
+            self.table_edges[table_index]
+                .multi_add_cache
+                .insert(mask, new_index);
+            new_index
+        })
+    }
+
     pub fn set_keyed<T: 'static>(&mut self, key: ComponentKey<T>, entity: Entity, value: T) {
         self.check_key(key.registry_id);
         let current_tick = self.current_tick;
-        if let Some((table_index, array_index)) = get_location(&self.entity_locations, entity) {
-            let table = &mut self.tables[table_index];
-            if table.mask & key.mask != 0 {
+
+        // Under raw_storage change detection is off and record_structural is a
+        // no-op, so the migration path collapses to: locate once, migrate
+        // reusing the location move_entity returns, write the value in place.
+        // No tick stamps, no structural push, no second location lookup.
+        #[cfg(feature = "raw_storage")]
+        {
+            let _ = current_tick;
+            if let Some((table_index, array_index)) = get_location(&self.entity_locations, entity) {
+                if self.tables[table_index].mask & key.mask != 0 {
+                    let position = column_position(self.tables[table_index].mask, key.mask);
+                    column_vec_mut::<T>(&mut self.tables[table_index].columns[position].data)
+                        [array_index] = value;
+                    return;
+                }
+                let target = self.resolve_add_target(table_index, key.mask);
+                let (new_table, new_index) =
+                    self.move_entity(entity, table_index, array_index, target);
+                let position = column_position(self.tables[new_table].mask, key.mask);
+                column_vec_mut::<T>(&mut self.tables[new_table].columns[position].data)
+                    [new_index] = value;
+                return;
+            }
+            if self.add_components(entity, key.mask)
+                && let Some((table_index, array_index)) =
+                    get_location(&self.entity_locations, entity)
+            {
+                let position = column_position(self.tables[table_index].mask, key.mask);
+                column_vec_mut::<T>(&mut self.tables[table_index].columns[position].data)
+                    [array_index] = value;
+            }
+        }
+
+        #[cfg(not(feature = "raw_storage"))]
+        {
+            if let Some((table_index, array_index)) = get_location(&self.entity_locations, entity) {
+                let table = &mut self.tables[table_index];
+                if table.mask & key.mask != 0 {
+                    let position = column_position(table.mask, key.mask);
+                    let column = &mut table.columns[position];
+                    column_vec_mut::<T>(&mut column.data)[array_index] = value;
+                    if let Some(cell) = column.changed.get_mut(array_index) {
+                        *cell = current_tick;
+                    }
+                    column.peak_changed = current_tick;
+                    return;
+                }
+            }
+            if self.add_components(entity, key.mask)
+                && let Some((table_index, array_index)) =
+                    get_location(&self.entity_locations, entity)
+            {
+                let table = &mut self.tables[table_index];
                 let position = column_position(table.mask, key.mask);
                 let column = &mut table.columns[position];
                 column_vec_mut::<T>(&mut column.data)[array_index] = value;
@@ -2110,20 +2187,7 @@ impl DynWorld {
                     *cell = current_tick;
                 }
                 column.peak_changed = current_tick;
-                return;
             }
-        }
-        if self.add_components(entity, key.mask)
-            && let Some((table_index, array_index)) = get_location(&self.entity_locations, entity)
-        {
-            let table = &mut self.tables[table_index];
-            let position = column_position(table.mask, key.mask);
-            let column = &mut table.columns[position];
-            column_vec_mut::<T>(&mut column.data)[array_index] = value;
-            if let Some(cell) = column.changed.get_mut(array_index) {
-                *cell = current_tick;
-            }
-            column.peak_changed = current_tick;
         }
     }
 
