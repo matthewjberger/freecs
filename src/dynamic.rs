@@ -105,6 +105,47 @@ static NEXT_REGISTRY_ID: AtomicU32 = AtomicU32::new(1);
 /// Any>` regardless of the column storage backend.
 type BoxedAny = Box<dyn Any + Send + Sync>;
 
+/// A fast, non-cryptographic hasher for `TypeId` keys, used by `raw_storage`
+/// to resolve a component type to its column index. Every typed `set`, `get`,
+/// and `remove` does one such lookup, so the default `SipHash` over a 16-byte
+/// `TypeId` is a real per-operation cost; this mixes the id's words directly.
+/// Only the value distribution matters here, never resistance to collisions.
+#[cfg(feature = "raw_storage")]
+#[derive(Default)]
+pub struct TypeIdHasher(u64);
+
+#[cfg(feature = "raw_storage")]
+impl std::hash::Hasher for TypeIdHasher {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+
+    fn write(&mut self, bytes: &[u8]) {
+        let mut hash = self.0;
+        for &byte in bytes {
+            hash = (hash ^ byte as u64).wrapping_mul(0x0000_0100_0000_01b3);
+        }
+        self.0 = hash;
+    }
+
+    fn write_u64(&mut self, value: u64) {
+        self.0 = (self.0 ^ value).wrapping_mul(0x9e37_79b9_7f4a_7c15);
+    }
+
+    fn write_u128(&mut self, value: u128) {
+        self.write_u64(value as u64);
+        self.write_u64((value >> 64) as u64);
+    }
+}
+
+/// `TypeId`-keyed map used for the registry's type-to-index lookups. Uses the
+/// fast [`TypeIdHasher`] under `raw_storage` and the standard hasher otherwise,
+/// so the default build's public types are unchanged.
+#[cfg(feature = "raw_storage")]
+type TypeIdMap<V> = HashMap<TypeId, V, std::hash::BuildHasherDefault<TypeIdHasher>>;
+#[cfg(not(feature = "raw_storage"))]
+type TypeIdMap<V> = HashMap<TypeId, V>;
+
 /// A type-erased component column. With the default (safe) storage it is a
 /// boxed `Vec<T>` reached through `Any` downcasts. With the opt-in
 /// `raw_storage` feature it is a hand-rolled contiguous buffer reached through
@@ -662,9 +703,9 @@ pub struct TagKey {
 pub struct ComponentRegistry {
     pub registry_id: u32,
     pub components: Vec<ComponentInfo>,
-    pub components_by_type: HashMap<TypeId, u32>,
+    pub components_by_type: TypeIdMap<u32>,
     pub tag_count: u32,
-    pub tags_by_type: HashMap<TypeId, u32>,
+    pub tags_by_type: TypeIdMap<u32>,
     #[cfg(feature = "snapshot")]
     pub codecs: Vec<Option<ComponentCodec>>,
 }
@@ -680,9 +721,9 @@ impl ComponentRegistry {
         Self {
             registry_id: NEXT_REGISTRY_ID.fetch_add(1, Ordering::Relaxed),
             components: Vec::new(),
-            components_by_type: HashMap::new(),
+            components_by_type: TypeIdMap::default(),
             tag_count: 0,
-            tags_by_type: HashMap::new(),
+            tags_by_type: TypeIdMap::default(),
             #[cfg(feature = "snapshot")]
             codecs: Vec::new(),
         }
