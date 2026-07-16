@@ -391,7 +391,7 @@ fn with_game<R>(world: &mut DynWorld, f: impl FnOnce(&mut DynWorld, &mut GameRes
 }
 
 fn scaled_frame_time(world: &DynWorld) -> f32 {
-    get_frame_time() * world.expect_resource::<GameResources>().game_speed
+    get_frame_time() * world.res::<GameResources>().game_speed
 }
 
 const GRID_SIZE: i32 = 12;
@@ -1463,7 +1463,7 @@ fn restart_game(world: &mut DynWorld, game: &mut GameResources) {
 }
 
 fn render_grid(world: &DynWorld) {
-    let game = world.expect_resource::<GameResources>();
+    let game = world.res::<GameResources>();
     let scale = get_scale();
     let offset = get_offset();
 
@@ -1538,7 +1538,7 @@ fn render_grid(world: &DynWorld) {
 }
 
 fn render_towers(world: &DynWorld) {
-    let game = world.expect_resource::<GameResources>();
+    let game = world.res::<GameResources>();
     let scale = get_scale();
     let offset = get_offset();
 
@@ -1968,7 +1968,7 @@ fn tag_query_example_system(world: &DynWorld) {
 }
 
 fn render_ui(world: &DynWorld) {
-    let game = world.expect_resource::<GameResources>();
+    let game = world.res::<GameResources>();
 
     let money_text = format!("Money: ${}", game.money);
     draw_text(&money_text, 10.0, 30.0, 30.0, GREEN);
@@ -2220,20 +2220,19 @@ async fn main() {
 
         input_system(&mut world);
 
-        let game_state = world.expect_resource::<GameResources>().game_state;
+        let game_state = world.res::<GameResources>().game_state;
         if game_state != GameState::Paused {
             game_schedule.run(&mut world);
         }
 
         {
-            let game = world.expect_resource_mut::<GameResources>();
+            let game = world.res_mut::<GameResources>();
             if game.wave_announce_timer > 0.0 {
                 game.wave_announce_timer -= get_frame_time();
             }
         }
 
-        let waiting =
-            world.expect_resource::<GameResources>().game_state == GameState::WaitingForWave;
+        let waiting = world.res::<GameResources>().game_state == GameState::WaitingForWave;
         if is_key_pressed(KeyCode::Space) && waiting {
             with_game(&mut world, plan_wave);
         }

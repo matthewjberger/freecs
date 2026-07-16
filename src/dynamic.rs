@@ -2722,19 +2722,15 @@ impl DynWorld {
     /// [`resource`](Self::resource) for resources that must exist: panics
     /// with the type name instead of returning `Option`, so call sites for
     /// engine-style singletons stay free of `unwrap`.
-    pub fn expect_resource<T: Send + Sync + 'static>(&self) -> &T {
-        self.resource::<T>().unwrap_or_else(|| {
-            panic!(
-                "expect_resource requires {} to be present",
-                std::any::type_name::<T>()
-            )
-        })
+    pub fn res<T: Send + Sync + 'static>(&self) -> &T {
+        self.resource::<T>()
+            .unwrap_or_else(|| panic!("res requires {} to be present", std::any::type_name::<T>()))
     }
 
-    pub fn expect_resource_mut<T: Send + Sync + 'static>(&mut self) -> &mut T {
+    pub fn res_mut<T: Send + Sync + 'static>(&mut self) -> &mut T {
         self.resource_mut::<T>().unwrap_or_else(|| {
             panic!(
-                "expect_resource_mut requires {} to be present",
+                "res_mut requires {} to be present",
                 std::any::type_name::<T>()
             )
         })
@@ -3419,21 +3415,17 @@ impl DynEcs {
 
     /// [`resource`](Self::resource) for resources that must exist: panics
     /// with the type name instead of returning `Option`.
-    pub fn expect_resource<T: Send + Sync + 'static>(&self) -> &T {
-        self.resource::<T>().unwrap_or_else(|| {
-            panic!(
-                "expect_resource requires {} to be present",
-                std::any::type_name::<T>()
-            )
-        })
+    pub fn res<T: Send + Sync + 'static>(&self) -> &T {
+        self.resource::<T>()
+            .unwrap_or_else(|| panic!("res requires {} to be present", std::any::type_name::<T>()))
     }
 
-    /// The mutable form of [`expect_resource`](Self::expect_resource).
-    pub fn expect_resource_mut<T: Send + Sync + 'static>(&mut self) -> &mut T {
+    /// The mutable form of [`res`](Self::res).
+    pub fn res_mut<T: Send + Sync + 'static>(&mut self) -> &mut T {
         match self.resource_mut::<T>() {
             Some(resource) => resource,
             None => panic!(
-                "expect_resource_mut requires {} to be present",
+                "res_mut requires {} to be present",
                 std::any::type_name::<T>()
             ),
         }
@@ -8885,24 +8877,24 @@ mod tests {
     }
 
     #[test]
-    fn test_expect_resource_returns_and_panics_with_type_name() {
+    fn test_res_returns_and_panics_with_type_name() {
         struct Score(u32);
 
         let mut world = DynWorld::new();
         world.insert_resource(Score(5));
 
-        assert_eq!(world.expect_resource::<Score>().0, 5);
-        world.expect_resource_mut::<Score>().0 += 1;
-        assert_eq!(world.expect_resource::<Score>().0, 6);
+        assert_eq!(world.res::<Score>().0, 5);
+        world.res_mut::<Score>().0 += 1;
+        assert_eq!(world.res::<Score>().0, 6);
     }
 
     #[test]
-    #[should_panic(expected = "expect_resource requires")]
-    fn test_expect_resource_panics_on_missing_resource() {
+    #[should_panic(expected = "res requires")]
+    fn test_res_panics_on_missing_resource() {
         struct Missing;
 
         let world = DynWorld::new();
-        world.expect_resource::<Missing>();
+        world.res::<Missing>();
     }
 
     #[test]
@@ -11471,8 +11463,8 @@ mod tests {
         assert!(ecs.resource::<Shared>().is_none());
         ecs.insert_resource(Shared(1));
         ecs.insert_resource(Delta(0.5));
-        ecs.expect_resource_mut::<Shared>().0 += 1;
-        assert_eq!(ecs.expect_resource::<Shared>().0, 2);
+        ecs.res_mut::<Shared>().0 += 1;
+        assert_eq!(ecs.res::<Shared>().0, 2);
 
         let entity = ecs.spawn();
         ecs.resource_scope(|ecs, shared: &mut Shared| {

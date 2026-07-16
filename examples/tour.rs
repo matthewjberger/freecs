@@ -107,11 +107,11 @@ fn main() {
     }
     assert!(world.has::<Velocity>(player));
 
-    // Resources insert by value and read back typed; expect_resource
+    // Resources insert by value and read back typed; res
     // panics with the type name for engine-style singletons.
     world.insert_resource(DeltaTime(0.5));
     world.insert_resource(Score(0));
-    assert_eq!(world.expect_resource::<DeltaTime>().0, 0.5);
+    assert_eq!(world.res::<DeltaTime>().0, 0.5);
 
     // Host scopes: ResourceHostExt gives any ResourceHost the scopes as
     // methods, and the closure receives the host itself, so a system can
@@ -126,7 +126,7 @@ fn main() {
         score.0 += 1;
     });
     assert_eq!(engine.frames, 1);
-    assert_eq!(engine.world.expect_resource::<Score>().0, 1);
+    assert_eq!(engine.world.res::<Score>().0, 1);
 
     // step() ends a frame: it expires old events and opens the next
     // change-detection window, so the systems below read as "this frame".

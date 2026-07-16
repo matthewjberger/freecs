@@ -1310,11 +1310,11 @@ struct, one per event type per consumer.
 let mut world = DynWorld::new();
 world.insert_resource(DeltaTime(0.016));
 
-// Fallible and infallible reads. expect_* panics with the type name.
+// Fallible and infallible reads. res/res_mut panic with the type name.
 assert!(world.resource::<Score>().is_none());
-let delta_time = world.expect_resource::<DeltaTime>().0;
+let delta_time = world.res::<DeltaTime>().0;
 world.insert_resource(Score(0));
-world.expect_resource_mut::<Score>().0 += 1;
+world.res_mut::<Score>().0 += 1;
 
 // Scopes take resources out for one closure and put them back, even on
 // panic. See Writing systems above for the tuple form.
@@ -1497,7 +1497,7 @@ component when absent and stamp change ticks like any `set`.
 
 Three access tiers, from ergonomic to explicit:
 
-- **Typed**: `spawn(bundle)` / `spawn_bundles(bundle, count)` / `queue_spawn(bundle)` returning the handle before the command applies, `get::<T>` / `set` / `remove`, `query::<(&mut A, &B)>()` with `Option<&T>` elements, up to eight per tuple, and bare single elements (`query::<&mut A>()`), `changed::<T>()` and `added::<T>()` filters on both query forms, `query_ref` iterators on `&world` with `single()` and `iter_combinations()`, marker-type tags (`add_tag_type::<T>`, `with_tag_type::<T>()`), `despawn_with_any::<(A, B)>()`, `ChildOf` links with `children` / `despawn_recursive`, entity inspection (`entity_components`, `component_by_name`), `resource_scope` / `resources_scope` over tuples, `send(event)` / `consume_events::<T>(&mut cursor)`, `insert_resource` / `resource::<T>()` / `expect_resource::<T>()`. `TypeId` lookups happen at registration and per typed call, never inside iteration loops.
+- **Typed**: `spawn(bundle)` / `spawn_bundles(bundle, count)` / `queue_spawn(bundle)` returning the handle before the command applies, `get::<T>` / `set` / `remove`, `query::<(&mut A, &B)>()` with `Option<&T>` elements, up to eight per tuple, and bare single elements (`query::<&mut A>()`), `changed::<T>()` and `added::<T>()` filters on both query forms, `query_ref` iterators on `&world` with `single()` and `iter_combinations()`, marker-type tags (`add_tag_type::<T>`, `with_tag_type::<T>()`), `despawn_with_any::<(A, B)>()`, `ChildOf` links with `children` / `despawn_recursive`, entity inspection (`entity_components`, `component_by_name`), `resource_scope` / `resources_scope` over tuples, `send(event)` / `consume_events::<T>(&mut cursor)`, `insert_resource` / `resource::<T>()` / `res::<T>()`. `TypeId` lookups happen at registration and per typed call, never inside iteration loops.
 - **Keyed**: `register::<T>()` returns a copyable `ComponentKey<T>` carrying the component's mask bit. `get_keyed` / `set_keyed` and mask-based `for_each` / `for_each_mut` skip the hash entirely.
 - **Raw tables**: `for_each_tables_mut(mask, 0, |table| ...)` with `table.columns_pair(a, b)` hoists concrete slices once per table for the tightest loops, no change stamping, same covenant as the static path.
 
@@ -1526,7 +1526,7 @@ world's mask space and filter per-world typed queries by set reference.
 
 The group is also where state and signals that cross member (and plugin)
 boundaries live: `DynEcs` carries its own resource map
-(`insert_resource` / `expect_resource` / `resource_scope` /
+(`insert_resource` / `res` / `resource_scope` /
 `resources_scope`, same semantics as the world's) and its own event
 channels (`send` / `consume_events` with per-consumer cursors), and
 `ecs.step()` expires group events and steps every member world in one

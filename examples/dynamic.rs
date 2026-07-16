@@ -45,7 +45,7 @@ fn main() {
     println!("\n=== Typed queries, mutability from the tuple ===");
     let mut collision_cursor = 0;
     for frame in 0..3 {
-        let delta_time = *world.expect_resource::<f32>();
+        let delta_time = *world.res::<f32>();
 
         world
             .query::<(&mut Position, &Velocity)>()
@@ -157,7 +157,7 @@ fn main() {
     println!(
         "player: {:?} after {} scoped frame(s)",
         world.get::<Position>(player),
-        world.expect_resource::<u32>()
+        world.res::<u32>()
     );
 
     println!("\n=== Deferred commands ===");
