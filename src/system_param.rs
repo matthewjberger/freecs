@@ -907,6 +907,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(feature = "raw_storage"))]
     fn changed_filter_visits_only_mutated() {
         let mut world = DynWorld::new();
         let entity = world.spawn((Position { x: 0.0, y: 0.0 },));
@@ -1168,6 +1169,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(feature = "raw_storage"))]
     fn added_filter_visits_only_new() {
         let mut world = DynWorld::new();
         world.spawn((Position { x: 0.0, y: 0.0 },));

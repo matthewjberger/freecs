@@ -109,8 +109,15 @@ type BoxedAny = Box<dyn Any + Send + Sync>;
 /// boxed `Vec<T>` reached through `Any` downcasts. With the opt-in
 /// `raw_storage` feature it is a hand-rolled contiguous buffer reached through
 /// pointer casts that are checked once at registration, dropping the per-access
-/// downcast. Both present the same interface, so nothing above this type
-/// changes: the public API and observable behavior are identical either way.
+/// downcast, and its freed allocations are recycled through a thread-local
+/// pool instead of returned to the system allocator.
+///
+/// The public API is byte-for-byte identical across both backends. Observable
+/// behavior is identical too, with one deliberate exception: `raw_storage`
+/// disables per-row change detection, so `changed::<T>()`, `added::<T>()`, and
+/// the `for_each_mut_changed` family match nothing. This is the speed trade the
+/// feature buys, trading the per-row tick bookkeeping for raw throughput.
+/// [`HierarchyIndex`] stays correct by rescanning instead of diffing ticks.
 pub struct ErasedColumn {
     #[cfg(not(feature = "raw_storage"))]
     storage: Box<dyn Any + Send + Sync>,
@@ -288,7 +295,82 @@ impl ErasedColumn {
 #[cfg(feature = "raw_storage")]
 mod raw_storage {
     use std::alloc::{self, Layout};
+    use std::cell::RefCell;
+    use std::collections::HashMap;
     use std::ptr::{self, NonNull};
+
+    /// A thread-local free list of raw column allocations, bucketed by
+    /// element size and alignment. Dropping a column returns its buffer here
+    /// instead of to the system allocator, so the next column of the same
+    /// shape reuses it. This mirrors a chunk pool: repeated spawn/despawn
+    /// cycles stop paying for `alloc`/`dealloc` round trips. Buffers are
+    /// deallocated when the pool itself drops at thread exit, so nothing
+    /// leaks.
+    type PooledBuffer = (NonNull<u8>, usize);
+
+    struct BufferPool {
+        buckets: HashMap<(usize, usize), Vec<PooledBuffer>>,
+    }
+
+    const MAX_POOLED_PER_BUCKET: usize = 64;
+
+    impl Drop for BufferPool {
+        fn drop(&mut self) {
+            for ((item_size, item_align), bucket) in self.buckets.drain() {
+                for (pointer, capacity) in bucket {
+                    if item_size != 0 && capacity != 0 {
+                        let layout = Layout::from_size_align(item_size * capacity, item_align)
+                            .expect("pooled column layout overflow");
+                        unsafe { alloc::dealloc(pointer.as_ptr(), layout) };
+                    }
+                }
+            }
+        }
+    }
+
+    thread_local! {
+        static POOL: RefCell<BufferPool> = RefCell::new(BufferPool {
+            buckets: HashMap::new(),
+        });
+    }
+
+    /// Pulls a buffer for `(item_size, item_align)` that holds at least
+    /// `required` elements when one exists, otherwise the largest buffer in
+    /// the bucket (the caller grows it), otherwise `None`.
+    fn pool_take(
+        item_size: usize,
+        item_align: usize,
+        required: usize,
+    ) -> Option<(NonNull<u8>, usize)> {
+        POOL.with(|pool| {
+            let mut pool = pool.borrow_mut();
+            let bucket = pool.buckets.get_mut(&(item_size, item_align))?;
+            if bucket.is_empty() {
+                return None;
+            }
+            let chosen = bucket
+                .iter()
+                .position(|&(_, capacity)| capacity >= required)
+                .unwrap_or(bucket.len() - 1);
+            Some(bucket.swap_remove(chosen))
+        })
+    }
+
+    /// Returns a buffer to the pool, or deallocates it when the bucket is
+    /// already at capacity.
+    fn pool_return(pointer: NonNull<u8>, item_size: usize, item_align: usize, capacity: usize) {
+        POOL.with(|pool| {
+            let mut pool = pool.borrow_mut();
+            let bucket = pool.buckets.entry((item_size, item_align)).or_default();
+            if bucket.len() < MAX_POOLED_PER_BUCKET {
+                bucket.push((pointer, capacity));
+            } else {
+                let layout = Layout::from_size_align(item_size * capacity, item_align)
+                    .expect("pooled column layout overflow");
+                unsafe { alloc::dealloc(pointer.as_ptr(), layout) };
+            }
+        });
+    }
 
     pub(crate) struct RawColumn {
         pointer: NonNull<u8>,
@@ -355,15 +437,36 @@ mod raw_storage {
             }
             let new_capacity = required.max(self.capacity * 2).max(4);
             let new_layout = self.layout_for(new_capacity);
-            let new_pointer = if self.capacity == 0 {
-                unsafe { alloc::alloc(new_layout) }
+            if self.capacity == 0 {
+                if let Some((pooled_pointer, pooled_capacity)) =
+                    pool_take(self.item_size, self.item_align, new_capacity)
+                {
+                    if pooled_capacity >= new_capacity {
+                        self.pointer = pooled_pointer;
+                        self.capacity = pooled_capacity;
+                        return;
+                    }
+                    let old_layout = self.layout_for(pooled_capacity);
+                    let grown = unsafe {
+                        alloc::realloc(pooled_pointer.as_ptr(), old_layout, new_layout.size())
+                    };
+                    self.pointer = NonNull::new(grown)
+                        .unwrap_or_else(|| alloc::handle_alloc_error(new_layout));
+                    self.capacity = new_capacity;
+                    return;
+                }
+                let fresh = unsafe { alloc::alloc(new_layout) };
+                self.pointer =
+                    NonNull::new(fresh).unwrap_or_else(|| alloc::handle_alloc_error(new_layout));
+                self.capacity = new_capacity;
             } else {
                 let old_layout = self.layout_for(self.capacity);
-                unsafe { alloc::realloc(self.pointer.as_ptr(), old_layout, new_layout.size()) }
-            };
-            self.pointer =
-                NonNull::new(new_pointer).unwrap_or_else(|| alloc::handle_alloc_error(new_layout));
-            self.capacity = new_capacity;
+                let grown =
+                    unsafe { alloc::realloc(self.pointer.as_ptr(), old_layout, new_layout.size()) };
+                self.pointer =
+                    NonNull::new(grown).unwrap_or_else(|| alloc::handle_alloc_error(new_layout));
+                self.capacity = new_capacity;
+            }
         }
 
         pub(crate) fn push<T: 'static>(&mut self, value: T) {
@@ -433,7 +536,7 @@ mod raw_storage {
                 }
             }
             if self.item_size != 0 && self.capacity != 0 {
-                unsafe { alloc::dealloc(self.pointer.as_ptr(), self.layout_for(self.capacity)) }
+                pool_return(self.pointer, self.item_size, self.item_align, self.capacity);
             }
         }
     }
@@ -718,6 +821,66 @@ pub struct ColumnSlot {
     pub peak_changed: u32,
     pub added: Vec<u32>,
     pub peak_added: u32,
+}
+
+impl ColumnSlot {
+    /// Grows the tick columns to match `count` freshly pushed rows. Under
+    /// `raw_storage` the tick columns are never materialized, so change
+    /// detection is disabled and this is a no-op.
+    #[inline]
+    fn track_extend(&mut self, count: usize, tick: u32) {
+        #[cfg(not(feature = "raw_storage"))]
+        {
+            let filled_length = self.changed.len() + count;
+            self.changed.resize(filled_length, tick);
+            self.added.resize(filled_length, tick);
+            self.peak_changed = tick;
+            self.peak_added = tick;
+        }
+        #[cfg(feature = "raw_storage")]
+        {
+            let _ = (count, tick);
+        }
+    }
+
+    /// Pushes one tick row: `tick` for the changed column, `added_value` for
+    /// the added column. No-op under `raw_storage`.
+    #[inline]
+    fn track_push(&mut self, tick: u32, added_value: u32) {
+        #[cfg(not(feature = "raw_storage"))]
+        {
+            self.changed.push(tick);
+            self.added.push(added_value);
+            self.peak_changed = tick;
+            self.peak_added = tick;
+        }
+        #[cfg(feature = "raw_storage")]
+        {
+            let _ = (tick, added_value);
+        }
+    }
+
+    /// Swap-removes one tick row, mirroring the data column's swap-remove.
+    /// No-op under `raw_storage`.
+    #[inline]
+    fn track_swap_remove(&mut self, index: usize) {
+        #[cfg(not(feature = "raw_storage"))]
+        {
+            self.changed.swap_remove(index);
+            self.added.swap_remove(index);
+        }
+        #[cfg(feature = "raw_storage")]
+        {
+            let _ = index;
+        }
+    }
+
+    /// The added tick carried by a row during migration, or `0` when change
+    /// detection is disabled under `raw_storage`.
+    #[inline]
+    fn carried_added(&self, index: usize) -> u32 {
+        self.added.get(index).copied().unwrap_or(0)
+    }
 }
 
 /// An archetype table for dynamic worlds: entities plus one [`ColumnSlot`]
@@ -1407,11 +1570,7 @@ impl DynWorld {
             for column in &mut table.columns {
                 let info = &self.registry.components[column.component_index as usize];
                 (info.push_default)(&mut column.data, count);
-                let filled_length = column.changed.len() + count;
-                column.changed.resize(filled_length, current_tick);
-                column.added.resize(filled_length, current_tick);
-                column.peak_changed = current_tick;
-                column.peak_added = current_tick;
+                column.track_extend(count, current_tick);
             }
             for &entity in &entities {
                 table.entity_indices.push(entity);
@@ -1458,8 +1617,7 @@ impl DynWorld {
         for column in &mut table.columns {
             let info = &self.registry.components[column.component_index as usize];
             (info.swap_remove)(&mut column.data, array_index);
-            column.changed.swap_remove(array_index);
-            column.added.swap_remove(array_index);
+            column.track_swap_remove(array_index);
         }
         table.entity_indices.swap_remove(array_index);
 
@@ -1596,10 +1754,7 @@ impl DynWorld {
                 let destination_column = &mut destination.columns[destination_position];
                 let info = &self.registry.components[destination_column.component_index as usize];
                 (info.push_default)(&mut destination_column.data, 1);
-                destination_column.changed.push(tick);
-                destination_column.peak_changed = tick;
-                destination_column.added.push(tick);
-                destination_column.peak_added = tick;
+                destination_column.track_push(tick, tick);
             }
 
             let shared = source.mask & destination.mask;
@@ -1610,7 +1765,7 @@ impl DynWorld {
 
                 let source_position = column_position(source.mask, component_mask);
                 let destination_position = column_position(destination.mask, component_mask);
-                let carried_added = source.columns[source_position].added[from_index];
+                let carried_added = source.columns[source_position].carried_added(from_index);
                 let info = &self.registry.components
                     [source.columns[source_position].component_index as usize];
                 (info.swap_remove_into)(
@@ -1618,17 +1773,9 @@ impl DynWorld {
                     from_index,
                     &mut destination.columns[destination_position].data,
                 );
-                source.columns[source_position]
-                    .changed
-                    .swap_remove(from_index);
-                source.columns[source_position]
-                    .added
-                    .swap_remove(from_index);
+                source.columns[source_position].track_swap_remove(from_index);
                 let destination_column = &mut destination.columns[destination_position];
-                destination_column.changed.push(tick);
-                destination_column.peak_changed = tick;
-                destination_column.added.push(carried_added);
-                destination_column.peak_added = tick;
+                destination_column.track_push(tick, carried_added);
             }
 
             let mut removed = source.mask & !destination.mask;
@@ -1640,12 +1787,7 @@ impl DynWorld {
                 let info = &self.registry.components
                     [source.columns[source_position].component_index as usize];
                 (info.swap_remove)(&mut source.columns[source_position].data, from_index);
-                source.columns[source_position]
-                    .changed
-                    .swap_remove(from_index);
-                source.columns[source_position]
-                    .added
-                    .swap_remove(from_index);
+                source.columns[source_position].track_swap_remove(from_index);
             }
 
             destination.entity_indices.push(entity);
@@ -1730,10 +1872,7 @@ impl DynWorld {
             for column in &mut table.columns {
                 let info = &self.registry.components[column.component_index as usize];
                 (info.push_default)(&mut column.data, 1);
-                column.changed.push(current_tick);
-                column.peak_changed = current_tick;
-                column.added.push(current_tick);
-                column.peak_added = current_tick;
+                column.track_push(current_tick, current_tick);
             }
             table.entity_indices.push(entity);
         }
@@ -1817,7 +1956,9 @@ impl DynWorld {
         }
         let position = column_position(table.mask, key.mask);
         let column = &mut table.columns[position];
-        column.changed[array_index] = current_tick;
+        if let Some(cell) = column.changed.get_mut(array_index) {
+            *cell = current_tick;
+        }
         column.peak_changed = current_tick;
         Some(&mut column_vec_mut::<T>(&mut column.data)[array_index])
     }
@@ -1844,7 +1985,9 @@ impl DynWorld {
             remaining &= remaining - 1;
             let position = column_position(table.mask, component_mask);
             let column = &mut table.columns[position];
-            column.changed[array_index] = current_tick;
+            if let Some(cell) = column.changed.get_mut(array_index) {
+                *cell = current_tick;
+            }
             column.peak_changed = current_tick;
         }
         true
@@ -1859,7 +2002,9 @@ impl DynWorld {
                 let position = column_position(table.mask, key.mask);
                 let column = &mut table.columns[position];
                 column_vec_mut::<T>(&mut column.data)[array_index] = value;
-                column.changed[array_index] = current_tick;
+                if let Some(cell) = column.changed.get_mut(array_index) {
+                    *cell = current_tick;
+                }
                 column.peak_changed = current_tick;
                 return;
             }
@@ -1871,7 +2016,9 @@ impl DynWorld {
             let position = column_position(table.mask, key.mask);
             let column = &mut table.columns[position];
             column_vec_mut::<T>(&mut column.data)[array_index] = value;
-            column.changed[array_index] = current_tick;
+            if let Some(cell) = column.changed.get_mut(array_index) {
+                *cell = current_tick;
+            }
             column.peak_changed = current_tick;
         }
     }
@@ -2240,7 +2387,10 @@ impl DynWorld {
                 for column in &table.columns {
                     let column_mask = 1u64 << column.component_index;
                     if component_include & column_mask != 0
-                        && tick_is_newer(column.changed[index], since_tick)
+                        && column
+                            .changed
+                            .get(index)
+                            .is_some_and(|&value| tick_is_newer(value, since_tick))
                     {
                         changed = true;
                     }
@@ -2295,7 +2445,10 @@ impl DynWorld {
                     .filter(move |(index, _)| {
                         table.columns.iter().any(|column| {
                             mask & (1u64 << column.component_index) != 0
-                                && tick_is_newer(column.changed[*index], since_tick)
+                                && column
+                                    .changed
+                                    .get(*index)
+                                    .is_some_and(|&value| tick_is_newer(value, since_tick))
                         })
                     })
                     .map(|(_, &entity)| entity)
@@ -4173,7 +4326,10 @@ impl<T: Send + Sync + Default + 'static> QueryElement for &T {
     }
 
     fn changed_newer(fetch: &Self::Fetch<'_>, index: usize, since_tick: u32) -> bool {
-        tick_is_newer(fetch.1[index], since_tick)
+        fetch
+            .1
+            .get(index)
+            .is_some_and(|&value| tick_is_newer(value, since_tick))
     }
 
     fn item<'fetch>(fetch: &'fetch mut Self::Fetch<'_>, index: usize) -> Self::Item<'fetch> {
@@ -4197,7 +4353,7 @@ impl<T: Send + Sync + Default + 'static> QueryElement for &T {
         mid: usize,
     ) -> (Self::ParFetch<'table>, Self::ParFetch<'table>) {
         let (left_data, right_data) = fetch.0.split_at(mid);
-        let (left_changed, right_changed) = fetch.1.split_at(mid);
+        let (left_changed, right_changed) = fetch.1.split_at(mid.min(fetch.1.len()));
         ((left_data, left_changed), (right_data, right_changed))
     }
 
@@ -4261,11 +4417,16 @@ impl<T: Send + Sync + Default + 'static> QueryElement for &mut T {
     }
 
     fn changed_newer(fetch: &Self::Fetch<'_>, index: usize, since_tick: u32) -> bool {
-        tick_is_newer(fetch.1[index], since_tick)
+        fetch
+            .1
+            .get(index)
+            .is_some_and(|&value| tick_is_newer(value, since_tick))
     }
 
     fn item<'fetch>(fetch: &'fetch mut Self::Fetch<'_>, index: usize) -> Self::Item<'fetch> {
-        fetch.1[index] = fetch.2;
+        if let Some(cell) = fetch.1.get_mut(index) {
+            *cell = fetch.2;
+        }
         &mut fetch.0[index]
     }
 
@@ -4294,7 +4455,7 @@ impl<T: Send + Sync + Default + 'static> QueryElement for &mut T {
         mid: usize,
     ) -> (Self::ParFetch<'table>, Self::ParFetch<'table>) {
         let (left_data, right_data) = fetch.0.split_at_mut(mid);
-        let (left_changed, right_changed) = fetch.1.split_at_mut(mid);
+        let (left_changed, right_changed) = fetch.1.split_at_mut(mid.min(fetch.1.len()));
         (
             (left_data, left_changed, fetch.2),
             (right_data, right_changed, fetch.2),
@@ -4302,7 +4463,9 @@ impl<T: Send + Sync + Default + 'static> QueryElement for &mut T {
     }
 
     fn par_item<'fetch>(fetch: &'fetch mut Self::ParFetch<'_>, index: usize) -> Self::Item<'fetch> {
-        fetch.1[index] = fetch.2;
+        if let Some(cell) = fetch.1.get_mut(index) {
+            *cell = fetch.2;
+        }
         &mut fetch.0[index]
     }
 
@@ -4351,9 +4514,12 @@ impl<T: Send + Sync + Default + 'static> QueryElement for Option<&T> {
     }
 
     fn changed_newer(fetch: &Self::Fetch<'_>, index: usize, since_tick: u32) -> bool {
-        fetch
-            .as_ref()
-            .is_some_and(|fetch| tick_is_newer(fetch.1[index], since_tick))
+        fetch.as_ref().is_some_and(|fetch| {
+            fetch
+                .1
+                .get(index)
+                .is_some_and(|&value| tick_is_newer(value, since_tick))
+        })
     }
 
     fn item<'fetch>(fetch: &'fetch mut Self::Fetch<'_>, index: usize) -> Self::Item<'fetch> {
@@ -4434,14 +4600,19 @@ impl<T: Send + Sync + Default + 'static> QueryElement for Option<&mut T> {
     }
 
     fn changed_newer(fetch: &Self::Fetch<'_>, index: usize, since_tick: u32) -> bool {
-        fetch
-            .as_ref()
-            .is_some_and(|fetch| tick_is_newer(fetch.1[index], since_tick))
+        fetch.as_ref().is_some_and(|fetch| {
+            fetch
+                .1
+                .get(index)
+                .is_some_and(|&value| tick_is_newer(value, since_tick))
+        })
     }
 
     fn item<'fetch>(fetch: &'fetch mut Self::Fetch<'_>, index: usize) -> Self::Item<'fetch> {
         fetch.as_mut().map(|fetch| {
-            fetch.1[index] = fetch.2;
+            if let Some(cell) = fetch.1.get_mut(index) {
+                *cell = fetch.2;
+            }
             &mut fetch.0[index]
         })
     }
@@ -4476,7 +4647,9 @@ impl<T: Send + Sync + Default + 'static> QueryElement for Option<&mut T> {
 
     fn par_item<'fetch>(fetch: &'fetch mut Self::ParFetch<'_>, index: usize) -> Self::Item<'fetch> {
         fetch.as_mut().map(|inner| {
-            inner.1[index] = inner.2;
+            if let Some(cell) = inner.1.get_mut(index) {
+                *cell = inner.2;
+            }
             &mut inner.0[index]
         })
     }
@@ -4534,11 +4707,17 @@ impl<T: Send + Sync + Default + 'static> ReadQueryElement for &T {
     }
 
     fn read_changed_newer(fetch: Self::ReadFetch<'_>, index: usize, since_tick: u32) -> bool {
-        tick_is_newer(fetch.1[index], since_tick)
+        fetch
+            .1
+            .get(index)
+            .is_some_and(|&value| tick_is_newer(value, since_tick))
     }
 
     fn read_added_newer(fetch: Self::ReadFetch<'_>, index: usize, since_tick: u32) -> bool {
-        tick_is_newer(fetch.2[index], since_tick)
+        fetch
+            .2
+            .get(index)
+            .is_some_and(|&value| tick_is_newer(value, since_tick))
     }
 
     fn read_item<'table>(fetch: Self::ReadFetch<'table>, index: usize) -> Self::Item<'table> {
@@ -4562,11 +4741,21 @@ impl<T: Send + Sync + Default + 'static> ReadQueryElement for Option<&T> {
     }
 
     fn read_changed_newer(fetch: Self::ReadFetch<'_>, index: usize, since_tick: u32) -> bool {
-        fetch.is_some_and(|fetch| tick_is_newer(fetch.1[index], since_tick))
+        fetch.is_some_and(|fetch| {
+            fetch
+                .1
+                .get(index)
+                .is_some_and(|&value| tick_is_newer(value, since_tick))
+        })
     }
 
     fn read_added_newer(fetch: Self::ReadFetch<'_>, index: usize, since_tick: u32) -> bool {
-        fetch.is_some_and(|fetch| tick_is_newer(fetch.2[index], since_tick))
+        fetch.is_some_and(|fetch| {
+            fetch
+                .2
+                .get(index)
+                .is_some_and(|&value| tick_is_newer(value, since_tick))
+        })
     }
 
     fn read_item<'table>(fetch: Self::ReadFetch<'table>, index: usize) -> Self::Item<'table> {
@@ -7420,9 +7609,12 @@ impl HierarchyIndex {
         }
 
         if child_mask != 0 {
+            #[cfg(not(feature = "raw_storage"))]
             let relinks: Vec<Entity> = world
                 .query_entities_changed_since(child_mask, self.tick_cursor)
                 .collect();
+            #[cfg(feature = "raw_storage")]
+            let relinks: Vec<Entity> = world.query_entities(child_mask).collect();
             for entity in relinks {
                 if let Some(child_of) = world.get::<ChildOf>(entity) {
                     self.relink(entity, child_of.0);
@@ -7709,6 +7901,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(feature = "raw_storage"))]
     fn test_typed_query_iterates_and_stamps() {
         let mut world = DynWorld::new();
         let moving = world.spawn((Position::default(), Velocity { x: 2.0, y: 0.0 }));
@@ -7765,6 +7958,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(feature = "raw_storage"))]
     fn test_typed_query_changed_filter() {
         let mut world = DynWorld::new();
         let first = world.spawn((Position::default(), Velocity::default()));
@@ -7821,6 +8015,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(feature = "raw_storage"))]
     fn test_optional_mut_element_stamps_only_present_rows() {
         let mut world = DynWorld::new();
         let velocity_key = world.register::<Velocity>();
@@ -7857,6 +8052,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(feature = "raw_storage"))]
     fn test_changed_filter_on_optional_element() {
         let mut world = DynWorld::new();
         let still = world.spawn((Position::default(), Velocity::default()));
@@ -7955,6 +8151,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(feature = "raw_storage"))]
     fn test_query_ref_filters_match_for_each() {
         let mut world = DynWorld::new();
         let boss = world.register_tag();
@@ -8135,6 +8332,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(feature = "raw_storage"))]
     fn test_mark_changed_stamps_raw_writes() {
         let mut world = DynWorld::new();
         let position = world.register::<Position>();
@@ -8169,6 +8367,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(feature = "raw_storage"))]
     fn test_mark_columns_changed_bulk_stamps_one_table() {
         let mut world = DynWorld::new();
         let position = world.register::<Position>();
@@ -8249,6 +8448,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(feature = "raw_storage"))]
     fn test_filtered_mutable_query_keeps_changed_sets_exact() {
         let mut world = DynWorld::new();
         let position = world.register::<Position>();
@@ -8490,6 +8690,112 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "raw_storage")]
+    #[test]
+    fn test_raw_storage_applies_writes_with_change_detection_disabled() {
+        let mut world = DynWorld::new();
+        let position = world.register::<Position>();
+        let entities: Vec<_> = (0..64)
+            .map(|index| {
+                world.spawn((Position {
+                    x: index as f32,
+                    y: 0.0,
+                },))
+            })
+            .collect();
+
+        world.step();
+        world
+            .query::<&mut Position>()
+            .for_each(|_entity, position| {
+                position.x += 1.0;
+            });
+
+        assert_eq!(
+            world.query_entities_changed(position.mask).count(),
+            0,
+            "raw_storage intentionally disables per-row change detection"
+        );
+
+        for (index, &entity) in entities.iter().enumerate() {
+            assert_eq!(
+                world.get::<Position>(entity).unwrap().x,
+                index as f32 + 1.0,
+                "the mutable write itself must still land under raw_storage"
+            );
+        }
+    }
+
+    #[cfg(feature = "raw_storage")]
+    #[test]
+    fn test_raw_storage_buffer_pool_reuse_preserves_data() {
+        for _ in 0..50 {
+            let mut world = DynWorld::new();
+            world.spawn_bundles(
+                (Position { x: 3.0, y: 4.0 }, Velocity { x: 1.0, y: 2.0 }),
+                500,
+            );
+            let total: f32 = {
+                let mut sum = 0.0;
+                world.query::<(&Position, &Velocity)>().for_each(
+                    |_entity, (position, velocity)| {
+                        sum += position.x + position.y + velocity.x + velocity.y;
+                    },
+                );
+                sum
+            };
+            assert_eq!(
+                total,
+                (3.0 + 4.0 + 1.0 + 2.0) * 500.0,
+                "columns recycled through the thread-local pool must read back exactly"
+            );
+        }
+    }
+
+    #[cfg(feature = "raw_storage")]
+    #[test]
+    fn test_raw_storage_pool_reuse_drops_every_value_exactly_once() {
+        use std::sync::atomic::{AtomicIsize, Ordering};
+        static LIVE: AtomicIsize = AtomicIsize::new(0);
+
+        struct Tracked(u64);
+        impl Default for Tracked {
+            fn default() -> Self {
+                LIVE.fetch_add(1, Ordering::Relaxed);
+                Tracked(0)
+            }
+        }
+        impl Clone for Tracked {
+            fn clone(&self) -> Self {
+                LIVE.fetch_add(1, Ordering::Relaxed);
+                Tracked(self.0)
+            }
+        }
+        impl Drop for Tracked {
+            fn drop(&mut self) {
+                LIVE.fetch_sub(1, Ordering::Relaxed);
+            }
+        }
+
+        LIVE.store(0, Ordering::Relaxed);
+        for _ in 0..30 {
+            let mut world = DynWorld::new();
+            let entities: Vec<_> = (0..100)
+                .map(|_| world.spawn((Tracked::default(),)))
+                .collect();
+            for &entity in entities.iter().take(40) {
+                world.set(entity, Velocity { x: 1.0, y: 0.0 });
+            }
+            let doomed: Vec<_> = entities.iter().skip(60).copied().collect();
+            world.despawn_entities(&doomed);
+        }
+        assert_eq!(
+            LIVE.load(Ordering::Relaxed),
+            0,
+            "recycling column buffers through the pool must not leak or double-drop values"
+        );
+    }
+
     #[test]
     fn test_migration_preserves_every_row_and_location() {
         let mut world = DynWorld::new();
@@ -8625,6 +8931,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(feature = "raw_storage"))]
     fn test_bare_element_queries_match_single_tuples() {
         let mut world = DynWorld::new();
         let plain = world.spawn((Position { x: 1.0, y: 0.0 },));
@@ -8682,6 +8989,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(feature = "raw_storage"))]
     fn test_added_filter_matches_spawns_and_component_adds_only() {
         let mut world = DynWorld::new();
         let velocity = world.register::<Velocity>();
@@ -8839,6 +9147,7 @@ mod tests {
 
     #[cfg(not(target_family = "wasm"))]
     #[test]
+    #[cfg(not(feature = "raw_storage"))]
     fn test_typed_par_for_each_matches_sequential() {
         let mut world = DynWorld::new();
         let boss = world.register_tag();
@@ -8883,6 +9192,7 @@ mod tests {
 
     #[cfg(not(target_family = "wasm"))]
     #[test]
+    #[cfg(not(feature = "raw_storage"))]
     fn test_typed_par_for_each_added_filter() {
         let mut world = DynWorld::new();
         world.spawn((Position::default(),));
@@ -8994,6 +9304,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(feature = "raw_storage"))]
     fn test_hierarchy_index_raw_writes_need_mark_changed() {
         let mut world = DynWorld::new();
         let mut index = HierarchyIndex::new();
@@ -9439,20 +9750,23 @@ mod tests {
                         total_pings += 1;
                     }
                     _ => {
-                        let changed: std::collections::HashSet<Entity> =
-                            world.query_entities_changed(position.mask).collect();
-                        let expected: std::collections::HashSet<Entity> = model
-                            .iter()
-                            .filter(|(_, model_entity)| {
-                                model_entity.mask & position.mask != 0
-                                    && model_entity.position_changed
-                            })
-                            .map(|(&entity, _)| entity)
-                            .collect();
-                        assert_eq!(
-                            changed, expected,
-                            "changed-query set diverged with seed {seed}"
-                        );
+                        #[cfg(not(feature = "raw_storage"))]
+                        {
+                            let changed: std::collections::HashSet<Entity> =
+                                world.query_entities_changed(position.mask).collect();
+                            let expected: std::collections::HashSet<Entity> = model
+                                .iter()
+                                .filter(|(_, model_entity)| {
+                                    model_entity.mask & position.mask != 0
+                                        && model_entity.position_changed
+                                })
+                                .map(|(&entity, _)| entity)
+                                .collect();
+                            assert_eq!(
+                                changed, expected,
+                                "changed-query set diverged with seed {seed}"
+                            );
+                        }
 
                         world.step();
                         for model_entity in model.values_mut() {
@@ -9519,6 +9833,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(feature = "raw_storage"))]
     fn test_for_each_mut_changed_visits_only_stamped_slots() {
         let mut world = DynWorld::new();
         let position = world.register::<Position>();
@@ -9542,6 +9857,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(feature = "raw_storage"))]
     fn test_for_each_mut_changed_since_cursor() {
         let mut world = DynWorld::new();
         let position = world.register::<Position>();
@@ -9568,6 +9884,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(feature = "raw_storage"))]
     fn test_changed_skips_untouched_tables() {
         let mut world = DynWorld::new();
         let position = world.register::<Position>();
@@ -10247,6 +10564,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(feature = "raw_storage"))]
     fn test_prepared_queries_match_direct_queries() {
         let mut world = DynWorld::new();
         let moving = world.spawn((Position { x: 1.0, y: 0.0 }, Velocity { x: 1.0, y: 0.0 }));
@@ -10425,6 +10743,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(feature = "raw_storage"))]
     fn test_query_join_ref_filters_and_windows() {
         let mut core_registry = ComponentRegistry::new();
         core_registry.register::<Position>();
@@ -10525,6 +10844,7 @@ mod tests {
 
     #[cfg(not(target_family = "wasm"))]
     #[test]
+    #[cfg(not(feature = "raw_storage"))]
     fn test_query_join_par_for_each_matches_sequential() {
         let mut core_registry = ComponentRegistry::new();
         core_registry.register::<Position>();
@@ -10605,6 +10925,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(feature = "raw_storage"))]
     fn test_query_join_filters() {
         struct Cursed;
 
@@ -10675,6 +10996,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(feature = "raw_storage"))]
     fn test_query_join_spans_member_worlds() {
         let mut core_registry = ComponentRegistry::new();
         core_registry.register::<Position>();
@@ -10852,6 +11174,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(feature = "raw_storage"))]
     fn test_dyn_ecs_routes_typed_access_to_owning_world() {
         let mut core_registry = ComponentRegistry::new();
         core_registry.register::<Position>();
@@ -11539,18 +11862,22 @@ mod tests {
                                 }
                             }
                             _ => {
-                                let static_changed: std::collections::HashSet<Entity> = static_ecs
-                                    .static_core
-                                    .query_entities_changed(GROUP_POSITION)
-                                    .collect();
-                                let dyn_changed: std::collections::HashSet<Entity> = dyn_ecs.worlds
-                                    [core]
-                                    .query_entities_changed(position.mask)
-                                    .collect();
-                                assert_eq!(
-                                    static_changed, dyn_changed,
-                                    "core changed sets diverged with seed {seed}"
-                                );
+                                #[cfg(not(feature = "raw_storage"))]
+                                {
+                                    let static_changed: std::collections::HashSet<Entity> =
+                                        static_ecs
+                                            .static_core
+                                            .query_entities_changed(GROUP_POSITION)
+                                            .collect();
+                                    let dyn_changed: std::collections::HashSet<Entity> = dyn_ecs
+                                        .worlds[core]
+                                        .query_entities_changed(position.mask)
+                                        .collect();
+                                    assert_eq!(
+                                        static_changed, dyn_changed,
+                                        "core changed sets diverged with seed {seed}"
+                                    );
+                                }
 
                                 static_ecs.step();
                                 dyn_ecs.step();
@@ -11735,14 +12062,17 @@ mod tests {
                             }
                         }
                         _ => {
-                            let static_changed: std::collections::HashSet<Entity> =
-                                static_world.query_entities_changed(DIFF_POSITION).collect();
-                            let dyn_changed: std::collections::HashSet<Entity> =
-                                dyn_world.query_entities_changed(DIFF_POSITION).collect();
-                            assert_eq!(
-                                static_changed, dyn_changed,
-                                "changed sets diverged with seed {seed}"
-                            );
+                            #[cfg(not(feature = "raw_storage"))]
+                            {
+                                let static_changed: std::collections::HashSet<Entity> =
+                                    static_world.query_entities_changed(DIFF_POSITION).collect();
+                                let dyn_changed: std::collections::HashSet<Entity> =
+                                    dyn_world.query_entities_changed(DIFF_POSITION).collect();
+                                assert_eq!(
+                                    static_changed, dyn_changed,
+                                    "changed sets diverged with seed {seed}"
+                                );
+                            }
 
                             static_world.step();
                             dyn_world.step();
