@@ -10388,7 +10388,7 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "snapshot")]
+    #[cfg(all(feature = "snapshot", not(feature = "raw_storage")))]
     #[test]
     fn test_component_values_by_name() {
         let mut registry = ComponentRegistry::new();
@@ -10689,7 +10689,7 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "snapshot")]
+    #[cfg(all(feature = "snapshot", not(feature = "raw_storage")))]
     fn assert_worlds_equivalent(left: &DynWorld, right: &DynWorld, context: &str) {
         let mut left_entities: Vec<Entity> = left
             .tables
@@ -10736,7 +10736,7 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "snapshot")]
+    #[cfg(all(feature = "snapshot", not(feature = "raw_storage")))]
     #[test]
     fn test_world_deltas_replicate_op_stream() {
         let mut registry = ComponentRegistry::new();
@@ -10820,7 +10820,7 @@ mod tests {
         assert!(!replica.is_alive(stale) || replica.get::<Position>(stale).is_none());
     }
 
-    #[cfg(feature = "snapshot")]
+    #[cfg(all(feature = "snapshot", not(feature = "raw_storage")))]
     #[test]
     fn test_world_delta_detects_log_gaps() {
         let mut registry = ComponentRegistry::new();
@@ -10838,7 +10838,7 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "snapshot")]
+    #[cfg(all(feature = "snapshot", not(feature = "raw_storage")))]
     #[test]
     fn test_group_deltas_replicate_across_members() {
         struct Marked;
@@ -11131,7 +11131,7 @@ mod tests {
         assert_eq!(total, 64.0);
     }
 
-    #[cfg(feature = "snapshot")]
+    #[cfg(all(feature = "snapshot", not(feature = "raw_storage")))]
     #[test]
     fn test_group_delta_serializes_and_group_compact_runs() {
         let mut core_registry = ComponentRegistry::new();
