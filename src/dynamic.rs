@@ -708,6 +708,12 @@ pub struct ComponentRegistry {
     pub tags_by_type: TypeIdMap<u32>,
     #[cfg(feature = "snapshot")]
     pub codecs: Vec<Option<ComponentCodec>>,
+    /// One-entry cache of the most recently resolved component type. A hot
+    /// loop of `set`/`remove` over one component type hits this on every call
+    /// after the first, resolving through a `TypeId` equality instead of a map
+    /// probe. Never wrong: a miss just falls through to the map.
+    #[cfg(feature = "raw_storage")]
+    recent_component: Option<(TypeId, u32)>,
 }
 
 impl Default for ComponentRegistry {
@@ -726,6 +732,8 @@ impl ComponentRegistry {
             tags_by_type: TypeIdMap::default(),
             #[cfg(feature = "snapshot")]
             codecs: Vec::new(),
+            #[cfg(feature = "raw_storage")]
+            recent_component: None,
         }
     }
 
@@ -734,7 +742,18 @@ impl ComponentRegistry {
     /// moves values with `mem::take`, and `Send + Sync` because columns are
     /// shared across threads by the parallel iteration paths.
     pub fn register<T: Send + Sync + Default + 'static>(&mut self) -> ComponentKey<T> {
-        if let Some(&component_index) = self.components_by_type.get(&TypeId::of::<T>()) {
+        let type_id = TypeId::of::<T>();
+        #[cfg(feature = "raw_storage")]
+        if let Some((cached_id, component_index)) = self.recent_component
+            && cached_id == type_id
+        {
+            return self.key_for(component_index);
+        }
+        if let Some(&component_index) = self.components_by_type.get(&type_id) {
+            #[cfg(feature = "raw_storage")]
+            {
+                self.recent_component = Some((type_id, component_index));
+            }
             return self.key_for(component_index);
         }
 
