@@ -50,6 +50,9 @@ impl ResourceHost for Engine {
     fn resource_map_mut(&mut self) -> &mut ResourceMap {
         &mut self.world.resources
     }
+    fn resource_map(&self) -> &ResourceMap {
+        &self.world.resources
+    }
 }
 
 // A system is a plain function over the world. resource_scope takes the

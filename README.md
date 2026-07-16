@@ -932,6 +932,7 @@ When a component or resource has a `#[cfg(...)]` attribute, all related generate
 - `serde` (default): derives `Serialize`/`Deserialize` on `Entity`. Disable with `default-features = false` if you don't need it.
 - `dynamic` (off by default): the runtime-registered [dynamic world](#dynamic-worlds) entry point. Costs the default build nothing.
 - `snapshot` (off by default, implies `dynamic` and `serde`): serializable snapshots of dynamic worlds and groups, with per-type column codecs registered alongside components.
+- `state` (off by default, implies `dynamic`): an optional [state machine](#states) over the dynamic layer. A current-and-next value per user-supplied state type, transitions that emit an event, and run-condition gating of systems (`while_in`, `while_in_any`, `run_if`, `on_enter`, `on_exit`). Costs the default build nothing.
 - `raw_storage` (off by default, implies `dynamic`): the maximum-speed backend for the dynamic world. Behind an identical public API it swaps component columns from `Box<dyn Any>` + `Vec<T>` to a contiguous byte buffer read through pointer casts (dropping the per-access downcast), recycles freed column allocations through a thread-local buffer pool, walks query rows and migrates columns without bounds checks or the per-component vtable (both sound because storage invariants guarantee the indices and types), and drops two pieces of per-entity bookkeeping the safe backend maintains: per-row change ticks and the structural-change log. The **public API is byte-for-byte identical**. Observable behavior is identical too, with two deliberate exceptions tied to the dropped bookkeeping: `changed::<T>()`/`added::<T>()`/`for_each_mut_changed` match nothing, and `structural_changes_since`/`structural_sequence` return empty/zero. `HierarchyIndex` stays correct by rebuilding from a scan. Every `unsafe` is confined to the `RawColumn` type and a few index-time fast paths, all verified with `miri`. Leave it off to keep the crate provably `unsafe`-free and to keep change and structural tracking; turn it on for maximum throughput when you do not depend on those filters.
 
 Verify a build against both backends the way the crate does:
@@ -1339,6 +1340,47 @@ world.step(); // expires events after their two-frame window
 
 Store cursors wherever the consumer lives, typically a field on a resource
 struct, one per event type per consumer.
+
+#### States
+
+The `state` feature adds an optional state machine for programs that gate
+systems on a screen or mode. You supply the state type (any `Copy + PartialEq`
+value); freecs supplies the current-and-next holder, the transition step, the
+`StateTransition` event, and the gating combinators. This is a deliberate
+merge of the ECS layer's run conditions and system parameters with the state
+model Bevy keeps in a separate crate, kept behind a feature so the default
+build carries none of it.
+
+`insert_state` stores the state, `add_state_transitions` registers the
+transition step on a schedule, `next_state` requests a change (applied on the
+next transition step, so no frame sees a mid-frame flip), and `while_in`,
+`while_in_any`, and `run_if` gate a system or a whole tuple of systems in one
+schedule entry. `on_enter` and `on_exit` run once per transition by reading
+the emitted `StateTransition` event through their own cursor.
+
+```rust
+use freecs::Schedule;
+use freecs::dynamic::DynWorld;
+use freecs::system_param::{ResMut, ScheduleExt};
+use freecs::state::{StateScheduleExt, insert_state, next_state, while_in, on_enter};
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Screen { Title, Playing }
+
+fn tick(mut ticks: ResMut<Ticks>) { ticks.0 += 1; }
+fn build_hud(/* ... */) { /* ... */ }
+
+let mut world = DynWorld::new();
+insert_state(&mut world, Screen::Title);
+
+let mut schedule = Schedule::new();
+schedule.add_state_transitions::<Screen>("screen_transitions");
+schedule.push("enter_play", on_enter(Screen::Playing, build_hud));
+schedule.push("play", while_in(Screen::Playing, (tick, animate, physics)));
+```
+
+Everything is generic over the host, so it works over `DynWorld`, a `DynEcs`
+group, or any wrapper that implements `ResourceHost` and `EventHost`.
 
 #### Resources
 

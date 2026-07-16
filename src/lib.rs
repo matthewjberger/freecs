@@ -465,6 +465,9 @@ pub mod dynamic;
 #[cfg(feature = "dynamic")]
 pub mod system_param;
 
+#[cfg(feature = "state")]
+pub mod state;
+
 /// Declares a dynamic world's schema in one place: the mask constants (bits
 /// assigned in declaration order, which is the registration order and
 /// therefore the snapshot schema) and the registration function that builds

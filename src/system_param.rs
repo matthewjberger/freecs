@@ -1042,6 +1042,9 @@ mod tests {
         fn resource_map_mut(&mut self) -> &mut ResourceMap {
             &mut self.resources
         }
+        fn resource_map(&self) -> &ResourceMap {
+            &self.resources
+        }
     }
 
     #[derive(Default, Clone, Debug, PartialEq)]

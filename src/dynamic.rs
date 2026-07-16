@@ -1225,6 +1225,11 @@ impl ResourceMap {
 /// silently losing the resource.
 pub trait ResourceHost {
     fn resource_map_mut(&mut self) -> &mut ResourceMap;
+
+    /// The same map, shared, for reading a resource behind a `&self`, such as
+    /// a run condition that checks a state. Must return the same map as
+    /// [`resource_map_mut`](Self::resource_map_mut).
+    fn resource_map(&self) -> &ResourceMap;
 }
 
 /// The host scope methods, blanket-implemented for every
@@ -1248,6 +1253,9 @@ pub trait ResourceHost {
 /// impl ResourceHost for Engine {
 ///     fn resource_map_mut(&mut self) -> &mut ResourceMap {
 ///         &mut self.ecs.resources
+///     }
+///     fn resource_map(&self) -> &ResourceMap {
+///         &self.ecs.resources
 ///     }
 /// }
 ///
@@ -1318,11 +1326,17 @@ impl ResourceHost for DynWorld {
     fn resource_map_mut(&mut self) -> &mut ResourceMap {
         &mut self.resources
     }
+    fn resource_map(&self) -> &ResourceMap {
+        &self.resources
+    }
 }
 
 impl ResourceHost for DynEcs {
     fn resource_map_mut(&mut self) -> &mut ResourceMap {
         &mut self.resources
+    }
+    fn resource_map(&self) -> &ResourceMap {
+        &self.resources
     }
 }
 
@@ -10963,6 +10977,9 @@ mod tests {
         fn resource_map_mut(&mut self) -> &mut ResourceMap {
             &mut self.world.resources
         }
+        fn resource_map(&self) -> &ResourceMap {
+            &self.world.resources
+        }
     }
 
     struct ScopePoints(u32);
@@ -11023,6 +11040,9 @@ mod tests {
             } else {
                 &mut self.secondary
             }
+        }
+        fn resource_map(&self) -> &ResourceMap {
+            &self.primary
         }
     }
 
