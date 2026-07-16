@@ -113,11 +113,12 @@ type BoxedAny = Box<dyn Any + Send + Sync>;
 /// pool instead of returned to the system allocator.
 ///
 /// The public API is byte-for-byte identical across both backends. Observable
-/// behavior is identical too, with one deliberate exception: `raw_storage`
-/// disables per-row change detection, so `changed::<T>()`, `added::<T>()`, and
-/// the `for_each_mut_changed` family match nothing. This is the speed trade the
-/// feature buys, trading the per-row tick bookkeeping for raw throughput.
-/// [`HierarchyIndex`] stays correct by rescanning instead of diffing ticks.
+/// behavior is identical too, with two deliberate exceptions: `raw_storage`
+/// disables per-row change detection (`changed::<T>()`, `added::<T>()`, and the
+/// `for_each_mut_changed` family match nothing) and the structural-change log
+/// (`structural_changes_since` and `structural_sequence` return empty/zero).
+/// Both drop per-entity bookkeeping the safe backend pays on every mutation and
+/// migration. [`HierarchyIndex`] stays correct by rebuilding from a scan.
 pub struct ErasedColumn {
     #[cfg(not(feature = "raw_storage"))]
     storage: Box<dyn Any + Send + Sync>,
