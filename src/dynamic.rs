@@ -1490,16 +1490,26 @@ impl DynWorld {
     }
 
     fn record_structural(&mut self, entity: Entity, kind: StructuralChangeKind, mask: u64) {
-        if self.structural_log.len() >= STRUCTURAL_LOG_CAPACITY {
-            self.structural_log.clear();
+        // raw_storage does not maintain the structural-change log: its only
+        // in-crate consumer, HierarchyIndex, rebuilds from a scan instead, so
+        // spawn and migration skip this per-entity push entirely.
+        #[cfg(feature = "raw_storage")]
+        {
+            let _ = (entity, kind, mask);
         }
-        self.structural_sequence += 1;
-        self.structural_log.push(StructuralChange {
-            sequence: self.structural_sequence,
-            entity,
-            kind,
-            mask,
-        });
+        #[cfg(not(feature = "raw_storage"))]
+        {
+            if self.structural_log.len() >= STRUCTURAL_LOG_CAPACITY {
+                self.structural_log.clear();
+            }
+            self.structural_sequence += 1;
+            self.structural_log.push(StructuralChange {
+                sequence: self.structural_sequence,
+                entity,
+                kind,
+                mask,
+            });
+        }
     }
 
     fn get_or_create_table(&mut self, mask: u64) -> usize {
@@ -7729,37 +7739,58 @@ impl HierarchyIndex {
             .map(|key| key.mask)
             .unwrap_or(0);
 
-        let unlinks: Vec<Entity> = world
-            .structural_changes_since(self.structural_cursor)
-            .iter()
-            .filter(|change| match change.kind {
-                StructuralChangeKind::Despawned => true,
-                StructuralChangeKind::ComponentsRemoved => change.mask & child_mask != 0,
-                _ => false,
-            })
-            .map(|change| change.entity)
-            .collect();
-        for entity in unlinks {
-            self.unlink(entity);
-        }
-
-        if child_mask != 0 {
-            #[cfg(not(feature = "raw_storage"))]
-            let relinks: Vec<Entity> = world
-                .query_entities_changed_since(child_mask, self.tick_cursor)
-                .collect();
-            #[cfg(feature = "raw_storage")]
-            let relinks: Vec<Entity> = world.query_entities(child_mask).collect();
-            for entity in relinks {
-                if let Some(child_of) = world.get::<ChildOf>(entity) {
-                    self.relink(entity, child_of.0);
+        // raw_storage tracks neither structural changes nor ticks, so the
+        // incremental unlink/relink path has nothing to diff against. Rebuild
+        // the whole index from a scan of current links instead; the result is
+        // identical, just not incremental.
+        #[cfg(feature = "raw_storage")]
+        {
+            self.children.clear();
+            self.parent_of.clear();
+            if child_mask != 0 {
+                let holders: Vec<Entity> = world.query_entities(child_mask).collect();
+                for entity in holders {
+                    if let Some(child_of) = world.get::<ChildOf>(entity) {
+                        let parent = child_of.0;
+                        self.parent_of.insert(entity, parent);
+                        self.children.entry(parent).or_default().push(entity);
+                    }
                 }
             }
+            world.increment_tick();
         }
 
-        self.structural_cursor = world.structural_sequence();
-        self.tick_cursor = world.current_tick();
-        world.increment_tick();
+        #[cfg(not(feature = "raw_storage"))]
+        {
+            let unlinks: Vec<Entity> = world
+                .structural_changes_since(self.structural_cursor)
+                .iter()
+                .filter(|change| match change.kind {
+                    StructuralChangeKind::Despawned => true,
+                    StructuralChangeKind::ComponentsRemoved => change.mask & child_mask != 0,
+                    _ => false,
+                })
+                .map(|change| change.entity)
+                .collect();
+            for entity in unlinks {
+                self.unlink(entity);
+            }
+
+            if child_mask != 0 {
+                let relinks: Vec<Entity> = world
+                    .query_entities_changed_since(child_mask, self.tick_cursor)
+                    .collect();
+                for entity in relinks {
+                    if let Some(child_of) = world.get::<ChildOf>(entity) {
+                        self.relink(entity, child_of.0);
+                    }
+                }
+            }
+
+            self.structural_cursor = world.structural_sequence();
+            self.tick_cursor = world.current_tick();
+            world.increment_tick();
+        }
     }
 
     fn unlink(&mut self, entity: Entity) {
@@ -7773,6 +7804,7 @@ impl HierarchyIndex {
         }
     }
 
+    #[cfg(not(feature = "raw_storage"))]
     fn relink(&mut self, entity: Entity, parent: Entity) {
         if self.parent_of.get(&entity) == Some(&parent) {
             return;
@@ -7990,6 +8022,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(feature = "raw_storage"))]
     fn test_tags_and_structural_log() {
         let mut world = DynWorld::new();
         let position = world.register::<Position>();
@@ -10045,6 +10078,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(feature = "raw_storage"))]
     fn test_structural_log_capacity_backstop() {
         let mut world = DynWorld::new();
         let position = world.register::<Position>();
@@ -10065,6 +10099,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(feature = "raw_storage"))]
     fn test_structural_log_trim_and_clear() {
         let mut world = DynWorld::new();
         let position = world.register::<Position>();
