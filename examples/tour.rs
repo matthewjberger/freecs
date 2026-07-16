@@ -1,7 +1,6 @@
 use freecs::Schedule;
-use freecs::dynamic::{
-    ChildOf, ComponentRegistry, DynEcs, DynWorld, ResourceHost, ResourceHostExt, ResourceMap,
-};
+use freecs::dynamic::{ChildOf, ComponentRegistry, DynEcs, DynWorld, ResourceHost, ResourceMap};
+use freecs::system_param::{Res, ResMut, ScheduleExt};
 
 // Components are plain structs. Default is the only requirement; there is
 // no derive macro and no registration ceremony, first use registers them.
@@ -38,9 +37,9 @@ struct Frozen;
 struct Selected;
 
 // An engine that wraps the world in its own state struct implements
-// ResourceHost, and the free-function scope forms in freecs::dynamic then
-// lend the whole wrapper to the closure, which the inherent scope methods
-// cannot do.
+// ResourceHost, which lets a system run over the engine directly: it takes the
+// engine as its host argument to reach engine state and Res<T> / ResMut<T> to
+// reach resources.
 struct Engine {
     world: DynWorld,
     frames: u32,
@@ -55,30 +54,34 @@ impl ResourceHost for Engine {
     }
 }
 
-// A system is a plain function over the world. resource_scope takes the
-// resource out for the closure, so the resource and the world are
-// independent borrows and there is no borrow juggling.
-fn movement(world: &mut DynWorld) {
-    world.resource_scope(|world, delta_time: &mut DeltaTime| {
-        world
-            .query::<(&mut Position, &Velocity)>()
-            .for_each(|_entity, (position, velocity)| {
-                position.x += velocity.x * delta_time.0;
-                position.y += velocity.y * delta_time.0;
-            });
-    });
+// A system is a plain function over the world. Resources it needs arrive as
+// Res<T> / ResMut<T> parameters, taken out of the map for the call so the
+// trailing &mut World stays free for queries, with no borrow juggling.
+fn movement(delta_time: Res<DeltaTime>, world: &mut DynWorld) {
+    world
+        .query::<(&mut Position, &Velocity)>()
+        .for_each(|_entity, (position, velocity)| {
+            position.x += velocity.x * delta_time.0;
+            position.y += velocity.y * delta_time.0;
+        });
 }
 
-// resources_scope is the tuple form for several resources at once. The
-// take is all-or-nothing and everything is restored even on panic.
-fn scoring(world: &mut DynWorld) {
-    world.resources_scope(|world, (delta_time, score): &mut (DeltaTime, Score)| {
-        score.0 += world
-            .query_ref::<&Position>()
-            .iter()
-            .filter(|(_entity, position)| position.x * delta_time.0 > 0.25)
-            .count() as u32;
-    });
+// Several resources at once are just several parameters; ResMut<T> is the
+// mutable form. Each resolves out of the map before the system runs.
+fn scoring(delta_time: Res<DeltaTime>, mut score: ResMut<Score>, world: &mut DynWorld) {
+    score.0 += world
+        .query_ref::<&Position>()
+        .iter()
+        .filter(|(_entity, position)| position.x * delta_time.0 > 0.25)
+        .count() as u32;
+}
+
+// A system runs over any ResourceHost, so it can take the engine as its host
+// argument to reach engine state and Res<T> / ResMut<T> to reach resources in
+// the same pass.
+fn engine_tick(mut score: ResMut<Score>, engine: &mut Engine) {
+    engine.frames += 1;
+    score.0 += 1;
 }
 
 // Read-only systems can take &World and slot in with push_readonly.
@@ -116,18 +119,17 @@ fn main() {
     world.insert_resource(Score(0));
     assert_eq!(world.res::<DeltaTime>().0, 0.5);
 
-    // Host scopes: ResourceHostExt gives any ResourceHost the scopes as
-    // methods, and the closure receives the host itself, so a system can
-    // mutate engine state, world state, and the resource in one pass.
+    // A schedule runs over any ResourceHost, so systems compose over an engine
+    // wrapper the same way they do over a world: engine_tick reaches engine
+    // state through its host argument and Score through ResMut, in one pass.
     let mut engine = Engine {
         world: DynWorld::new(),
         frames: 0,
     };
     engine.world.insert_resource(Score(0));
-    engine.resource_scope(|engine, score: &mut Score| {
-        engine.frames += 1;
-        score.0 += 1;
-    });
+    let mut engine_schedule: Schedule<Engine> = Schedule::new();
+    engine_schedule.add_system("tick", engine_tick);
+    engine_schedule.run(&mut engine);
     assert_eq!(engine.frames, 1);
     assert_eq!(engine.world.res::<Score>().0, 1);
 
@@ -135,12 +137,13 @@ fn main() {
     // change-detection window, so the systems below read as "this frame".
     world.step();
 
-    // Systems compose into a schedule; push_if gates on a condition and
-    // push_readonly takes the &World form.
+    // Systems compose into a schedule; add_system takes the parameter form,
+    // add_system_if gates it on a condition, and push_readonly takes the
+    // &World form.
     let mut schedule = Schedule::new();
     schedule
-        .push("movement", movement)
-        .push_if(
+        .add_system("movement", movement)
+        .add_system_if(
             "scoring",
             |world: &DynWorld| world.entity_count() > 0,
             scoring,
