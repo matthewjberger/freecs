@@ -179,17 +179,30 @@ impl<T> std::ops::DerefMut for ResMut<'_, T> {
 pub trait EventHost {
     /// The host's event bus, for reading and writing events.
     fn event_bus_mut(&mut self) -> &mut EventBus;
+
+    /// The same bus, shared, for reading events behind a `&self`, such as the
+    /// frame-settled broadcast [`EventBus::read_frame`](crate::dynamic::EventBus::read_frame).
+    /// Must return the same bus as [`event_bus_mut`](Self::event_bus_mut).
+    fn event_bus(&self) -> &EventBus;
 }
 
 impl EventHost for DynWorld {
     fn event_bus_mut(&mut self) -> &mut EventBus {
         &mut self.events
     }
+
+    fn event_bus(&self) -> &EventBus {
+        &self.events
+    }
 }
 
 impl EventHost for DynEcs {
     fn event_bus_mut(&mut self) -> &mut EventBus {
         &mut self.events
+    }
+
+    fn event_bus(&self) -> &EventBus {
+        &self.events
     }
 }
 
