@@ -935,7 +935,7 @@ When a component or resource has a `#[cfg(...)]` attribute, all related generate
 - `dynamic` (off by default): the runtime-registered [dynamic world](#dynamic-worlds) entry point. Costs the default build nothing.
 - `snapshot` (off by default, implies `dynamic` and `serde`): serializable snapshots of dynamic worlds and groups, with per-type column codecs registered alongside components.
 - `state` (off by default, implies `dynamic`): an optional [state machine](#states) over the dynamic layer. A current-and-next value per user-supplied state type, transitions that emit an event, and run-condition gating of systems (`while_in`, `while_in_any`, `run_if`, `on_enter`, `on_exit`). Costs the default build nothing.
-- `raw_storage` (off by default, implies `dynamic`): the maximum-speed backend for the dynamic world. Behind an identical public API it swaps component columns from `Box<dyn Any>` + `Vec<T>` to a contiguous byte buffer read through pointer casts (dropping the per-access downcast), recycles freed column allocations through a thread-local buffer pool, walks query rows and migrates columns without bounds checks or the per-component vtable (both sound because storage invariants guarantee the indices and types), and forbids the two pieces of per-entity bookkeeping the safe backend can maintain: per-row change ticks and the structural-change log. The **public API is byte-for-byte identical**. Observable behavior is identical too, with two deliberate exceptions tied to the dropped bookkeeping: `changed::<T>()`/`added::<T>()`/`for_each_mut_changed` match nothing, and `structural_changes_since`/`structural_sequence` return empty/zero, so `set_change_detection` and `structural_logging` cannot turn them back on. `HierarchyIndex` stays correct by rebuilding from a scan. Every `unsafe` is confined to the `RawColumn` type and a few index-time fast paths, all verified with `miri`. Leave it off to keep the crate provably `unsafe`-free and to keep the *option* of change and structural tracking; turn it on for maximum throughput when you do not depend on those filters. Note that the bookkeeping is opt-in on the safe backend too, so switching a world that never tracked anything to `raw_storage` buys you the storage backend and the faster registry hasher, not the removal of tracking you were already skipping.
+- `raw_storage` (off by default, implies `dynamic`): the maximum-speed backend for the dynamic world. It decides one thing, how a component column is held, and nothing else. Behind an identical public API it swaps columns from `Box<dyn Any>` + `Vec<T>` to a contiguous byte buffer read through pointer casts (dropping the per-access downcast), recycles freed column allocations through a thread-local buffer pool, and walks query rows and migrates columns without bounds checks or the per-component vtable (both sound because storage invariants guarantee the indices and types). The **public API is byte-for-byte identical, and so is observable behavior**: change detection and the structural log are orthogonal to the backend and opt in the same way under either, because their storage is a plain `Vec<u32>` and a plain `Vec<StructuralChange>` that never needed erasing. Every `unsafe` is confined to the `RawColumn` type and a few index-time fast paths, all verified with `miri`, and both backends are held to the same test suite. Leave it off to keep the crate provably `unsafe`-free; turn it on for the fastest column access. It pays for itself where per-table cost dominates, such as iterating one component across many small archetypes; where the work is per row or per entity, the safe backend is already level with it.
 
 Verify a build against both backends the way the crate does:
 
@@ -1556,12 +1556,13 @@ world.mark_changed(entity, position.mask);
 
 Leave them off and the feature degrades quietly rather than loudly:
 `changed::<T>()`, `added::<T>()`, and the `for_each_mut_changed` family match
-nothing, and `structural_changes_since` reports that nothing happened, exactly
-as under `raw_storage`. `HierarchyIndex::sync` notices and rebuilds from a scan
-instead of diffing, so it stays correct either way. `DynEcs` has the same
-`structural_logging` switch for its group-level lifecycle log, and each member
-world opts in separately. The static `ecs!` tier is unaffected: its change
-ticks and structural log are still always on.
+nothing, and `structural_changes_since` reports that nothing happened.
+`HierarchyIndex::sync` notices and rebuilds from a scan instead of diffing, so
+it stays correct either way. `DynEcs` has the same `structural_logging` switch
+for its group-level lifecycle log, and each member world opts in separately.
+Both switches work the same under `raw_storage`, which chooses how the data
+column is held and has no say over the ticks beside it. The static `ecs!` tier
+is unaffected: its change ticks and structural log are still always on.
 
 #### Entity inspection
 

@@ -1197,7 +1197,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(not(feature = "raw_storage"))]
     fn changed_filter_visits_only_mutated() {
         let mut world = DynWorld::new();
         world.set_change_detection(true);
@@ -1460,7 +1459,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(not(feature = "raw_storage"))]
     fn added_filter_visits_only_new() {
         let mut world = DynWorld::new();
         world.set_change_detection(true);

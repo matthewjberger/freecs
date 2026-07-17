@@ -148,13 +148,12 @@ type TypeIdMap<V> = HashMap<TypeId, V, std::hash::BuildHasherDefault<TypeIdHashe
 /// downcast, and its freed allocations are recycled through a thread-local
 /// pool instead of returned to the system allocator.
 ///
-/// The public API is byte-for-byte identical across both backends. Observable
-/// behavior is identical too, with two deliberate exceptions: `raw_storage`
-/// disables per-row change detection (`changed::<T>()`, `added::<T>()`, and the
-/// `for_each_mut_changed` family match nothing) and the structural-change log
-/// (`structural_changes_since` and `structural_sequence` return empty/zero).
-/// Both drop per-entity bookkeeping the safe backend pays on every mutation and
-/// migration. [`HierarchyIndex`] stays correct by rebuilding from a scan.
+/// The public API is byte-for-byte identical across both backends, and so is
+/// observable behavior: the backend decides how a data column is held, nothing
+/// more. Change detection and the structural log are orthogonal to it, opt-in
+/// on either backend through [`DynWorld::set_change_detection`] and
+/// [`DynWorld::structural_logging`], because their storage is a plain
+/// `Vec<u32>` and a plain `Vec<StructuralChange>` that never needed erasing.
 pub struct ErasedColumn {
     #[cfg(not(feature = "raw_storage"))]
     storage: Box<dyn Any + Send + Sync>,
@@ -890,12 +889,12 @@ pub struct ColumnSlot {
 }
 
 impl ColumnSlot {
-    /// Grows the tick columns to match `count` freshly pushed rows. Under
-    /// `raw_storage` the tick columns are never materialized, so change
-    /// detection is disabled and this is a no-op.
+    /// Grows the tick columns to match `count` freshly pushed rows. The tick
+    /// columns are plain `Vec<u32>` under either storage backend, so this is
+    /// governed by [`DynWorld::set_change_detection`] rather than by which
+    /// backend holds the data column.
     #[inline]
     fn track_extend(&mut self, enabled: bool, count: usize, tick: u32) {
-        #[cfg(not(feature = "raw_storage"))]
         if enabled {
             let filled_length = self.changed.len() + count;
             self.changed.resize(filled_length, tick);
@@ -903,48 +902,31 @@ impl ColumnSlot {
             self.peak_changed = tick;
             self.peak_added = tick;
         }
-        #[cfg(feature = "raw_storage")]
-        {
-            let _ = (enabled, count, tick);
-        }
     }
 
     /// Pushes one tick row: `tick` for the changed column, `added_value` for
-    /// the added column. No-op under `raw_storage`.
+    /// the added column.
     #[inline]
     fn track_push(&mut self, enabled: bool, tick: u32, added_value: u32) {
-        #[cfg(not(feature = "raw_storage"))]
         if enabled {
             self.changed.push(tick);
             self.added.push(added_value);
             self.peak_changed = tick;
             self.peak_added = tick;
         }
-        #[cfg(feature = "raw_storage")]
-        {
-            let _ = (enabled, tick, added_value);
-        }
     }
 
     /// Swap-removes one tick row, mirroring the data column's swap-remove.
-    /// No-op under `raw_storage`.
     #[inline]
     fn track_swap_remove(&mut self, enabled: bool, index: usize) {
-        #[cfg(not(feature = "raw_storage"))]
         if enabled {
             self.changed.swap_remove(index);
             self.added.swap_remove(index);
         }
-        #[cfg(feature = "raw_storage")]
-        {
-            let _ = (enabled, index);
-        }
     }
 
-    /// The added tick carried by a row during migration. Only the safe
-    /// backend threads this through; `raw_storage` migrations move bytes
-    /// without touching tick columns.
-    #[cfg(not(feature = "raw_storage"))]
+    /// The added tick carried by a row during migration. Reads as 0 when the
+    /// row predates change detection being turned on.
     #[inline]
     fn carried_added(&self, index: usize) -> u32 {
         self.added.get(index).copied().unwrap_or(0)
@@ -1580,17 +1562,9 @@ impl DynWorld {
         );
     }
 
-    /// Whether per-row change detection is being maintained. Off by default;
-    /// always false under `raw_storage`, which has no tick columns to maintain.
+    /// Whether per-row change detection is being maintained. Off by default.
     pub fn change_detection(&self) -> bool {
-        #[cfg(feature = "raw_storage")]
-        {
-            false
-        }
-        #[cfg(not(feature = "raw_storage"))]
-        {
-            self.change_detection
-        }
+        self.change_detection
     }
 
     /// Turns per-row change detection on or off, resizing every tick column to
@@ -1602,61 +1576,50 @@ impl DynWorld {
     /// that never reads `changed::<T>()` or `added::<T>()` pays all of that for
     /// nothing, so it is opt-in rather than opt-out.
     ///
-    /// While it is off the `changed`/`added` filters match nothing, exactly as
-    /// under `raw_storage`. Turning it on restamps every existing row with the
-    /// current tick rather than the tick it was really written at, so the rows
-    /// look uniformly touched as of now; turn it on before the writes you want
-    /// to observe. Has no effect under `raw_storage`, which has no tick columns.
+    /// While it is off the `changed`/`added` filters match nothing. Turning it
+    /// on restamps every existing row with the current tick rather than the
+    /// tick it was really written at, so the rows look uniformly touched as of
+    /// now; turn it on before the writes you want to observe. Works the same
+    /// under either storage backend: the tick columns are plain `Vec<u32>`, so
+    /// `raw_storage` chooses how the data column is held, not whether the ticks
+    /// beside it are kept.
     pub fn set_change_detection(&mut self, enabled: bool) {
         if self.change_detection == enabled {
             return;
         }
         self.change_detection = enabled;
 
-        #[cfg(not(feature = "raw_storage"))]
-        {
-            let tick = self.current_tick;
-            for table in &mut self.tables {
-                let rows = table.entity_indices.len();
-                for column in &mut table.columns {
-                    if enabled {
-                        column.changed.resize(rows, tick);
-                        column.added.resize(rows, tick);
-                        column.peak_changed = tick;
-                        column.peak_added = tick;
-                    } else {
-                        column.changed = Vec::new();
-                        column.added = Vec::new();
-                    }
+        let tick = self.current_tick;
+        for table in &mut self.tables {
+            let rows = table.entity_indices.len();
+            for column in &mut table.columns {
+                if enabled {
+                    column.changed.resize(rows, tick);
+                    column.added.resize(rows, tick);
+                    column.peak_changed = tick;
+                    column.peak_added = tick;
+                } else {
+                    column.changed = Vec::new();
+                    column.added = Vec::new();
                 }
             }
         }
     }
 
     fn record_structural(&mut self, entity: Entity, kind: StructuralChangeKind, mask: u64) {
-        // raw_storage does not maintain the structural-change log: its only
-        // in-crate consumer, HierarchyIndex, rebuilds from a scan instead, so
-        // spawn and migration skip this per-entity push entirely.
-        #[cfg(feature = "raw_storage")]
-        {
-            let _ = (entity, kind, mask);
+        if !self.structural_logging {
+            return;
         }
-        #[cfg(not(feature = "raw_storage"))]
-        {
-            if !self.structural_logging {
-                return;
-            }
-            if self.structural_log.len() >= STRUCTURAL_LOG_CAPACITY {
-                self.structural_log.clear();
-            }
-            self.structural_sequence += 1;
-            self.structural_log.push(StructuralChange {
-                sequence: self.structural_sequence,
-                entity,
-                kind,
-                mask,
-            });
+        if self.structural_log.len() >= STRUCTURAL_LOG_CAPACITY {
+            self.structural_log.clear();
         }
+        self.structural_sequence += 1;
+        self.structural_log.push(StructuralChange {
+            sequence: self.structural_sequence,
+            entity,
+            kind,
+            mask,
+        });
     }
 
     fn get_or_create_table(&mut self, mask: u64) -> usize {
@@ -1943,9 +1906,9 @@ impl DynWorld {
 
                 let source_position = column_position(source.mask, component_mask);
                 let destination_position = column_position(destination.mask, component_mask);
+                let carried_added = source.columns[source_position].carried_added(from_index);
                 #[cfg(not(feature = "raw_storage"))]
                 {
-                    let carried_added = source.columns[source_position].carried_added(from_index);
                     let info = &self.registry.components
                         [source.columns[source_position].component_index as usize];
                     (info.swap_remove_into)(
@@ -1953,15 +1916,14 @@ impl DynWorld {
                         from_index,
                         &mut destination.columns[destination_position].data,
                     );
-                    source.columns[source_position].track_swap_remove(track, from_index);
-                    let destination_column = &mut destination.columns[destination_position];
-                    destination_column.track_push(track, tick, carried_added);
                 }
                 #[cfg(feature = "raw_storage")]
                 source.columns[source_position].data.swap_remove_into_raw(
                     from_index,
                     &mut destination.columns[destination_position].data,
                 );
+                source.columns[source_position].track_swap_remove(track, from_index);
+                destination.columns[destination_position].track_push(track, tick, carried_added);
             }
 
             let mut removed = source.mask & !destination.mask;
@@ -1975,12 +1937,12 @@ impl DynWorld {
                     let info = &self.registry.components
                         [source.columns[source_position].component_index as usize];
                     (info.swap_remove)(&mut source.columns[source_position].data, from_index);
-                    source.columns[source_position].track_swap_remove(track, from_index);
                 }
                 #[cfg(feature = "raw_storage")]
                 source.columns[source_position]
                     .data
                     .swap_remove_raw(from_index);
+                source.columns[source_position].track_swap_remove(track, from_index);
             }
 
             destination.entity_indices.push(entity);
@@ -2197,39 +2159,6 @@ impl DynWorld {
         self.check_key(key.registry_id);
         let current_tick = self.current_tick;
 
-        // Under raw_storage change detection is off and record_structural is a
-        // no-op, so the migration path collapses to: locate once, migrate
-        // reusing the location move_entity returns, write the value in place.
-        // No tick stamps, no structural push, no second location lookup.
-        #[cfg(feature = "raw_storage")]
-        {
-            let _ = current_tick;
-            if let Some((table_index, array_index)) = get_location(&self.entity_locations, entity) {
-                if self.tables[table_index].mask & key.mask != 0 {
-                    let position = column_position(self.tables[table_index].mask, key.mask);
-                    column_vec_mut::<T>(&mut self.tables[table_index].columns[position].data)
-                        [array_index] = value;
-                    return;
-                }
-                let target = self.resolve_add_target(table_index, key.mask);
-                let (new_table, new_index) =
-                    self.move_entity(entity, table_index, array_index, target);
-                let position = column_position(self.tables[new_table].mask, key.mask);
-                column_vec_mut::<T>(&mut self.tables[new_table].columns[position].data)
-                    [new_index] = value;
-                return;
-            }
-            if self.add_components(entity, key.mask)
-                && let Some((table_index, array_index)) =
-                    get_location(&self.entity_locations, entity)
-            {
-                let position = column_position(self.tables[table_index].mask, key.mask);
-                column_vec_mut::<T>(&mut self.tables[table_index].columns[position].data)
-                    [array_index] = value;
-            }
-        }
-
-        #[cfg(not(feature = "raw_storage"))]
         {
             if let Some((table_index, array_index)) = get_location(&self.entity_locations, entity) {
                 let current_mask = self.tables[table_index].mask;
@@ -4574,10 +4503,17 @@ pub trait QueryElement: sealed::SealedElement {
     fn slice_iter<'fetch>(
         fetch: Self::ParFetch<'fetch>,
     ) -> impl Iterator<Item = Self::Item<'fetch>> + 'fetch;
+    /// Stamps every row of a mutable element's tick column, the counterpart of
+    /// the fill [`slice_iter`](Self::slice_iter) does on the way in. The
+    /// unchecked fast path hands out rows one at a time and cannot fill as it
+    /// goes, so it stamps up front instead. A no-op for read-only elements, and
+    /// for any element whose world has change detection off, since the tick
+    /// column is then empty.
+    fn par_mark_changed_all(fetch: &mut Self::ParFetch<'_>);
     /// Row access without bounds checks, the `raw_storage` fast-path
-    /// counterpart of [`par_item`](Self::par_item). Change stamping is
-    /// already disabled under `raw_storage`, so this only reads or hands out
-    /// the element at `index`.
+    /// counterpart of [`par_item`](Self::par_item). Stamping is handled once by
+    /// [`par_mark_changed_all`](Self::par_mark_changed_all), so this only reads
+    /// or hands out the element at `index`.
     ///
     /// # Safety
     /// `index` must be less than the fetched column's length.
@@ -4664,6 +4600,8 @@ impl<T: Send + Sync + Default + 'static> QueryElement for &T {
         IntoIterator::into_iter(fetch.0)
     }
 
+    fn par_mark_changed_all(_fetch: &mut Self::ParFetch<'_>) {}
+
     #[cfg(feature = "raw_storage")]
     unsafe fn par_item_unchecked<'fetch>(
         fetch: &'fetch mut Self::ParFetch<'_>,
@@ -4740,10 +4678,7 @@ impl<T: Send + Sync + Default + 'static> QueryElement for &mut T {
         current_tick: u32,
     ) -> Self::ParFetch<'table> {
         let slot = slot.expect("required query element column missing");
-        #[cfg(not(feature = "raw_storage"))]
-        {
-            slot.peak_changed = current_tick;
-        }
+        slot.peak_changed = current_tick;
         let ColumnSlot { data, changed, .. } = slot;
         (
             column_vec_mut::<T>(data),
@@ -4785,6 +4720,11 @@ impl<T: Send + Sync + Default + 'static> QueryElement for &mut T {
         let (data, changed, tick) = fetch;
         changed.fill(tick);
         IntoIterator::into_iter(data)
+    }
+
+    fn par_mark_changed_all(fetch: &mut Self::ParFetch<'_>) {
+        let (_, changed, tick) = fetch;
+        changed.fill(*tick);
     }
 
     #[cfg(feature = "raw_storage")]
@@ -4877,6 +4817,8 @@ impl<T: Send + Sync + Default + 'static> QueryElement for Option<&T> {
             unreachable!("optional query elements never use the all-required fast path")
         })
     }
+
+    fn par_mark_changed_all(_fetch: &mut Self::ParFetch<'_>) {}
 
     #[cfg(feature = "raw_storage")]
     unsafe fn par_item_unchecked<'fetch>(
@@ -4990,6 +4932,12 @@ impl<T: Send + Sync + Default + 'static> QueryElement for Option<&mut T> {
         std::iter::from_fn(|| {
             unreachable!("optional query elements never use the all-required fast path")
         })
+    }
+
+    fn par_mark_changed_all(fetch: &mut Self::ParFetch<'_>) {
+        if let Some((_, changed, tick)) = fetch.as_mut() {
+            changed.fill(*tick);
+        }
     }
 
     #[cfg(feature = "raw_storage")]
@@ -5197,6 +5145,10 @@ pub trait QueryTuple: sealed::SealedQueryTuple {
         index: usize,
     ) -> Self::Item<'fetch>;
     fn mark_changed_all(fetch: &mut Self::Fetch<'_>);
+    /// Stamps every row of each mutable element's tick column, so the
+    /// unchecked fast path can stamp once up front instead of filling as it
+    /// hands out rows.
+    fn par_mark_changed_all(fetch: &mut Self::ParFetch<'_>);
     fn item_marked<'fetch>(fetch: &'fetch mut Self::Fetch<'_>, index: usize) -> Self::Item<'fetch>;
     const ALL_REQUIRED: bool;
     fn fast_for_each<FN>(fetch: Self::ParFetch<'_>, entities: &[Entity], f: &mut FN)
@@ -5767,6 +5719,10 @@ macro_rules! impl_query_tuple {
                 $($element::mark_changed_all(&mut fetch.$position);)+
             }
 
+            fn par_mark_changed_all(fetch: &mut Self::ParFetch<'_>) {
+                $($element::par_mark_changed_all(&mut fetch.$position);)+
+            }
+
             fn item_marked<'fetch>(fetch: &'fetch mut Self::Fetch<'_>, index: usize) -> Self::Item<'fetch> {
                 ($($element::item_marked(&mut fetch.$position, index),)+)
             }
@@ -5781,6 +5737,7 @@ macro_rules! impl_query_tuple {
                 #[cfg(feature = "raw_storage")]
                 {
                     let mut fetch = fetch;
+                    Self::par_mark_changed_all(&mut fetch);
                     for index in 0..entities.len() {
                         let entity = unsafe { *entities.get_unchecked(index) };
                         f(entity, unsafe { Self::par_item_unchecked(&mut fetch, index) });
@@ -5832,9 +5789,12 @@ where
     if length <= PARALLEL_ROW_CHUNK {
         let mut fetch = fetch;
         #[cfg(feature = "raw_storage")]
-        for index in 0..length {
-            let entity = unsafe { *entities.get_unchecked(index) };
-            f(entity, unsafe { Q::par_item_unchecked(&mut fetch, index) });
+        {
+            Q::par_mark_changed_all(&mut fetch);
+            for index in 0..length {
+                let entity = unsafe { *entities.get_unchecked(index) };
+                f(entity, unsafe { Q::par_item_unchecked(&mut fetch, index) });
+            }
         }
         #[cfg(not(feature = "raw_storage"))]
         for (index, &entity) in entities.iter().enumerate() {
@@ -6190,6 +6150,10 @@ macro_rules! impl_bare_element_query {
                     <$element as QueryElement>::mark_changed_all(fetch);
                 }
 
+                fn par_mark_changed_all(fetch: &mut Self::ParFetch<'_>) {
+                    <$element as QueryElement>::par_mark_changed_all(fetch);
+                }
+
                 fn item_marked<'fetch>(
                     fetch: &'fetch mut Self::Fetch<'_>,
                     index: usize,
@@ -6206,6 +6170,7 @@ macro_rules! impl_bare_element_query {
                     #[cfg(feature = "raw_storage")]
                     {
                         let mut fetch = fetch;
+                        <$element as QueryElement>::par_mark_changed_all(&mut fetch);
                         for index in 0..entities.len() {
                             let entity = unsafe { *entities.get_unchecked(index) };
                             f(entity, unsafe {
@@ -8010,7 +7975,6 @@ impl HierarchyIndex {
         // nothing to diff against, rebuild the whole index from a scan of the
         // current links: same result, just not incremental.
         if Self::can_track_incrementally(world) {
-            #[cfg(not(feature = "raw_storage"))]
             self.sync_incrementally(world, child_mask);
         } else {
             self.rebuild_from_scan(world, child_mask);
@@ -8018,7 +7982,6 @@ impl HierarchyIndex {
         world.increment_tick();
     }
 
-    #[cfg(not(feature = "raw_storage"))]
     fn sync_incrementally(&mut self, world: &mut DynWorld, child_mask: u64) {
         let unlinks: Vec<Entity> = world
             .structural_changes_since(self.structural_cursor)
@@ -8050,17 +8013,10 @@ impl HierarchyIndex {
     }
 
     /// Whether `world` retains everything the incremental sync path diffs
-    /// against. `raw_storage` keeps neither, and both are otherwise opt-in.
+    /// against. Both are opt-in, so a world that keeps neither rebuilds from a
+    /// scan instead.
     fn can_track_incrementally(world: &DynWorld) -> bool {
-        #[cfg(feature = "raw_storage")]
-        {
-            let _ = world;
-            false
-        }
-        #[cfg(not(feature = "raw_storage"))]
-        {
-            world.structural_logging && world.change_detection()
-        }
+        world.structural_logging && world.change_detection()
     }
 
     fn rebuild_from_scan(&mut self, world: &mut DynWorld, child_mask: u64) {
@@ -8090,7 +8046,6 @@ impl HierarchyIndex {
         }
     }
 
-    #[cfg(not(feature = "raw_storage"))]
     fn relink(&mut self, entity: Entity, parent: Entity) {
         if self.parent_of.get(&entity) == Some(&parent) {
             return;
@@ -8308,7 +8263,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(not(feature = "raw_storage"))]
     fn test_tags_and_structural_log() {
         let mut world = DynWorld::new();
         world.structural_logging = true;
@@ -8356,7 +8310,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(not(feature = "raw_storage"))]
     fn test_typed_query_iterates_and_stamps() {
         let mut world = DynWorld::new();
         world.set_change_detection(true);
@@ -8414,7 +8367,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(not(feature = "raw_storage"))]
     fn test_typed_query_changed_filter() {
         let mut world = DynWorld::new();
         world.set_change_detection(true);
@@ -8472,7 +8424,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(not(feature = "raw_storage"))]
     fn test_optional_mut_element_stamps_only_present_rows() {
         let mut world = DynWorld::new();
         world.set_change_detection(true);
@@ -8510,7 +8461,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(not(feature = "raw_storage"))]
     fn test_changed_filter_on_optional_element() {
         let mut world = DynWorld::new();
         world.set_change_detection(true);
@@ -8610,7 +8560,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(not(feature = "raw_storage"))]
     fn test_query_ref_filters_match_for_each() {
         let mut world = DynWorld::new();
         world.set_change_detection(true);
@@ -8792,7 +8741,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(not(feature = "raw_storage"))]
     fn test_mark_changed_stamps_raw_writes() {
         let mut world = DynWorld::new();
         world.set_change_detection(true);
@@ -8828,7 +8776,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(not(feature = "raw_storage"))]
     fn test_mark_columns_changed_bulk_stamps_one_table() {
         let mut world = DynWorld::new();
         world.set_change_detection(true);
@@ -8874,7 +8821,6 @@ mod tests {
         assert!(world.is_alive(plain));
     }
 
-    #[cfg(not(feature = "raw_storage"))]
     #[test]
     fn test_mutable_query_stamps_peak_only_when_rows_are_visited() {
         let mut world = DynWorld::new();
@@ -8911,7 +8857,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(not(feature = "raw_storage"))]
     fn test_filtered_mutable_query_keeps_changed_sets_exact() {
         let mut world = DynWorld::new();
         world.set_change_detection(true);
@@ -9087,7 +9032,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(not(feature = "raw_storage"))]
     fn test_unfiltered_mutable_iteration_marks_changes() {
         let mut world = DynWorld::new();
         world.set_change_detection(true);
@@ -9156,9 +9100,8 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "raw_storage")]
     #[test]
-    fn test_raw_storage_applies_writes_with_change_detection_disabled() {
+    fn test_writes_land_with_change_detection_disabled() {
         let mut world = DynWorld::new();
         let position = world.register::<Position>();
         let entities: Vec<_> = (0..64)
@@ -9180,7 +9123,7 @@ mod tests {
         assert_eq!(
             world.query_entities_changed(position.mask).count(),
             0,
-            "raw_storage intentionally disables per-row change detection"
+            "change detection is off by default, so nothing is stamped to match"
         );
 
         for (index, &entity) in entities.iter().enumerate() {
@@ -9397,7 +9340,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(not(feature = "raw_storage"))]
     fn test_bare_element_queries_match_single_tuples() {
         let mut world = DynWorld::new();
         world.set_change_detection(true);
@@ -9456,7 +9398,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(not(feature = "raw_storage"))]
     fn test_added_filter_matches_spawns_and_component_adds_only() {
         let mut world = DynWorld::new();
         world.set_change_detection(true);
@@ -9615,7 +9556,6 @@ mod tests {
 
     #[cfg(not(target_family = "wasm"))]
     #[test]
-    #[cfg(not(feature = "raw_storage"))]
     fn test_typed_par_for_each_matches_sequential() {
         let mut world = DynWorld::new();
         world.set_change_detection(true);
@@ -9661,7 +9601,6 @@ mod tests {
 
     #[cfg(not(target_family = "wasm"))]
     #[test]
-    #[cfg(not(feature = "raw_storage"))]
     fn test_typed_par_for_each_added_filter() {
         let mut world = DynWorld::new();
         world.set_change_detection(true);
@@ -9774,7 +9713,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(not(feature = "raw_storage"))]
     fn test_hierarchy_index_raw_writes_need_mark_changed() {
         let mut world = DynWorld::new();
         world.set_change_detection(true);
@@ -10223,7 +10161,6 @@ mod tests {
                         total_pings += 1;
                     }
                     _ => {
-                        #[cfg(not(feature = "raw_storage"))]
                         {
                             let changed: std::collections::HashSet<Entity> =
                                 world.query_entities_changed(position.mask).collect();
@@ -10306,7 +10243,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(not(feature = "raw_storage"))]
     fn test_for_each_mut_changed_visits_only_stamped_slots() {
         let mut world = DynWorld::new();
         world.set_change_detection(true);
@@ -10331,7 +10267,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(not(feature = "raw_storage"))]
     fn test_for_each_mut_changed_since_cursor() {
         let mut world = DynWorld::new();
         world.set_change_detection(true);
@@ -10359,7 +10294,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(not(feature = "raw_storage"))]
     fn test_changed_skips_untouched_tables() {
         let mut world = DynWorld::new();
         world.set_change_detection(true);
@@ -10384,7 +10318,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(not(feature = "raw_storage"))]
     fn test_structural_log_capacity_backstop() {
         let mut world = DynWorld::new();
         world.structural_logging = true;
@@ -10406,7 +10339,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(not(feature = "raw_storage"))]
     fn test_structural_logging_disabled_records_nothing() {
         let mut world = DynWorld::new();
         world.structural_logging = false;
@@ -10421,7 +10353,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(not(feature = "raw_storage"))]
     fn test_change_detection_disabled_drops_tick_columns_and_still_migrates() {
         let mut world = DynWorld::new();
         world.set_change_detection(false);
@@ -10448,7 +10379,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(not(feature = "raw_storage"))]
     fn test_re_enabling_change_detection_resyncs_tick_columns() {
         let mut world = DynWorld::new();
         world.set_change_detection(false);
@@ -10472,7 +10402,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(not(feature = "raw_storage"))]
     fn test_structural_log_trim_and_clear() {
         let mut world = DynWorld::new();
         world.structural_logging = true;
@@ -11111,7 +11040,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(not(feature = "raw_storage"))]
     fn test_prepared_queries_match_direct_queries() {
         let mut world = DynWorld::new();
         world.set_change_detection(true);
@@ -11297,7 +11225,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(not(feature = "raw_storage"))]
     fn test_query_join_ref_filters_and_windows() {
         let mut core_registry = ComponentRegistry::new();
         core_registry.register::<Position>();
@@ -11399,7 +11326,6 @@ mod tests {
 
     #[cfg(not(target_family = "wasm"))]
     #[test]
-    #[cfg(not(feature = "raw_storage"))]
     fn test_query_join_par_for_each_matches_sequential() {
         let mut core_registry = ComponentRegistry::new();
         core_registry.register::<Position>();
@@ -11481,7 +11407,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(not(feature = "raw_storage"))]
     fn test_query_join_filters() {
         struct Cursed;
 
@@ -11553,7 +11478,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(not(feature = "raw_storage"))]
     fn test_query_join_spans_member_worlds() {
         let mut core_registry = ComponentRegistry::new();
         core_registry.register::<Position>();
@@ -11732,7 +11656,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(not(feature = "raw_storage"))]
     fn test_dyn_ecs_routes_typed_access_to_owning_world() {
         let mut core_registry = ComponentRegistry::new();
         core_registry.register::<Position>();
@@ -12427,7 +12350,6 @@ mod tests {
                                 }
                             }
                             _ => {
-                                #[cfg(not(feature = "raw_storage"))]
                                 {
                                     let static_changed: std::collections::HashSet<Entity> =
                                         static_ecs
@@ -12628,7 +12550,6 @@ mod tests {
                             }
                         }
                         _ => {
-                            #[cfg(not(feature = "raw_storage"))]
                             {
                                 let static_changed: std::collections::HashSet<Entity> =
                                     static_world.query_entities_changed(DIFF_POSITION).collect();
