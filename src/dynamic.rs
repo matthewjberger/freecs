@@ -105,11 +105,14 @@ static NEXT_REGISTRY_ID: AtomicU32 = AtomicU32::new(1);
 /// Any>` regardless of the column storage backend.
 type BoxedAny = Box<dyn Any + Send + Sync>;
 
-/// A fast, non-cryptographic hasher for `TypeId` keys, used to resolve a
-/// component type to its column index. Every typed `set`, `get`, and `remove`
-/// does one such lookup, so the default `SipHash` over a 16-byte `TypeId` is a
-/// real per-operation cost; this mixes the id's words directly.
-/// Only the value distribution matters here, never resistance to collisions.
+/// A fast, non-cryptographic hasher for keys the compiler or the world mints
+/// rather than a caller: `TypeId`s resolving a component type to its column
+/// index, and archetype masks resolving a query to its tables. Every typed
+/// `set`, `get`, and `remove` does one lookup of the first kind and every query
+/// does one of the second, so the default `SipHash` is a real per-operation
+/// cost; this mixes the key's words directly. Only the value distribution
+/// matters here, never resistance to collisions, because nothing outside the
+/// program chooses these keys.
 #[derive(Default)]
 pub struct TypeIdHasher(u64);
 
@@ -140,6 +143,10 @@ impl std::hash::Hasher for TypeIdHasher {
 /// uses the fast [`TypeIdHasher`]: these keys are `TypeId`s minted by the
 /// compiler, never attacker-controlled, so `SipHash` buys nothing here.
 type TypeIdMap<V> = HashMap<TypeId, V, std::hash::BuildHasherDefault<TypeIdHasher>>;
+
+/// Mask-keyed map used for the query cache, hashed the same way and for the
+/// same reason: an archetype mask is minted by the world, not by a caller.
+type MaskMap<V> = HashMap<u64, V, std::hash::BuildHasherDefault<TypeIdHasher>>;
 
 /// A type-erased component column. With the default (safe) storage it is a
 /// boxed `Vec<T>` reached through `Any` downcasts. With the opt-in
@@ -1338,7 +1345,7 @@ pub struct DynWorld {
     pub tables: Vec<DynComponentArrays>,
     pub table_lookup: HashMap<u64, usize>,
     pub table_edges: Vec<ArchetypeEdges>,
-    pub query_cache: HashMap<u64, Vec<usize>>,
+    pub query_cache: MaskMap<Vec<usize>>,
     pub added_scratch: Vec<bool>,
     pub current_tick: u32,
     pub last_tick: u32,
@@ -1409,7 +1416,7 @@ impl DynWorld {
             tables: Vec::new(),
             table_lookup: HashMap::new(),
             table_edges: Vec::new(),
-            query_cache: HashMap::new(),
+            query_cache: MaskMap::default(),
             added_scratch: Vec::new(),
             current_tick: 0,
             last_tick: 0,
@@ -5246,11 +5253,35 @@ fn lookup_masks_from(elements: &[(Option<u64>, bool)]) -> Option<([u64; 8], u64)
     Some((masks, required))
 }
 
+/// Resolves each element's column. A query tuple's components are distinct, so
+/// their `column_position`s are distinct in-bounds indices, which is exactly
+/// `get_disjoint_mut`'s contract: the required case resolves by direct index
+/// without looking at any column the query did not ask for. Optional elements
+/// can leave holes, and those fall back to a scan.
 #[cfg(not(feature = "raw_storage"))]
 fn distribute_slots<const COUNT: usize>(
     columns: &mut [ColumnSlot],
     positions: [Option<usize>; COUNT],
 ) -> [Option<&mut ColumnSlot>; COUNT] {
+    let mut required = [0usize; COUNT];
+    let mut all_required = true;
+    for (element_index, position) in positions.iter().enumerate() {
+        match position {
+            Some(position) => required[element_index] = *position,
+            None => {
+                all_required = false;
+                break;
+            }
+        }
+    }
+
+    if all_required {
+        let resolved = columns
+            .get_disjoint_mut(required)
+            .expect("a query tuple's columns must be distinct and in bounds");
+        return resolved.map(Some);
+    }
+
     let mut slots = [const { None }; COUNT];
     for (column_index, slot) in columns.iter_mut().enumerate() {
         if let Some(element_index) = positions

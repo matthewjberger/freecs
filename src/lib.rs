@@ -1056,14 +1056,14 @@ impl ArchetypeEdges {
 /// query-cache entry the new table satisfies, and wires single-component
 /// edges from existing tables toward the new one. `table_masks` must iterate
 /// every table including the new one, in index order.
-pub struct ArchetypeRouting<'world> {
+pub struct ArchetypeRouting<'world, S = std::collections::hash_map::RandomState> {
     pub table_lookup: &'world mut std::collections::HashMap<u64, usize>,
     pub table_edges: &'world mut Vec<ArchetypeEdges>,
-    pub query_cache: &'world mut std::collections::HashMap<u64, Vec<usize>>,
+    pub query_cache: &'world mut std::collections::HashMap<u64, Vec<usize>, S>,
 }
 
-pub fn archetype_register_table<M>(
-    routing: ArchetypeRouting<'_>,
+pub fn archetype_register_table<M, S>(
+    routing: ArchetypeRouting<'_, S>,
     component_count: usize,
     mask: u64,
     table_index: usize,
@@ -1071,6 +1071,7 @@ pub fn archetype_register_table<M>(
     component_bits: impl Iterator<Item = (u64, usize)>,
 ) where
     M: Iterator<Item = u64> + Clone,
+    S: std::hash::BuildHasher,
 {
     routing
         .table_edges
@@ -1099,13 +1100,14 @@ pub fn archetype_register_table<M>(
 /// computing and caching it on first use. Taking the cache and the table
 /// masks as separate parameters keeps the borrows disjoint, so callers can
 /// mutate tables while holding the returned slice.
-pub fn archetype_cached_tables<M>(
-    query_cache: &mut std::collections::HashMap<u64, Vec<usize>>,
+pub fn archetype_cached_tables<M, S>(
+    query_cache: &mut std::collections::HashMap<u64, Vec<usize>, S>,
     table_masks: M,
     mask: u64,
 ) -> &[usize]
 where
     M: Iterator<Item = u64>,
+    S: std::hash::BuildHasher,
 {
     query_cache.entry(mask).or_insert_with(|| {
         table_masks
