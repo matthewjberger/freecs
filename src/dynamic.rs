@@ -240,10 +240,7 @@ impl ErasedColumn {
         }
         #[cfg(feature = "raw_storage")]
         {
-            self.storage.reserve(count);
-            for _ in 0..count {
-                self.storage.push::<T>(value.clone());
-            }
+            self.storage.extend_clone::<T>(count, value);
         }
     }
 
@@ -261,10 +258,7 @@ impl ErasedColumn {
         }
         #[cfg(feature = "raw_storage")]
         {
-            self.storage.reserve(count);
-            for _ in 0..count {
-                self.storage.push::<T>(T::default());
-            }
+            self.storage.extend_default::<T>(count);
         }
     }
 
@@ -539,6 +533,41 @@ mod raw_storage {
             }
             unsafe { ptr::write(self.element_pointer(self.len).cast::<T>(), value) }
             self.len += 1;
+        }
+
+        /// Appends `count` elements built by `make`, resolving the destination
+        /// once and striding by `T`'s compile-time size.
+        ///
+        /// [`push`](Self::push) walks `item_size`, a runtime field, and rechecks
+        /// the capacity and the zero-size case on every element, so a loop
+        /// around it hides the stride from the optimizer. Reserving once and
+        /// writing through a `*mut T` gives the same codegen `Vec<T>` gets,
+        /// which is what the bulk spawn path wants.
+        fn extend_with<T: 'static>(&mut self, count: usize, mut make: impl FnMut() -> T) {
+            if count == 0 {
+                return;
+            }
+            if self.item_size == 0 {
+                for _ in 0..count {
+                    std::mem::forget(make());
+                }
+                self.len += count;
+                return;
+            }
+            self.reserve(count);
+            let base = self.element_pointer(self.len).cast::<T>();
+            for index in 0..count {
+                unsafe { ptr::write(base.add(index), make()) };
+            }
+            self.len += count;
+        }
+
+        pub(crate) fn extend_clone<T: Clone + 'static>(&mut self, count: usize, value: &T) {
+            self.extend_with(count, || value.clone());
+        }
+
+        pub(crate) fn extend_default<T: Default + 'static>(&mut self, count: usize) {
+            self.extend_with(count, T::default);
         }
 
         pub(crate) fn swap_remove(&mut self, index: usize) {
