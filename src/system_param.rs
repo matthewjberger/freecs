@@ -1200,6 +1200,7 @@ mod tests {
     #[cfg(not(feature = "raw_storage"))]
     fn changed_filter_visits_only_mutated() {
         let mut world = DynWorld::new();
+        world.set_change_detection(true);
         let entity = world.spawn((Position { x: 0.0, y: 0.0 },));
         world.spawn((Position { x: 0.0, y: 0.0 },));
         world.step();
@@ -1462,6 +1463,7 @@ mod tests {
     #[cfg(not(feature = "raw_storage"))]
     fn added_filter_visits_only_new() {
         let mut world = DynWorld::new();
+        world.set_change_detection(true);
         world.spawn((Position { x: 0.0, y: 0.0 },));
         world.step();
         world.spawn((Position { x: 9.0, y: 9.0 },));

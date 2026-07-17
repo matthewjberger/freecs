@@ -93,6 +93,9 @@ fn report(world: &DynWorld) {
 
 fn main() {
     let mut world = DynWorld::new();
+    // Change windows are opt-in: without this the changed/added filters below
+    // match nothing. Turn it on before the spawns you want to observe.
+    world.set_change_detection(true);
 
     // Spawning takes bundles of component values; types register lazily.
     let player = world.spawn((Position { x: 1.0, y: 2.0 }, Velocity { x: 3.0, y: 0.0 }));
@@ -226,6 +229,9 @@ fn main() {
     let mut ecs = DynEcs::new();
     ecs.add_world_at(0, core);
     ecs.add_world_at(1, effects);
+    // Member worlds opt in individually; the changed::<Position>() filter
+    // below reads world 0's ticks.
+    ecs.worlds[0].set_change_detection(true);
     let torch = ecs.spawn_with((Position { x: 0.0, y: 0.0 }, Burning { lift: 2.0 }));
 
     // Group-typed access needs no world index; routing finds the owner.

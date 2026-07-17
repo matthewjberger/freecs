@@ -105,16 +105,14 @@ static NEXT_REGISTRY_ID: AtomicU32 = AtomicU32::new(1);
 /// Any>` regardless of the column storage backend.
 type BoxedAny = Box<dyn Any + Send + Sync>;
 
-/// A fast, non-cryptographic hasher for `TypeId` keys, used by `raw_storage`
-/// to resolve a component type to its column index. Every typed `set`, `get`,
-/// and `remove` does one such lookup, so the default `SipHash` over a 16-byte
-/// `TypeId` is a real per-operation cost; this mixes the id's words directly.
+/// A fast, non-cryptographic hasher for `TypeId` keys, used to resolve a
+/// component type to its column index. Every typed `set`, `get`, and `remove`
+/// does one such lookup, so the default `SipHash` over a 16-byte `TypeId` is a
+/// real per-operation cost; this mixes the id's words directly.
 /// Only the value distribution matters here, never resistance to collisions.
-#[cfg(feature = "raw_storage")]
 #[derive(Default)]
 pub struct TypeIdHasher(u64);
 
-#[cfg(feature = "raw_storage")]
 impl std::hash::Hasher for TypeIdHasher {
     fn finish(&self) -> u64 {
         self.0
@@ -138,13 +136,10 @@ impl std::hash::Hasher for TypeIdHasher {
     }
 }
 
-/// `TypeId`-keyed map used for the registry's type-to-index lookups. Uses the
-/// fast [`TypeIdHasher`] under `raw_storage` and the standard hasher otherwise,
-/// so the default build's public types are unchanged.
-#[cfg(feature = "raw_storage")]
+/// `TypeId`-keyed map used for the registry's type-to-index lookups. Always
+/// uses the fast [`TypeIdHasher`]: these keys are `TypeId`s minted by the
+/// compiler, never attacker-controlled, so `SipHash` buys nothing here.
 type TypeIdMap<V> = HashMap<TypeId, V, std::hash::BuildHasherDefault<TypeIdHasher>>;
-#[cfg(not(feature = "raw_storage"))]
-type TypeIdMap<V> = HashMap<TypeId, V>;
 
 /// A type-erased component column. With the default (safe) storage it is a
 /// boxed `Vec<T>` reached through `Any` downcasts. With the opt-in
@@ -712,7 +707,6 @@ pub struct ComponentRegistry {
     /// loop of `set`/`remove` over one component type hits this on every call
     /// after the first, resolving through a `TypeId` equality instead of a map
     /// probe. Never wrong: a miss just falls through to the map.
-    #[cfg(feature = "raw_storage")]
     recent_component: Option<(TypeId, u32)>,
 }
 
@@ -732,7 +726,6 @@ impl ComponentRegistry {
             tags_by_type: TypeIdMap::default(),
             #[cfg(feature = "snapshot")]
             codecs: Vec::new(),
-            #[cfg(feature = "raw_storage")]
             recent_component: None,
         }
     }
@@ -743,17 +736,13 @@ impl ComponentRegistry {
     /// shared across threads by the parallel iteration paths.
     pub fn register<T: Send + Sync + Default + 'static>(&mut self) -> ComponentKey<T> {
         let type_id = TypeId::of::<T>();
-        #[cfg(feature = "raw_storage")]
         if let Some((cached_id, component_index)) = self.recent_component
             && cached_id == type_id
         {
             return self.key_for(component_index);
         }
         if let Some(&component_index) = self.components_by_type.get(&type_id) {
-            #[cfg(feature = "raw_storage")]
-            {
-                self.recent_component = Some((type_id, component_index));
-            }
+            self.recent_component = Some((type_id, component_index));
             return self.key_for(component_index);
         }
 
@@ -905,9 +894,9 @@ impl ColumnSlot {
     /// `raw_storage` the tick columns are never materialized, so change
     /// detection is disabled and this is a no-op.
     #[inline]
-    fn track_extend(&mut self, count: usize, tick: u32) {
+    fn track_extend(&mut self, enabled: bool, count: usize, tick: u32) {
         #[cfg(not(feature = "raw_storage"))]
-        {
+        if enabled {
             let filled_length = self.changed.len() + count;
             self.changed.resize(filled_length, tick);
             self.added.resize(filled_length, tick);
@@ -916,16 +905,16 @@ impl ColumnSlot {
         }
         #[cfg(feature = "raw_storage")]
         {
-            let _ = (count, tick);
+            let _ = (enabled, count, tick);
         }
     }
 
     /// Pushes one tick row: `tick` for the changed column, `added_value` for
     /// the added column. No-op under `raw_storage`.
     #[inline]
-    fn track_push(&mut self, tick: u32, added_value: u32) {
+    fn track_push(&mut self, enabled: bool, tick: u32, added_value: u32) {
         #[cfg(not(feature = "raw_storage"))]
-        {
+        if enabled {
             self.changed.push(tick);
             self.added.push(added_value);
             self.peak_changed = tick;
@@ -933,22 +922,22 @@ impl ColumnSlot {
         }
         #[cfg(feature = "raw_storage")]
         {
-            let _ = (tick, added_value);
+            let _ = (enabled, tick, added_value);
         }
     }
 
     /// Swap-removes one tick row, mirroring the data column's swap-remove.
     /// No-op under `raw_storage`.
     #[inline]
-    fn track_swap_remove(&mut self, index: usize) {
+    fn track_swap_remove(&mut self, enabled: bool, index: usize) {
         #[cfg(not(feature = "raw_storage"))]
-        {
+        if enabled {
             self.changed.swap_remove(index);
             self.added.swap_remove(index);
         }
         #[cfg(feature = "raw_storage")]
         {
-            let _ = index;
+            let _ = (enabled, index);
         }
     }
 
@@ -1373,6 +1362,22 @@ pub struct DynWorld {
     pub last_tick: u32,
     pub structural_log: Vec<StructuralChange>,
     pub structural_sequence: u64,
+    /// Whether spawns, despawns, and migrations append to [`Self::structural_log`].
+    ///
+    /// Off by default: the log costs a 32-byte push per entity per structural
+    /// change, and most worlds never read it. Set it to `true` before the
+    /// spawns you want recorded if you use [`Self::structural_changes_since`]
+    /// or drive a [`HierarchyIndex`] incrementally. While it is off the log and
+    /// [`Self::structural_sequence`] stay frozen, so `structural_changes_since`
+    /// reports nothing happened.
+    pub structural_logging: bool,
+    /// Whether columns maintain their per-row `changed`/`added` tick columns.
+    /// Private because the tick columns must stay exactly as long as the rows
+    /// they describe: a bare flag flip would leave the two out of sync and the
+    /// next migration's swap-remove would panic. Go through
+    /// [`set_change_detection`](Self::set_change_detection), which resizes the
+    /// columns to match.
+    change_detection: bool,
     pub tags: Vec<SparseTagSet>,
     command_buffer: Vec<DynCommand>,
     pub events: EventBus,
@@ -1428,6 +1433,8 @@ impl DynWorld {
             last_tick: 0,
             structural_log: Vec::new(),
             structural_sequence: 0,
+            structural_logging: false,
+            change_detection: false,
             tags: Vec::new(),
             command_buffer: Vec::new(),
             events: EventBus::default(),
@@ -1573,6 +1580,59 @@ impl DynWorld {
         );
     }
 
+    /// Whether per-row change detection is being maintained. Off by default;
+    /// always false under `raw_storage`, which has no tick columns to maintain.
+    pub fn change_detection(&self) -> bool {
+        #[cfg(feature = "raw_storage")]
+        {
+            false
+        }
+        #[cfg(not(feature = "raw_storage"))]
+        {
+            self.change_detection
+        }
+    }
+
+    /// Turns per-row change detection on or off, resizing every tick column to
+    /// match its rows so the two never disagree.
+    ///
+    /// Off by default, because it is not free: each tracked column costs two
+    /// heap allocations, mirrors every push and swap-remove its data column
+    /// performs, and is stamped once per row by every mutable query. A world
+    /// that never reads `changed::<T>()` or `added::<T>()` pays all of that for
+    /// nothing, so it is opt-in rather than opt-out.
+    ///
+    /// While it is off the `changed`/`added` filters match nothing, exactly as
+    /// under `raw_storage`. Turning it on restamps every existing row with the
+    /// current tick rather than the tick it was really written at, so the rows
+    /// look uniformly touched as of now; turn it on before the writes you want
+    /// to observe. Has no effect under `raw_storage`, which has no tick columns.
+    pub fn set_change_detection(&mut self, enabled: bool) {
+        if self.change_detection == enabled {
+            return;
+        }
+        self.change_detection = enabled;
+
+        #[cfg(not(feature = "raw_storage"))]
+        {
+            let tick = self.current_tick;
+            for table in &mut self.tables {
+                let rows = table.entity_indices.len();
+                for column in &mut table.columns {
+                    if enabled {
+                        column.changed.resize(rows, tick);
+                        column.added.resize(rows, tick);
+                        column.peak_changed = tick;
+                        column.peak_added = tick;
+                    } else {
+                        column.changed = Vec::new();
+                        column.added = Vec::new();
+                    }
+                }
+            }
+        }
+    }
+
     fn record_structural(&mut self, entity: Entity, kind: StructuralChangeKind, mask: u64) {
         // raw_storage does not maintain the structural-change log: its only
         // in-crate consumer, HierarchyIndex, rebuilds from a scan instead, so
@@ -1583,6 +1643,9 @@ impl DynWorld {
         }
         #[cfg(not(feature = "raw_storage"))]
         {
+            if !self.structural_logging {
+                return;
+            }
             if self.structural_log.len() >= STRUCTURAL_LOG_CAPACITY {
                 self.structural_log.clear();
             }
@@ -1676,13 +1739,14 @@ impl DynWorld {
         allocator.allocate_batch(count, &mut entities);
 
         let start_index = self.tables[table_index].entity_indices.len();
+        let track = self.change_detection;
         {
             let table = &mut self.tables[table_index];
             table.entity_indices.reserve(count);
             for column in &mut table.columns {
                 let info = &self.registry.components[column.component_index as usize];
                 (info.push_default)(&mut column.data, count);
-                column.track_extend(count, current_tick);
+                column.track_extend(track, count, current_tick);
             }
             for &entity in &entities {
                 table.entity_indices.push(entity);
@@ -1718,6 +1782,7 @@ impl DynWorld {
     }
 
     fn remove_row(&mut self, table_index: usize, array_index: usize) {
+        let track = self.change_detection;
         let table = &mut self.tables[table_index];
         let last_index = table.entity_indices.len() - 1;
         let swapped = if array_index < last_index {
@@ -1729,7 +1794,7 @@ impl DynWorld {
         for column in &mut table.columns {
             let info = &self.registry.components[column.component_index as usize];
             (info.swap_remove)(&mut column.data, array_index);
-            column.track_swap_remove(array_index);
+            column.track_swap_remove(track, array_index);
         }
         table.entity_indices.swap_remove(array_index);
 
@@ -1850,6 +1915,7 @@ impl DynWorld {
         to_table: usize,
     ) -> (usize, usize) {
         let tick = self.current_tick;
+        let track = self.change_detection;
         let swapped_entity;
         {
             let [source, destination] = self
@@ -1866,7 +1932,7 @@ impl DynWorld {
                 let destination_column = &mut destination.columns[destination_position];
                 let info = &self.registry.components[destination_column.component_index as usize];
                 (info.push_default)(&mut destination_column.data, 1);
-                destination_column.track_push(tick, tick);
+                destination_column.track_push(track, tick, tick);
             }
 
             let shared = source.mask & destination.mask;
@@ -1887,9 +1953,9 @@ impl DynWorld {
                         from_index,
                         &mut destination.columns[destination_position].data,
                     );
-                    source.columns[source_position].track_swap_remove(from_index);
+                    source.columns[source_position].track_swap_remove(track, from_index);
                     let destination_column = &mut destination.columns[destination_position];
-                    destination_column.track_push(tick, carried_added);
+                    destination_column.track_push(track, tick, carried_added);
                 }
                 #[cfg(feature = "raw_storage")]
                 source.columns[source_position].data.swap_remove_into_raw(
@@ -1909,7 +1975,7 @@ impl DynWorld {
                     let info = &self.registry.components
                         [source.columns[source_position].component_index as usize];
                     (info.swap_remove)(&mut source.columns[source_position].data, from_index);
-                    source.columns[source_position].track_swap_remove(from_index);
+                    source.columns[source_position].track_swap_remove(track, from_index);
                 }
                 #[cfg(feature = "raw_storage")]
                 source.columns[source_position]
@@ -1953,27 +2019,7 @@ impl DynWorld {
             return true;
         }
 
-        let target_table = if mask.count_ones() == 1 {
-            self.table_edges[table_index]
-                .add_edges
-                .get(mask.trailing_zeros() as usize)
-                .copied()
-                .flatten()
-        } else {
-            self.table_edges[table_index]
-                .multi_add_cache
-                .get(&mask)
-                .copied()
-        };
-
-        let new_table_index = target_table.unwrap_or_else(|| {
-            let new_index = self.get_or_create_table(current_mask | mask);
-            self.table_edges[table_index]
-                .multi_add_cache
-                .insert(mask, new_index);
-            new_index
-        });
-
+        let new_table_index = self.resolve_add_target(table_index, mask);
         self.move_entity(entity, table_index, array_index, new_table_index);
         self.record_structural(
             entity,
@@ -1994,13 +2040,14 @@ impl DynWorld {
 
         let table_index = self.get_or_create_table(mask);
         let current_tick = self.current_tick;
+        let track = self.change_detection;
         let start_index = self.tables[table_index].entity_indices.len();
         {
             let table = &mut self.tables[table_index];
             for column in &mut table.columns {
                 let info = &self.registry.components[column.component_index as usize];
                 (info.push_default)(&mut column.data, 1);
-                column.track_push(current_tick, current_tick);
+                column.track_push(track, current_tick, current_tick);
             }
             table.entity_indices.push(entity);
         }
@@ -2123,7 +2170,6 @@ impl DynWorld {
 
     /// Resolves the table an entity moves to when `mask` is added, creating
     /// and caching the edge on first use.
-    #[cfg(feature = "raw_storage")]
     fn resolve_add_target(&mut self, table_index: usize, mask: u64) -> usize {
         let current_mask = self.tables[table_index].mask;
         let cached = if mask.count_ones() == 1 {
@@ -2186,10 +2232,10 @@ impl DynWorld {
         #[cfg(not(feature = "raw_storage"))]
         {
             if let Some((table_index, array_index)) = get_location(&self.entity_locations, entity) {
-                let table = &mut self.tables[table_index];
-                if table.mask & key.mask != 0 {
-                    let position = column_position(table.mask, key.mask);
-                    let column = &mut table.columns[position];
+                let current_mask = self.tables[table_index].mask;
+                if current_mask & key.mask != 0 {
+                    let position = column_position(current_mask, key.mask);
+                    let column = &mut self.tables[table_index].columns[position];
                     column_vec_mut::<T>(&mut column.data)[array_index] = value;
                     if let Some(cell) = column.changed.get_mut(array_index) {
                         *cell = current_tick;
@@ -2197,7 +2243,21 @@ impl DynWorld {
                     column.peak_changed = current_tick;
                     return;
                 }
+
+                let target = self.resolve_add_target(table_index, key.mask);
+                let (new_table, new_index) =
+                    self.move_entity(entity, table_index, array_index, target);
+                self.record_structural(entity, StructuralChangeKind::ComponentsAdded, key.mask);
+                let position = column_position(self.tables[new_table].mask, key.mask);
+                let column = &mut self.tables[new_table].columns[position];
+                column_vec_mut::<T>(&mut column.data)[new_index] = value;
+                if let Some(cell) = column.changed.get_mut(new_index) {
+                    *cell = current_tick;
+                }
+                column.peak_changed = current_tick;
+                return;
             }
+
             if self.add_components(entity, key.mask)
                 && let Some((table_index, array_index)) =
                     get_location(&self.entity_locations, entity)
@@ -3010,10 +3070,11 @@ impl DynWorld {
 
         bundle.spawn_extend(self, table_index, count);
 
+        let track = self.change_detection;
         {
             let table = &mut self.tables[table_index];
             for column in &mut table.columns {
-                column.track_extend(count, current_tick);
+                column.track_extend(track, count, current_tick);
             }
             table.entity_indices.extend_from_slice(&entities);
         }
@@ -3107,6 +3168,7 @@ impl DynWorld {
 /// struct Sprite { id: u32 }
 ///
 /// let mut ecs = DynEcs::new();
+/// ecs.structural_logging = true;
 /// let core = ecs.add_world(ComponentRegistry::new());
 /// let render = ecs.add_world(ComponentRegistry::new());
 /// let selected = ecs.register_tag();
@@ -3145,6 +3207,12 @@ pub struct DynEcs {
     pub tags: Vec<SparseTagSet>,
     pub structural_log: Vec<StructuralChange>,
     pub structural_sequence: u64,
+    /// Whether handle allocation, handle death, and group tag flips append to
+    /// [`Self::structural_log`]. Off by default, matching
+    /// [`DynWorld::structural_logging`]; set it to `true` before the spawns you
+    /// want recorded. While it is off the log and [`Self::structural_sequence`]
+    /// stay frozen.
+    pub structural_logging: bool,
     pub type_routes: HashMap<TypeId, usize>,
     pub tag_type_indices: HashMap<TypeId, usize>,
     pub tag_type_names: Vec<Option<String>>,
@@ -3158,6 +3226,9 @@ impl DynEcs {
     }
 
     fn record_structural(&mut self, entity: Entity, kind: StructuralChangeKind, mask: u64) {
+        if !self.structural_logging {
+            return;
+        }
         if self.structural_log.len() >= STRUCTURAL_LOG_CAPACITY {
             self.structural_log.clear();
         }
@@ -7933,57 +8004,78 @@ impl HierarchyIndex {
             .map(|key| key.mask)
             .unwrap_or(0);
 
-        // raw_storage tracks neither structural changes nor ticks, so the
-        // incremental unlink/relink path has nothing to diff against. Rebuild
-        // the whole index from a scan of current links instead; the result is
-        // identical, just not incremental.
-        #[cfg(feature = "raw_storage")]
-        {
-            self.children.clear();
-            self.parent_of.clear();
-            if child_mask != 0 {
-                let holders: Vec<Entity> = world.query_entities(child_mask).collect();
-                for entity in holders {
-                    if let Some(child_of) = world.get::<ChildOf>(entity) {
-                        let parent = child_of.0;
-                        self.parent_of.insert(entity, parent);
-                        self.children.entry(parent).or_default().push(entity);
-                    }
-                }
-            }
-            world.increment_tick();
+        // The incremental unlink/relink path diffs against the structural log
+        // and the change ticks, so it is only available when the world keeps
+        // both. raw_storage never does, and either can be switched off. With
+        // nothing to diff against, rebuild the whole index from a scan of the
+        // current links: same result, just not incremental.
+        if Self::can_track_incrementally(world) {
+            #[cfg(not(feature = "raw_storage"))]
+            self.sync_incrementally(world, child_mask);
+        } else {
+            self.rebuild_from_scan(world, child_mask);
+        }
+        world.increment_tick();
+    }
+
+    #[cfg(not(feature = "raw_storage"))]
+    fn sync_incrementally(&mut self, world: &mut DynWorld, child_mask: u64) {
+        let unlinks: Vec<Entity> = world
+            .structural_changes_since(self.structural_cursor)
+            .iter()
+            .filter(|change| match change.kind {
+                StructuralChangeKind::Despawned => true,
+                StructuralChangeKind::ComponentsRemoved => change.mask & child_mask != 0,
+                _ => false,
+            })
+            .map(|change| change.entity)
+            .collect();
+        for entity in unlinks {
+            self.unlink(entity);
         }
 
-        #[cfg(not(feature = "raw_storage"))]
-        {
-            let unlinks: Vec<Entity> = world
-                .structural_changes_since(self.structural_cursor)
-                .iter()
-                .filter(|change| match change.kind {
-                    StructuralChangeKind::Despawned => true,
-                    StructuralChangeKind::ComponentsRemoved => change.mask & child_mask != 0,
-                    _ => false,
-                })
-                .map(|change| change.entity)
+        if child_mask != 0 {
+            let relinks: Vec<Entity> = world
+                .query_entities_changed_since(child_mask, self.tick_cursor)
                 .collect();
-            for entity in unlinks {
-                self.unlink(entity);
-            }
-
-            if child_mask != 0 {
-                let relinks: Vec<Entity> = world
-                    .query_entities_changed_since(child_mask, self.tick_cursor)
-                    .collect();
-                for entity in relinks {
-                    if let Some(child_of) = world.get::<ChildOf>(entity) {
-                        self.relink(entity, child_of.0);
-                    }
+            for entity in relinks {
+                if let Some(child_of) = world.get::<ChildOf>(entity) {
+                    self.relink(entity, child_of.0);
                 }
             }
+        }
 
-            self.structural_cursor = world.structural_sequence();
-            self.tick_cursor = world.current_tick();
-            world.increment_tick();
+        self.structural_cursor = world.structural_sequence();
+        self.tick_cursor = world.current_tick();
+    }
+
+    /// Whether `world` retains everything the incremental sync path diffs
+    /// against. `raw_storage` keeps neither, and both are otherwise opt-in.
+    fn can_track_incrementally(world: &DynWorld) -> bool {
+        #[cfg(feature = "raw_storage")]
+        {
+            let _ = world;
+            false
+        }
+        #[cfg(not(feature = "raw_storage"))]
+        {
+            world.structural_logging && world.change_detection()
+        }
+    }
+
+    fn rebuild_from_scan(&mut self, world: &mut DynWorld, child_mask: u64) {
+        self.children.clear();
+        self.parent_of.clear();
+        if child_mask == 0 {
+            return;
+        }
+        let holders: Vec<Entity> = world.query_entities(child_mask).collect();
+        for entity in holders {
+            if let Some(child_of) = world.get::<ChildOf>(entity) {
+                let parent = child_of.0;
+                self.parent_of.insert(entity, parent);
+                self.children.entry(parent).or_default().push(entity);
+            }
         }
     }
 
@@ -8219,6 +8311,7 @@ mod tests {
     #[cfg(not(feature = "raw_storage"))]
     fn test_tags_and_structural_log() {
         let mut world = DynWorld::new();
+        world.structural_logging = true;
         let position = world.register::<Position>();
         let boss = world.register_tag();
 
@@ -8266,6 +8359,7 @@ mod tests {
     #[cfg(not(feature = "raw_storage"))]
     fn test_typed_query_iterates_and_stamps() {
         let mut world = DynWorld::new();
+        world.set_change_detection(true);
         let moving = world.spawn((Position::default(), Velocity { x: 2.0, y: 0.0 }));
         let still = world.spawn((Position { x: 9.0, y: 9.0 },));
 
@@ -8323,6 +8417,7 @@ mod tests {
     #[cfg(not(feature = "raw_storage"))]
     fn test_typed_query_changed_filter() {
         let mut world = DynWorld::new();
+        world.set_change_detection(true);
         let first = world.spawn((Position::default(), Velocity::default()));
         let second = world.spawn((Position::default(), Velocity::default()));
 
@@ -8380,6 +8475,7 @@ mod tests {
     #[cfg(not(feature = "raw_storage"))]
     fn test_optional_mut_element_stamps_only_present_rows() {
         let mut world = DynWorld::new();
+        world.set_change_detection(true);
         let velocity_key = world.register::<Velocity>();
         let plain = world.spawn((Position::default(),));
         let moving = world.spawn((Position::default(), Velocity::default()));
@@ -8417,6 +8513,7 @@ mod tests {
     #[cfg(not(feature = "raw_storage"))]
     fn test_changed_filter_on_optional_element() {
         let mut world = DynWorld::new();
+        world.set_change_detection(true);
         let still = world.spawn((Position::default(), Velocity::default()));
         let moving = world.spawn((Position::default(), Velocity::default()));
         let bare = world.spawn((Position::default(),));
@@ -8516,6 +8613,7 @@ mod tests {
     #[cfg(not(feature = "raw_storage"))]
     fn test_query_ref_filters_match_for_each() {
         let mut world = DynWorld::new();
+        world.set_change_detection(true);
         let boss = world.register_tag();
         let tagged = world.spawn((Position { x: 1.0, y: 0.0 }, Velocity::default()));
         let untagged = world.spawn((Position { x: 2.0, y: 0.0 }, Velocity::default()));
@@ -8697,6 +8795,7 @@ mod tests {
     #[cfg(not(feature = "raw_storage"))]
     fn test_mark_changed_stamps_raw_writes() {
         let mut world = DynWorld::new();
+        world.set_change_detection(true);
         let position = world.register::<Position>();
         let entities = world.spawn_entities(position.mask, 3);
 
@@ -8732,6 +8831,7 @@ mod tests {
     #[cfg(not(feature = "raw_storage"))]
     fn test_mark_columns_changed_bulk_stamps_one_table() {
         let mut world = DynWorld::new();
+        world.set_change_detection(true);
         let position = world.register::<Position>();
         let velocity = world.register::<Velocity>();
         let plain = world.spawn_entities(position.mask, 2);
@@ -8814,6 +8914,7 @@ mod tests {
     #[cfg(not(feature = "raw_storage"))]
     fn test_filtered_mutable_query_keeps_changed_sets_exact() {
         let mut world = DynWorld::new();
+        world.set_change_detection(true);
         let position = world.register::<Position>();
         let boss = world.register_tag();
         let entities = world.spawn_entities(position.mask, 4);
@@ -8989,6 +9090,7 @@ mod tests {
     #[cfg(not(feature = "raw_storage"))]
     fn test_unfiltered_mutable_iteration_marks_changes() {
         let mut world = DynWorld::new();
+        world.set_change_detection(true);
         world.spawn_bundles(
             (Position { x: 1.0, y: 0.0 }, Velocity { x: 1.0, y: 0.0 }),
             200,
@@ -9298,6 +9400,7 @@ mod tests {
     #[cfg(not(feature = "raw_storage"))]
     fn test_bare_element_queries_match_single_tuples() {
         let mut world = DynWorld::new();
+        world.set_change_detection(true);
         let plain = world.spawn((Position { x: 1.0, y: 0.0 },));
         let moving = world.spawn((Position { x: 2.0, y: 0.0 }, Velocity { x: 5.0, y: 0.0 }));
 
@@ -9356,6 +9459,7 @@ mod tests {
     #[cfg(not(feature = "raw_storage"))]
     fn test_added_filter_matches_spawns_and_component_adds_only() {
         let mut world = DynWorld::new();
+        world.set_change_detection(true);
         let velocity = world.register::<Velocity>();
         let veteran = world.spawn((Position::default(),));
 
@@ -9514,6 +9618,7 @@ mod tests {
     #[cfg(not(feature = "raw_storage"))]
     fn test_typed_par_for_each_matches_sequential() {
         let mut world = DynWorld::new();
+        world.set_change_detection(true);
         let boss = world.register_tag();
         let position = world.register::<Position>();
         let velocity = world.register::<Velocity>();
@@ -9559,6 +9664,7 @@ mod tests {
     #[cfg(not(feature = "raw_storage"))]
     fn test_typed_par_for_each_added_filter() {
         let mut world = DynWorld::new();
+        world.set_change_detection(true);
         world.spawn((Position::default(),));
         world.step();
         let fresh = world.spawn((Position::default(),));
@@ -9671,6 +9777,8 @@ mod tests {
     #[cfg(not(feature = "raw_storage"))]
     fn test_hierarchy_index_raw_writes_need_mark_changed() {
         let mut world = DynWorld::new();
+        world.set_change_detection(true);
+        world.structural_logging = true;
         let mut index = HierarchyIndex::new();
 
         let parent_a = world.spawn((Position::default(),));
@@ -9957,6 +10065,7 @@ mod tests {
         for seed in [11u64, 71, 3131] {
             let mut rng = Lcg(seed);
             let mut world = DynWorld::new();
+            world.set_change_detection(true);
             let position = world.register::<Position>();
             let velocity = world.register::<Velocity>();
             let health = world.register::<Health>();
@@ -10200,6 +10309,7 @@ mod tests {
     #[cfg(not(feature = "raw_storage"))]
     fn test_for_each_mut_changed_visits_only_stamped_slots() {
         let mut world = DynWorld::new();
+        world.set_change_detection(true);
         let position = world.register::<Position>();
         let entities = world.spawn_entities(position.mask, 3);
 
@@ -10224,6 +10334,7 @@ mod tests {
     #[cfg(not(feature = "raw_storage"))]
     fn test_for_each_mut_changed_since_cursor() {
         let mut world = DynWorld::new();
+        world.set_change_detection(true);
         let position = world.register::<Position>();
         let entity = world.spawn_entities(position.mask, 1)[0];
 
@@ -10251,6 +10362,7 @@ mod tests {
     #[cfg(not(feature = "raw_storage"))]
     fn test_changed_skips_untouched_tables() {
         let mut world = DynWorld::new();
+        world.set_change_detection(true);
         let position = world.register::<Position>();
         let velocity = world.register::<Velocity>();
 
@@ -10275,6 +10387,7 @@ mod tests {
     #[cfg(not(feature = "raw_storage"))]
     fn test_structural_log_capacity_backstop() {
         let mut world = DynWorld::new();
+        world.structural_logging = true;
         let position = world.register::<Position>();
         let entity = world.spawn_entities(position.mask, 1)[0];
 
@@ -10294,8 +10407,75 @@ mod tests {
 
     #[test]
     #[cfg(not(feature = "raw_storage"))]
+    fn test_structural_logging_disabled_records_nothing() {
+        let mut world = DynWorld::new();
+        world.structural_logging = false;
+        let position = world.register::<Position>();
+
+        let entities = world.spawn_entities(position.mask, 8);
+        world.despawn_entities(&entities[..4]);
+
+        assert!(world.structural_log.is_empty());
+        assert_eq!(world.structural_sequence(), 0);
+        assert_eq!(world.entity_count(), 4);
+    }
+
+    #[test]
+    #[cfg(not(feature = "raw_storage"))]
+    fn test_change_detection_disabled_drops_tick_columns_and_still_migrates() {
+        let mut world = DynWorld::new();
+        world.set_change_detection(false);
+        let position = world.register::<Position>();
+        let velocity = world.register::<Velocity>();
+
+        let entities = world.spawn_entities(position.mask, 4);
+        for &entity in &entities {
+            world.set(entity, Velocity { x: 1.0, y: 2.0 });
+        }
+        for &entity in &entities {
+            world.remove::<Velocity>(entity);
+        }
+
+        assert_eq!(world.entity_count(), 4);
+        assert!(!world.change_detection());
+        for table in &world.tables {
+            for column in &table.columns {
+                assert!(column.changed.is_empty());
+                assert!(column.added.is_empty());
+            }
+        }
+        let _ = velocity;
+    }
+
+    #[test]
+    #[cfg(not(feature = "raw_storage"))]
+    fn test_re_enabling_change_detection_resyncs_tick_columns() {
+        let mut world = DynWorld::new();
+        world.set_change_detection(false);
+        let position = world.register::<Position>();
+        let entities = world.spawn_entities(position.mask, 6);
+
+        world.set_change_detection(true);
+        for table in &world.tables {
+            let rows = table.entity_indices.len();
+            for column in &table.columns {
+                assert_eq!(column.changed.len(), rows);
+                assert_eq!(column.added.len(), rows);
+            }
+        }
+
+        // A migration swap-removes the tick columns in lockstep with the data
+        // column; if the resize above had been skipped this would panic.
+        world.set(entities[0], Velocity { x: 1.0, y: 2.0 });
+        world.despawn_entities(&entities[..2]);
+        assert_eq!(world.entity_count(), 4);
+    }
+
+    #[test]
+    #[cfg(not(feature = "raw_storage"))]
     fn test_structural_log_trim_and_clear() {
         let mut world = DynWorld::new();
+        world.structural_logging = true;
         let position = world.register::<Position>();
         let entity = world.spawn_entities(position.mask, 1)[0];
         world.add_components(entity, position.mask);
@@ -10676,6 +10856,7 @@ mod tests {
         let mut core_registry = ComponentRegistry::new();
         core_registry.register::<Position>();
         let mut ecs = DynEcs::new();
+        ecs.structural_logging = true;
         ecs.add_world_at(0, core_registry);
 
         let first = ecs.spawn_with((Position { x: 1.0, y: 0.0 },));
@@ -10933,6 +11114,7 @@ mod tests {
     #[cfg(not(feature = "raw_storage"))]
     fn test_prepared_queries_match_direct_queries() {
         let mut world = DynWorld::new();
+        world.set_change_detection(true);
         let moving = world.spawn((Position { x: 1.0, y: 0.0 }, Velocity { x: 1.0, y: 0.0 }));
         world.spawn((Position { x: 2.0, y: 0.0 },));
 
@@ -11125,6 +11307,7 @@ mod tests {
         let mut ecs = DynEcs::new();
         ecs.add_world_at(0, core_registry);
         ecs.add_world_at(1, game_registry);
+        ecs.worlds[0].set_change_detection(true);
         let still = ecs.spawn_with((Position { x: 1.0, y: 0.0 }, Health { value: 1.0 }));
         let moved = ecs.spawn_with((Position { x: 2.0, y: 0.0 }, Health { value: 2.0 }));
 
@@ -11226,6 +11409,7 @@ mod tests {
         let mut ecs = DynEcs::new();
         ecs.add_world_at(0, core_registry);
         ecs.add_world_at(1, game_registry);
+        ecs.worlds[0].set_change_detection(true);
         for index in 0..50 {
             let entity = ecs.spawn_with((Position {
                 x: index as f32,
@@ -11309,6 +11493,7 @@ mod tests {
         let mut ecs = DynEcs::new();
         ecs.add_world_at(0, core_registry);
         ecs.add_world_at(1, game_registry);
+        ecs.worlds[0].set_change_detection(true);
 
         let cursed = ecs.spawn_with((Position { x: 1.0, y: 0.0 }, Health { value: 1.0 }));
         let plain = ecs.spawn_with((Position { x: 2.0, y: 0.0 }, Health { value: 2.0 }));
@@ -11379,6 +11564,7 @@ mod tests {
         let mut ecs = DynEcs::new();
         ecs.add_world_at(0, core_registry);
         ecs.add_world_at(1, game_registry);
+        ecs.worlds[0].set_change_detection(true);
 
         let both = ecs.spawn_with((Position { x: 1.0, y: 0.0 }, Health { value: 10.0 }));
         let position_only = ecs.spawn_with((Position { x: 2.0, y: 0.0 },));
@@ -11556,6 +11742,7 @@ mod tests {
         let mut ecs = DynEcs::new();
         let core = ecs.add_world_at(0, core_registry);
         let game = ecs.add_world_at(1, game_registry);
+        ecs.worlds[core].set_change_detection(true);
 
         let entity = ecs.spawn_with((Position { x: 1.0, y: 0.0 }, Health { value: 10.0 }));
         assert_eq!(ecs.worlds[core].get::<Position>(entity).unwrap().x, 1.0);
@@ -11616,6 +11803,7 @@ mod tests {
     #[test]
     fn test_dyn_ecs_despawn_recursive_cascades_across_worlds() {
         let mut ecs = DynEcs::new();
+        ecs.structural_logging = true;
         let core = ecs.add_world(ComponentRegistry::new());
         let render = ecs.add_world(ComponentRegistry::new());
 
@@ -11653,6 +11841,7 @@ mod tests {
     #[test]
     fn test_dyn_ecs_lifecycle_log_records_handles_and_group_tags() {
         let mut ecs = DynEcs::new();
+        ecs.structural_logging = true;
         let core = ecs.add_world(ComponentRegistry::new());
         let position = ecs.worlds[core].register::<Position>();
         let marked = ecs.register_tag();
@@ -11708,6 +11897,7 @@ mod tests {
     #[test]
     fn test_dyn_ecs_lifecycle_log_capacity_backstop() {
         let mut ecs = DynEcs::new();
+        ecs.structural_logging = true;
         let entity = ecs.spawn();
         let marked = ecs.register_tag();
 
@@ -12142,8 +12332,11 @@ mod tests {
 
                     let mut static_ecs = StaticEcs::default();
                     let mut dyn_ecs = DynEcs::new();
+                    dyn_ecs.structural_logging = true;
                     let core = dyn_ecs.add_world(ComponentRegistry::new());
                     let render = dyn_ecs.add_world(ComponentRegistry::new());
+                    dyn_ecs.worlds[core].set_change_detection(true);
+                    dyn_ecs.worlds[render].set_change_detection(true);
                     let position = dyn_ecs.worlds[core].register::<Position>();
                     let velocity = dyn_ecs.worlds[core].register::<Velocity>();
                     let health = dyn_ecs.worlds[render].register::<Health>();
@@ -12330,6 +12523,7 @@ mod tests {
 
                 let mut static_world = StaticWorld::default();
                 let mut dyn_world = DynWorld::new();
+                dyn_world.set_change_detection(true);
                 let position = dyn_world.register::<Position>();
                 let velocity = dyn_world.register::<Velocity>();
                 let health = dyn_world.register::<Health>();

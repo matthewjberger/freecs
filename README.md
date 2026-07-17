@@ -14,9 +14,9 @@ A high-performance, archetype-based Entity Component System (ECS) for Rust
 - Multi-threaded parallel processing using Rayon (automatically enabled on non-WASM platforms)
 - Sparse set tags with deterministic iteration that don't fragment archetypes
 - Command buffers for deferred structural changes
-- Change detection for incremental updates
+- Change detection for incremental updates, opt-in per dynamic world so worlds that never diff by tick don't pay for it
 - Sequence-numbered event channels with exactly-once cursor consumption
-- Structural change log covering spawns, despawns, component moves, and tag flips
+- Structural change log covering spawns, despawns, component moves, and tag flips, opt-in on the same terms
 - Multi-world support for >64 component types with shared entity allocator
 - Two entry points over the same storage. The `ecs!` macro fixes the component set at compile time and generates named accessors, while dynamic worlds (`dynamic` feature) register components at runtime with bundle spawns, typed queries, and marker tags, with the same guarantees
 - Plain public data all the way down: tables, allocator, tag sets, and logs are inspectable structs and vecs
@@ -729,11 +729,13 @@ Each table also keeps a per-component high-water tick. Changed queries compare i
 
 Multiple independent consumers can track their own change windows with the explicit-cursor variants `query_entities_changed_since(mask, since_tick)` and `for_each_mut_changed_since(include, exclude, since_tick, f)`. Record `current_tick()` when you consume, then call `increment_tick()` to fence, so writes made later in the same tick stamp a newer value and land in your next window.
 
-Change tracking stores one `u32` per component per entity plus a tick stamp on every accessor write, whether or not you consume it. That is the price of the feature always being available.
+Change tracking stores one `u32` per component per entity plus a tick stamp on every accessor write, whether or not you consume it. On the static `ecs!` tier that is unconditional, and it is the price of the feature always being available. A dynamic world makes the same tracking opt-in through `set_change_detection(true)`, so worlds that never diff by tick skip the tick columns and their per-row stamping entirely; see [Change detection and sync](#change-detection-and-sync).
 
 ### Structural Change Log
 
 Change ticks cover component writes. Structural changes are recorded in a per-world log of plain `StructuralChange` entries: entity, kind, and the mask involved. Kinds cover `Spawned`, `Despawned`, `ComponentsAdded`, `ComponentsRemoved`, `TagsAdded`, and `TagsRemoved` (the full mask for spawns and despawns, the delta for adds and removes, the tag mask for tag flips). Consumers read `structural_changes_since(cursor)` against a `u64` sequence cursor they own and record `structural_sequence()` after consuming. The owner of the frame loop calls `trim_structural_log(up_to_sequence)` with the minimum cursor across consumers. A world whose log is never consumed self-clears at `STRUCTURAL_LOG_CAPACITY` entries, so it stays bounded instead of leaking.
+
+The log is unconditional on the static `ecs!` tier. On a dynamic world it is opt-in through the `structural_logging` field, since an unread log costs a push per entity per structural change; `DynEcs` exposes the same switch for its group-level lifecycle log.
 
 ```rust
 let mut cursor = 0;
@@ -933,7 +935,7 @@ When a component or resource has a `#[cfg(...)]` attribute, all related generate
 - `dynamic` (off by default): the runtime-registered [dynamic world](#dynamic-worlds) entry point. Costs the default build nothing.
 - `snapshot` (off by default, implies `dynamic` and `serde`): serializable snapshots of dynamic worlds and groups, with per-type column codecs registered alongside components.
 - `state` (off by default, implies `dynamic`): an optional [state machine](#states) over the dynamic layer. A current-and-next value per user-supplied state type, transitions that emit an event, and run-condition gating of systems (`while_in`, `while_in_any`, `run_if`, `on_enter`, `on_exit`). Costs the default build nothing.
-- `raw_storage` (off by default, implies `dynamic`): the maximum-speed backend for the dynamic world. Behind an identical public API it swaps component columns from `Box<dyn Any>` + `Vec<T>` to a contiguous byte buffer read through pointer casts (dropping the per-access downcast), recycles freed column allocations through a thread-local buffer pool, walks query rows and migrates columns without bounds checks or the per-component vtable (both sound because storage invariants guarantee the indices and types), and drops two pieces of per-entity bookkeeping the safe backend maintains: per-row change ticks and the structural-change log. The **public API is byte-for-byte identical**. Observable behavior is identical too, with two deliberate exceptions tied to the dropped bookkeeping: `changed::<T>()`/`added::<T>()`/`for_each_mut_changed` match nothing, and `structural_changes_since`/`structural_sequence` return empty/zero. `HierarchyIndex` stays correct by rebuilding from a scan. Every `unsafe` is confined to the `RawColumn` type and a few index-time fast paths, all verified with `miri`. Leave it off to keep the crate provably `unsafe`-free and to keep change and structural tracking; turn it on for maximum throughput when you do not depend on those filters.
+- `raw_storage` (off by default, implies `dynamic`): the maximum-speed backend for the dynamic world. Behind an identical public API it swaps component columns from `Box<dyn Any>` + `Vec<T>` to a contiguous byte buffer read through pointer casts (dropping the per-access downcast), recycles freed column allocations through a thread-local buffer pool, walks query rows and migrates columns without bounds checks or the per-component vtable (both sound because storage invariants guarantee the indices and types), and forbids the two pieces of per-entity bookkeeping the safe backend can maintain: per-row change ticks and the structural-change log. The **public API is byte-for-byte identical**. Observable behavior is identical too, with two deliberate exceptions tied to the dropped bookkeeping: `changed::<T>()`/`added::<T>()`/`for_each_mut_changed` match nothing, and `structural_changes_since`/`structural_sequence` return empty/zero, so `set_change_detection` and `structural_logging` cannot turn them back on. `HierarchyIndex` stays correct by rebuilding from a scan. Every `unsafe` is confined to the `RawColumn` type and a few index-time fast paths, all verified with `miri`. Leave it off to keep the crate provably `unsafe`-free and to keep the *option* of change and structural tracking; turn it on for maximum throughput when you do not depend on those filters. Note that the bookkeeping is opt-in on the safe backend too, so switching a world that never tracked anything to `raw_storage` buys you the storage backend and the faster registry hasher, not the removal of tracking you were already skipping.
 
 Verify a build against both backends the way the crate does:
 
@@ -948,7 +950,8 @@ The `dynamic` feature adds a second entry point for programs that cannot fix
 their component set at compile time, editors, plugin boundaries, data-driven
 prefab schemas. `DynWorld` registers component types at runtime and keeps the
 rest of the design: contiguous `Vec<T>` columns per archetype, `u64` masks,
-the same change detection, structural log, sparse-set tags, event channels,
+the same change detection and structural log (opt-in here, rather than always
+on as on the static tier), sparse-set tags, event channels,
 and liveness guarantees, and zero `unsafe`. Columns are erased as whole vecs
 behind `Box<dyn Any + Send + Sync>`, never as raw bytes, and structural
 changes dispatch through a per-type record of plain function pointers that is
@@ -1104,6 +1107,8 @@ world
     });
 
 // Filter with/without by type, mask, or tag, plus changed/added windows.
+// The changed/added windows need `set_change_detection(true)` on the world;
+// without it they match nothing. See "Change detection and sync" below.
 struct Frozen;
 world
     .query::<&mut Position>()
@@ -1508,13 +1513,18 @@ and `queue_spawn_entities` round out the set.
 
 #### Change detection and sync
 
-Mutable typed-query elements and the typed/keyed accessors stamp change
-ticks, and `added` ticks stamp when a component arrives and survive table
-migrations. Incremental consumers diff by tick, structural consumers read
-the log by cursor:
+Both are **opt-in on a dynamic world**, because both cost something on every
+write whether or not anyone reads them: change detection keeps two `u32`
+columns beside each component column and stamps a tick per row on every
+mutable query, and the structural log pushes an entry per entity per
+structural change. Turn on what you consume, before the spawns you want to
+observe:
 
 ```rust
 let mut world = DynWorld::new();
+world.set_change_detection(true);
+world.structural_logging = true;
+
 let position = world.register::<Position>();
 let entity = world.spawn((Position::default(),));
 
@@ -1543,6 +1553,15 @@ world.trim_structural_log(cursor);
 // matters (see Change Detection above for the static twin).
 world.mark_changed(entity, position.mask);
 ```
+
+Leave them off and the feature degrades quietly rather than loudly:
+`changed::<T>()`, `added::<T>()`, and the `for_each_mut_changed` family match
+nothing, and `structural_changes_since` reports that nothing happened, exactly
+as under `raw_storage`. `HierarchyIndex::sync` notices and rebuilds from a scan
+instead of diffing, so it stays correct either way. `DynEcs` has the same
+`structural_logging` switch for its group-level lifecycle log, and each member
+world opts in separately. The static `ecs!` tier is unaffected: its change
+ticks and structural log are still always on.
 
 #### Entity inspection
 
@@ -1576,7 +1595,7 @@ component when absent and stamp change ticks like any `set`.
 
 Three access tiers, from ergonomic to explicit:
 
-- **Typed**: `spawn(bundle)` / `spawn_bundles(bundle, count)` / `queue_spawn(bundle)` returning the handle before the command applies, `get::<T>` / `set` / `remove`, `query::<(&mut A, &B)>()` with `Option<&T>` elements, up to eight per tuple, and bare single elements (`query::<&mut A>()`), `changed::<T>()` and `added::<T>()` filters on both query forms, `query_ref` iterators on `&world` with `single()` and `iter_combinations()`, marker-type tags (`add_tag_type::<T>`, `with_tag_type::<T>()`), `despawn_with_any::<(A, B)>()`, `ChildOf` links with `children` / `despawn_recursive`, entity inspection (`entity_components`, `component_by_name`), `resource_scope` / `resources_scope` over tuples, `send(event)` / `consume_events::<T>(&mut cursor)`, `insert_resource` / `resource::<T>()` / `res::<T>()`. `TypeId` lookups happen at registration and per typed call, never inside iteration loops.
+- **Typed**: `spawn(bundle)` / `spawn_bundles(bundle, count)` / `queue_spawn(bundle)` returning the handle before the command applies, `get::<T>` / `set` / `remove`, `query::<(&mut A, &B)>()` with `Option<&T>` elements, up to eight per tuple, and bare single elements (`query::<&mut A>()`), `changed::<T>()` and `added::<T>()` filters on both query forms (after `set_change_detection(true)`), `query_ref` iterators on `&world` with `single()` and `iter_combinations()`, marker-type tags (`add_tag_type::<T>`, `with_tag_type::<T>()`), `despawn_with_any::<(A, B)>()`, `ChildOf` links with `children` / `despawn_recursive`, entity inspection (`entity_components`, `component_by_name`), `resource_scope` / `resources_scope` over tuples, `send(event)` / `consume_events::<T>(&mut cursor)`, `insert_resource` / `resource::<T>()` / `res::<T>()`. `TypeId` lookups happen at registration and per typed call, never inside iteration loops.
 - **Keyed**: `register::<T>()` returns a copyable `ComponentKey<T>` carrying the component's mask bit. `get_keyed` / `set_keyed` and mask-based `for_each` / `for_each_mut` skip the hash entirely.
 - **Raw tables**: `for_each_tables_mut(mask, 0, |table| ...)` with `table.columns_pair(a, b)` hoists concrete slices once per table for the tightest loops, no change stamping, same covenant as the static path.
 

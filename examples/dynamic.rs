@@ -27,6 +27,9 @@ struct Selected;
 
 fn main() {
     let mut world = DynWorld::new();
+    // The changed::<Position>() redraw filter below needs this; change
+    // detection is opt-in so worlds that never diff by tick don't pay for it.
+    world.set_change_detection(true);
     world.insert_resource(1.0f32);
 
     println!("=== Spawning with bundles, types register lazily ===");
