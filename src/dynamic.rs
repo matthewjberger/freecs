@@ -3050,6 +3050,7 @@ impl DynWorld {
             element_masks: None,
             include_tag_sets: [None; 4],
             exclude_tag_sets: [None; 4],
+            dead: false,
             marker: PhantomData,
         }
     }
@@ -3311,20 +3312,27 @@ impl DynEcs {
 
     /// A typed query against the first member world where every required
     /// element of the tuple is registered; optional elements do not
-    /// constrain the routing. Panics when no member world qualifies: a
-    /// mutable query cannot pick a world to register types in, and a tuple
-    /// spanning member worlds runs through
-    /// [`query_join`](Self::query_join) instead.
+    /// constrain the routing. When no member world qualifies the query is
+    /// empty rather than a panic, mirroring [`query_ref`](Self::query_ref):
+    /// an unregistered component matches nothing, and a tuple whose parts
+    /// live in different member worlds runs through
+    /// [`query_join`](Self::query_join) to iterate for real.
     pub fn query<Q: QueryTuple>(&mut self) -> DynQuery<'_, Q> {
-        let index = self
-            .worlds
-            .iter()
-            .position(|world| Q::routing_match(world))
-            .expect(
-                "no member world registers every required component of the query tuple; \
-                 tuples spanning member worlds run through query_join",
-            );
-        self.worlds[index].query::<Q>()
+        match self.worlds.iter().position(|world| Q::routing_match(world)) {
+            Some(index) => self.worlds[index].query::<Q>(),
+            None => DynQuery {
+                world: &mut self.worlds[0],
+                include: 0,
+                exclude: 0,
+                changed_mask: 0,
+                added_mask: 0,
+                include_tag_sets: [None; 4],
+                exclude_tag_sets: [None; 4],
+                element_masks: None,
+                dead: true,
+                marker: PhantomData,
+            },
+        }
     }
 
     /// A typed query whose tuple may span member worlds, joined by entity.
@@ -6454,6 +6462,7 @@ pub struct DynQuery<'world, Q: QueryTuple> {
     pub include_tag_sets: [Option<&'world SparseTagSet>; 4],
     pub exclude_tag_sets: [Option<&'world SparseTagSet>; 4],
     pub element_masks: Option<[u64; 8]>,
+    pub dead: bool,
     pub marker: PhantomData<Q>,
 }
 
@@ -6589,6 +6598,9 @@ impl<'world, Q: QueryTuple> DynQuery<'world, Q> {
     }
 
     pub fn for_each(self, mut f: impl for<'item> FnMut(Entity, Q::Item<'item>)) {
+        if self.dead {
+            return;
+        }
         let element_masks = match self.element_masks {
             Some(masks) => masks,
             None => Q::element_masks(self.world),
@@ -7794,6 +7806,7 @@ impl<Q: QueryTuple> PreparedQuery<Q> {
             include_tag_sets: [None; 4],
             exclude_tag_sets: [None; 4],
             element_masks: Some(self.element_masks),
+            dead: false,
             marker: PhantomData,
         }
     }
