@@ -208,7 +208,7 @@ impl ErasedColumn {
         }
     }
 
-    fn push<T: Send + Sync + Default + 'static>(&mut self, value: T) {
+    fn push<T: 'static>(&mut self, value: T) {
         #[cfg(not(feature = "raw_storage"))]
         {
             self.storage
@@ -1356,6 +1356,27 @@ impl ResourceHost for DynEcs {
     }
 }
 
+/// The column moves one table pair implies, resolved once instead of per row.
+///
+/// A migration has to work out which columns the destination gains, which both
+/// tables share, and which the source drops. That answer depends only on the
+/// two masks, so rediscovering it for every entity is pure repetition: the bit
+/// walk, a popcount per component to turn a mask into a column position, and a
+/// registry lookup to reach the component's vtable. Positions are `u32` because
+/// a world holds at most 64 components.
+#[derive(Default, Clone)]
+struct MigrationPlan {
+    /// `(destination_position, component_index)` for columns only the
+    /// destination has, which are filled with defaults.
+    gained: Vec<(u32, u32)>,
+    /// `(source_position, destination_position, component_index)` for columns
+    /// both tables have, whose rows move across.
+    shared: Vec<(u32, u32, u32)>,
+    /// `(source_position, component_index)` for columns only the source has,
+    /// whose rows are dropped.
+    removed: Vec<(u32, u32)>,
+}
+
 /// A world whose component set is a runtime value. Same archetype storage,
 /// change detection, structural log, tags, events, and command deferral as
 /// the macro-generated worlds, with dispatch confined to registration
@@ -1375,6 +1396,15 @@ pub struct DynWorld {
     pub table_lookup: HashMap<u64, usize>,
     pub table_edges: Vec<ArchetypeEdges>,
     pub query_cache: MaskMap<Vec<usize>>,
+    /// Resolved column moves per table pair, so a migration walks a plan
+    /// instead of rediscovering which columns to move for every entity.
+    migration_plans: Vec<MigrationPlan>,
+    /// `(from_table << 32 | to_table)` to an index into
+    /// [`Self::migration_plans`].
+    migration_plan_lookup: MaskMap<u32>,
+    /// The last pair resolved. A run of `set`s or `remove`s over one component
+    /// walks the same edge every time, so this answers without the map.
+    last_migration_plan: Option<(u64, u32)>,
     pub added_scratch: Vec<bool>,
     pub current_tick: u32,
     pub last_tick: u32,
@@ -1446,6 +1476,9 @@ impl DynWorld {
             table_lookup: HashMap::new(),
             table_edges: Vec::new(),
             query_cache: MaskMap::default(),
+            migration_plans: Vec::new(),
+            migration_plan_lookup: MaskMap::default(),
+            last_migration_plan: None,
             added_scratch: Vec::new(),
             current_tick: 0,
             last_tick: 0,
@@ -1571,6 +1604,9 @@ impl DynWorld {
         self.table_edges
             .resize_with(self.tables.len(), ArchetypeEdges::default);
         self.query_cache.clear();
+        self.migration_plans.clear();
+        self.migration_plan_lookup.clear();
+        self.last_migration_plan = None;
         dropped
     }
 
@@ -1906,6 +1942,75 @@ impl DynWorld {
         despawned
     }
 
+    /// Resolves the plan for moving a row from `from_table` to `to_table`,
+    /// building it on first use.
+    ///
+    /// Table masks never change and tables are only appended, so a plan stays
+    /// valid for the life of the pair. [`compact`](Self::compact) is the one
+    /// exception: it drops empty tables and renumbers the rest, and clears
+    /// these alongside the other index-keyed caches.
+    fn resolve_migration_plan(&mut self, from_table: usize, to_table: usize) -> usize {
+        let key = ((from_table as u64) << 32) | to_table as u64;
+        if let Some((cached_key, plan_index)) = self.last_migration_plan
+            && cached_key == key
+        {
+            return plan_index as usize;
+        }
+        if let Some(&plan_index) = self.migration_plan_lookup.get(&key) {
+            self.last_migration_plan = Some((key, plan_index));
+            return plan_index as usize;
+        }
+
+        let plan = self.build_migration_plan(from_table, to_table);
+        let plan_index = self.migration_plans.len() as u32;
+        self.migration_plans.push(plan);
+        self.migration_plan_lookup.insert(key, plan_index);
+        self.last_migration_plan = Some((key, plan_index));
+        plan_index as usize
+    }
+
+    fn build_migration_plan(&self, from_table: usize, to_table: usize) -> MigrationPlan {
+        let source_mask = self.tables[from_table].mask;
+        let destination_mask = self.tables[to_table].mask;
+        let mut plan = MigrationPlan::default();
+
+        let mut gained = destination_mask & !source_mask;
+        while gained != 0 {
+            let component_mask = gained & gained.wrapping_neg();
+            gained &= gained - 1;
+            let destination_position = column_position(destination_mask, component_mask);
+            let component_index =
+                self.tables[to_table].columns[destination_position].component_index;
+            plan.gained
+                .push((destination_position as u32, component_index));
+        }
+
+        let mut shared = source_mask & destination_mask;
+        while shared != 0 {
+            let component_mask = shared & shared.wrapping_neg();
+            shared &= shared - 1;
+            let source_position = column_position(source_mask, component_mask);
+            let destination_position = column_position(destination_mask, component_mask);
+            let component_index = self.tables[from_table].columns[source_position].component_index;
+            plan.shared.push((
+                source_position as u32,
+                destination_position as u32,
+                component_index,
+            ));
+        }
+
+        let mut removed = source_mask & !destination_mask;
+        while removed != 0 {
+            let component_mask = removed & removed.wrapping_neg();
+            removed &= removed - 1;
+            let source_position = column_position(source_mask, component_mask);
+            let component_index = self.tables[from_table].columns[source_position].component_index;
+            plan.removed.push((source_position as u32, component_index));
+        }
+
+        plan
+    }
+
     fn move_entity(
         &mut self,
         entity: Entity,
@@ -1913,40 +2018,53 @@ impl DynWorld {
         from_index: usize,
         to_table: usize,
     ) -> (usize, usize) {
+        self.move_entity_skipping(entity, from_table, from_index, to_table, u32::MAX)
+    }
+
+    /// Moves a row between tables, leaving the column whose component index is
+    /// `skip_gained` unfilled.
+    ///
+    /// [`set_keyed`](Self::set_keyed) owns the value the gained column is about
+    /// to hold, so defaulting it here and overwriting it there costs a
+    /// dispatch through the registry, a `T::default()`, and a write, all
+    /// discarded. It skips that column and pushes the real value instead.
+    /// `u32::MAX` skips nothing, which is what every other caller wants.
+    fn move_entity_skipping(
+        &mut self,
+        entity: Entity,
+        from_table: usize,
+        from_index: usize,
+        to_table: usize,
+        skip_gained: u32,
+    ) -> (usize, usize) {
         let tick = self.current_tick;
         let track = self.change_detection;
+        let plan_index = self.resolve_migration_plan(from_table, to_table);
         let swapped_entity;
         {
+            let plan = &self.migration_plans[plan_index];
             let [source, destination] = self
                 .tables
                 .get_disjoint_mut([from_table, to_table])
                 .expect("migration source and destination must differ");
 
-            let mut gained = destination.mask & !source.mask;
-            while gained != 0 {
-                let component_mask = gained & gained.wrapping_neg();
-                gained &= gained - 1;
-
-                let destination_position = column_position(destination.mask, component_mask);
-                let destination_column = &mut destination.columns[destination_position];
-                let info = &self.registry.components[destination_column.component_index as usize];
+            for &(destination_position, component_index) in &plan.gained {
+                if component_index == skip_gained {
+                    continue;
+                }
+                let destination_column = &mut destination.columns[destination_position as usize];
+                let info = &self.registry.components[component_index as usize];
                 (info.push_default)(&mut destination_column.data, 1);
                 destination_column.track_push(track, tick, tick);
             }
 
-            let shared = source.mask & destination.mask;
-            let mut bits = shared;
-            while bits != 0 {
-                let component_mask = bits & bits.wrapping_neg();
-                bits &= bits - 1;
-
-                let source_position = column_position(source.mask, component_mask);
-                let destination_position = column_position(destination.mask, component_mask);
+            for &(source_position, destination_position, component_index) in &plan.shared {
+                let source_position = source_position as usize;
+                let destination_position = destination_position as usize;
                 let carried_added = source.columns[source_position].carried_added(from_index);
                 #[cfg(not(feature = "raw_storage"))]
                 {
-                    let info = &self.registry.components
-                        [source.columns[source_position].component_index as usize];
+                    let info = &self.registry.components[component_index as usize];
                     (info.swap_remove_into)(
                         &mut source.columns[source_position].data,
                         from_index,
@@ -1954,30 +2072,31 @@ impl DynWorld {
                     );
                 }
                 #[cfg(feature = "raw_storage")]
-                source.columns[source_position].data.swap_remove_into_raw(
-                    from_index,
-                    &mut destination.columns[destination_position].data,
-                );
+                {
+                    let _ = component_index;
+                    source.columns[source_position].data.swap_remove_into_raw(
+                        from_index,
+                        &mut destination.columns[destination_position].data,
+                    );
+                }
                 source.columns[source_position].track_swap_remove(track, from_index);
                 destination.columns[destination_position].track_push(track, tick, carried_added);
             }
 
-            let mut removed = source.mask & !destination.mask;
-            while removed != 0 {
-                let component_mask = removed & removed.wrapping_neg();
-                removed &= removed - 1;
-
-                let source_position = column_position(source.mask, component_mask);
+            for &(source_position, component_index) in &plan.removed {
+                let source_position = source_position as usize;
                 #[cfg(not(feature = "raw_storage"))]
                 {
-                    let info = &self.registry.components
-                        [source.columns[source_position].component_index as usize];
+                    let info = &self.registry.components[component_index as usize];
                     (info.swap_remove)(&mut source.columns[source_position].data, from_index);
                 }
                 #[cfg(feature = "raw_storage")]
-                source.columns[source_position]
-                    .data
-                    .swap_remove_raw(from_index);
+                {
+                    let _ = component_index;
+                    source.columns[source_position]
+                        .data
+                        .swap_remove_raw(from_index);
+                }
                 source.columns[source_position].track_swap_remove(track, from_index);
             }
 
@@ -2209,16 +2328,20 @@ impl DynWorld {
                     return;
                 }
 
+                let track = self.change_detection;
                 let target = self.resolve_add_target(table_index, key.mask);
-                let (new_table, new_index) =
-                    self.move_entity(entity, table_index, array_index, target);
+                let (new_table, _) = self.move_entity_skipping(
+                    entity,
+                    table_index,
+                    array_index,
+                    target,
+                    key.component_index,
+                );
                 self.record_structural(entity, StructuralChangeKind::ComponentsAdded, key.mask);
                 let position = column_position(self.tables[new_table].mask, key.mask);
                 let column = &mut self.tables[new_table].columns[position];
-                column_vec_mut::<T>(&mut column.data)[new_index] = value;
-                if let Some(cell) = column.changed.get_mut(new_index) {
-                    *cell = current_tick;
-                }
+                column.data.push::<T>(value);
+                column.track_push(track, current_tick, current_tick);
                 column.peak_changed = current_tick;
                 return;
             }
@@ -10396,6 +10519,28 @@ mod tests {
         let tail = world.structural_changes_since(0);
         assert_eq!(tail.len(), 1);
         assert_eq!(tail[0].sequence, world.structural_sequence());
+    }
+
+    #[test]
+    fn test_compact_invalidates_migration_plans() {
+        let mut world = DynWorld::new();
+        let position = world.register::<Position>();
+        let velocity = world.register::<Velocity>();
+
+        let doomed = world.spawn_entities(velocity.mask, 2);
+        let keeper = world.spawn_entities(position.mask, 1)[0];
+        world.set(keeper, Velocity { x: 1.0, y: 2.0 });
+
+        world.despawn_entities(&doomed);
+        assert!(world.compact() > 0, "the emptied table should be dropped");
+
+        let later = world.spawn_entities(position.mask, 1)[0];
+        world.set(later, Velocity { x: 3.0, y: 4.0 });
+
+        assert_eq!(world.get::<Velocity>(later).unwrap().x, 3.0);
+        assert_eq!(world.get::<Position>(later).unwrap().x, 0.0);
+        assert_eq!(world.get::<Velocity>(keeper).unwrap().x, 1.0);
+        assert_eq!(world.get::<Position>(keeper).unwrap().x, 0.0);
     }
 
     #[test]
