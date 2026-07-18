@@ -10751,6 +10751,7 @@ mod tests {
         registry.register_serde::<Position>();
         registry.register::<Velocity>();
         let mut world = DynWorld::from_registry(registry);
+        world.set_change_detection(true);
 
         let entity = world.spawn((Position { x: 1.0, y: 2.0 },));
         let name = std::any::type_name::<Position>();
@@ -11101,6 +11102,8 @@ mod tests {
         registry.register_serde::<Velocity>();
         registry.register_serde::<Health>();
         let mut source = DynWorld::from_registry(registry.clone());
+        source.structural_logging = true;
+        source.set_change_detection(true);
 
         let seed_a = source.spawn((Position { x: 1.0, y: 0.0 }, Health { value: 5.0 }));
         source.spawn((Velocity { x: 2.0, y: 0.0 },));
@@ -11183,6 +11186,7 @@ mod tests {
         let mut registry = ComponentRegistry::new();
         registry.register_serde::<Position>();
         let mut world = DynWorld::from_registry(registry);
+        world.structural_logging = true;
         let cursor = world.delta_cursor();
         world.spawn((Position::default(),));
         world.trim_structural_log(world.structural_sequence);
@@ -11206,8 +11210,13 @@ mod tests {
         game_registry.register_serde::<Health>();
 
         let mut source = DynEcs::new();
+        source.structural_logging = true;
         source.add_world_at(0, core_registry.clone());
         source.add_world_at(1, game_registry.clone());
+        source.worlds[0].structural_logging = true;
+        source.worlds[0].set_change_detection(true);
+        source.worlds[1].structural_logging = true;
+        source.worlds[1].set_change_detection(true);
         let anchor = source.spawn_with((Position { x: 1.0, y: 0.0 }, Health { value: 9.0 }));
 
         let snapshot = source.snapshot().unwrap();
@@ -11501,7 +11510,10 @@ mod tests {
         core_registry.register_serde::<Position>();
         core_registry.register_serde::<Velocity>();
         let mut source = DynEcs::new();
+        source.structural_logging = true;
         source.add_world_at(0, core_registry.clone());
+        source.worlds[0].structural_logging = true;
+        source.worlds[0].set_change_detection(true);
         let seed = source.spawn_with((Position::default(),));
 
         let snapshot = source.snapshot().unwrap();
