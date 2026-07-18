@@ -211,7 +211,7 @@ pub struct PlainMarker;
 pub struct ParamMarker<Marker>(PhantomData<fn() -> Marker>);
 
 /// One gateable system: a plain world system `FnMut(&mut W)` or a
-/// system-parameter function ([`IntoSystem`](crate::system_param::IntoSystem)).
+/// system-parameter function ([`crate::system_param::IntoSystem`]).
 /// A single gated system and each member of a gated tuple resolve through
 /// this, so a tuple may freely mix the two shapes.
 pub trait GatedSystem<W, Marker> {
