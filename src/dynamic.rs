@@ -3155,12 +3155,38 @@ impl DynWorld {
         }
     }
 
+    /// The deferred [`insert_bundle`](Self::insert_bundle): buffers the write
+    /// so it can run from inside a query, applying with the rest of the command
+    /// buffer. A no-op on a dead entity at apply time.
+    pub fn queue_insert_bundle<B: Bundle + Send + Sync + 'static>(
+        &mut self,
+        entity: Entity,
+        bundle: B,
+    ) {
+        self.queue(move |world| {
+            if world.is_alive(entity) {
+                bundle.write(world, entity);
+            }
+        });
+    }
+
     /// Removes every component a bundle names from an entity, returning whether
     /// the entity lost any. Uses only the bundle's type set, so the values pass
     /// through as `B::default()` and never touch storage.
     pub fn remove_bundle<B: Bundle>(&mut self, entity: Entity) -> bool {
         let mask = B::component_mask(self);
         self.remove_components(entity, mask)
+    }
+
+    /// Removes a bundle from an entity and hands its components back, all or
+    /// nothing: when the entity is missing any of the bundle's components it
+    /// keeps them all and returns `None`. The returned value is cloned out
+    /// before removal, so the bundle's components must be `Clone`.
+    pub fn take_bundle<B: CloneBundle>(&mut self, entity: Entity) -> Option<B> {
+        let value = B::read_cloned(self, entity)?;
+        let mask = B::component_mask(self);
+        self.remove_components(entity, mask);
+        Some(value)
     }
 
     /// The typed bulk spawn: `count` entities each carrying a clone of the
@@ -7489,6 +7515,7 @@ pub trait Bundle: sealed::SealedBundle {
 /// implements it.
 pub trait CloneBundle: Bundle + Clone {
     fn spawn_extend(&self, world: &mut DynWorld, table_index: usize, count: usize);
+    fn read_cloned(world: &DynWorld, entity: Entity) -> Option<Self>;
 }
 
 impl<C: Component> sealed::SealedBundle for C {}
@@ -7519,6 +7546,10 @@ impl<C: Component> Bundle for C {
 impl<C: Component + Clone> CloneBundle for C {
     fn spawn_extend(&self, world: &mut DynWorld, table_index: usize, count: usize) {
         world.extend_column(table_index, count, self);
+    }
+
+    fn read_cloned(world: &DynWorld, entity: Entity) -> Option<Self> {
+        world.get::<Self>(entity).cloned()
     }
 }
 
@@ -7565,6 +7596,10 @@ macro_rules! impl_bundle {
             fn spawn_extend(&self, world: &mut DynWorld, table_index: usize, count: usize) {
                 let ($($element,)+) = self;
                 $($element.spawn_extend(world, table_index, count);)+
+            }
+
+            fn read_cloned(world: &DynWorld, entity: Entity) -> Option<Self> {
+                Some(($(<$element as CloneBundle>::read_cloned(world, entity)?,)+))
             }
         }
     };
@@ -8674,6 +8709,44 @@ mod tests {
         assert_eq!(
             ecs.get::<Position>(entity),
             Some(&Position { x: 1.0, y: 0.0 })
+        );
+    }
+
+    #[test]
+    fn test_queue_insert_bundle_applies_deferred() {
+        let mut world = DynWorld::new();
+        let entity = world.spawn(Position { x: 0.0, y: 0.0 });
+
+        world.queue_insert_bundle(entity, (Velocity { x: 1.0, y: 2.0 }, Health { value: 3.0 }));
+        assert!(world.get::<Velocity>(entity).is_none());
+
+        world.apply_commands();
+        assert_eq!(
+            world.get::<Velocity>(entity),
+            Some(&Velocity { x: 1.0, y: 2.0 })
+        );
+        assert_eq!(world.get::<Health>(entity), Some(&Health { value: 3.0 }));
+    }
+
+    #[test]
+    fn test_take_bundle_all_or_nothing() {
+        let mut world = DynWorld::new();
+
+        let full = world.spawn((Position { x: 1.0, y: 2.0 }, Velocity { x: 3.0, y: 4.0 }));
+        let taken = world.take_bundle::<(Position, Velocity)>(full);
+        assert_eq!(
+            taken,
+            Some((Position { x: 1.0, y: 2.0 }, Velocity { x: 3.0, y: 4.0 }))
+        );
+        assert!(world.get::<Position>(full).is_none());
+        assert!(world.get::<Velocity>(full).is_none());
+
+        let partial = world.spawn(Position { x: 9.0, y: 9.0 });
+        let missing = world.take_bundle::<(Position, Velocity)>(partial);
+        assert!(missing.is_none());
+        assert_eq!(
+            world.get::<Position>(partial),
+            Some(&Position { x: 9.0, y: 9.0 })
         );
     }
 

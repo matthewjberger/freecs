@@ -709,6 +709,19 @@ macro_rules! bundle {
                     );
                 )+
             }
+
+            fn read_cloned(
+                world: &$crate::dynamic::DynWorld,
+                entity: $crate::Entity,
+            ) -> ::core::option::Option<Self> {
+                ::core::option::Option::Some(Self {
+                    $(
+                        $field: <$ty as $crate::dynamic::CloneBundle>::read_cloned(
+                            world, entity,
+                        )?,
+                    )+
+                })
+            }
         }
     };
 }
