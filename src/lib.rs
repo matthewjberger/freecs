@@ -555,6 +555,102 @@ macro_rules! dynamic_schema {
     };
 }
 
+/// Declares a named bundle struct that spawns like a component tuple: a
+/// plain struct whose fields are component values, plus the
+/// [`dynamic::Bundle`] and [`dynamic::CloneBundle`] impls that route each
+/// field to its world. Anywhere a tuple bundle is accepted takes the struct
+/// too, so `spawn`, `spawn_bundles`, `queue_spawn`, and
+/// [`dynamic::DynEcs::spawn_with`] all work with no further wiring. The
+/// struct, its attributes, and each field's visibility pass through
+/// verbatim. Fields must be `Clone` because [`dynamic::CloneBundle`] is
+/// implemented for batch spawns; a component that is not `Clone` stays a
+/// tuple. Repeating a component type panics on spawn, matching tuples.
+///
+/// ```rust
+/// use freecs::dynamic::DynWorld;
+///
+/// #[derive(Default, Clone, Debug, PartialEq)]
+/// struct Position { x: f32 }
+///
+/// #[derive(Default, Clone, Debug, PartialEq)]
+/// struct Velocity { x: f32 }
+///
+/// freecs::bundle! {
+///     #[derive(Clone)]
+///     pub struct Mover {
+///         pub position: Position,
+///         pub velocity: Velocity,
+///     }
+/// }
+///
+/// let mut world = DynWorld::new();
+/// let entity = world.spawn(Mover {
+///     position: Position { x: 1.0 },
+///     velocity: Velocity { x: 2.0 },
+/// });
+/// assert_eq!(world.get::<Position>(entity).unwrap().x, 1.0);
+/// assert_eq!(world.get::<Velocity>(entity).unwrap().x, 2.0);
+///
+/// let batch = world.spawn_bundles(
+///     Mover { position: Position { x: 3.0 }, velocity: Velocity { x: 4.0 } },
+///     2,
+/// );
+/// assert_eq!(batch.len(), 2);
+/// assert_eq!(world.get::<Position>(batch[1]).unwrap().x, 3.0);
+/// ```
+#[cfg(feature = "dynamic")]
+#[macro_export]
+macro_rules! bundle {
+    (
+        $(#[$meta:meta])*
+        $vis:vis struct $name:ident {
+            $($fvis:vis $field:ident : $ty:ty),+ $(,)?
+        }
+    ) => {
+        $(#[$meta])*
+        $vis struct $name {
+            $($fvis $field: $ty),+
+        }
+
+        impl $crate::dynamic::SealedBundle for $name {}
+
+        impl $crate::dynamic::Bundle for $name {
+            fn component_mask(world: &mut $crate::dynamic::DynWorld) -> u64 {
+                let mut mask = 0u64;
+                $(
+                    let element_mask = world.component_key::<$ty>().mask;
+                    assert_eq!(
+                        mask & element_mask,
+                        0,
+                        "bundle! structs must not repeat a component type"
+                    );
+                    mask |= element_mask;
+                )+
+                mask
+            }
+
+            fn write(self, world: &mut $crate::dynamic::DynWorld, entity: $crate::Entity) {
+                $(world.set(entity, self.$field);)+
+            }
+
+            fn write_group(self, ecs: &mut $crate::dynamic::DynEcs, entity: $crate::Entity) {
+                $(ecs.set(entity, self.$field);)+
+            }
+        }
+
+        impl $crate::dynamic::CloneBundle for $name {
+            fn spawn_extend(
+                &self,
+                world: &mut $crate::dynamic::DynWorld,
+                table_index: usize,
+                count: usize,
+            ) {
+                $(world.extend_column(table_index, count, &self.$field);)+
+            }
+        }
+    };
+}
+
 /// Declares a [`dynamic::DynEcs`] group's member worlds in one place: the
 /// index constants in declaration order and the build function that adds
 /// each member's registry at its asserted index, replacing the hand-written

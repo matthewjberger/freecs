@@ -4629,6 +4629,9 @@ mod sealed {
     pub trait SealedResourceBundle {}
 }
 
+#[doc(hidden)]
+pub use sealed::SealedBundle;
+
 /// One element of a typed query tuple: `&T`, `&mut T`, `Option<&T>`, or
 /// `Option<&mut T>`. Optional elements do not constrain which entities the
 /// query visits; they yield `None` on entities missing the component.
@@ -8371,6 +8374,90 @@ mod tests {
                 .wrapping_add(1442695040888963407);
             self.0 >> 16
         }
+    }
+
+    crate::bundle! {
+        #[derive(Clone)]
+        struct MoverBundle {
+            position: Position,
+            velocity: Velocity,
+        }
+    }
+
+    #[test]
+    fn test_bundle_macro_spawns_like_tuple() {
+        let mut world = DynWorld::new();
+        let position = world.register::<Position>();
+        let velocity = world.register::<Velocity>();
+
+        let entity = world.spawn(MoverBundle {
+            position: Position { x: 1.0, y: 2.0 },
+            velocity: Velocity { x: 3.0, y: 4.0 },
+        });
+
+        assert_eq!(
+            world.component_mask(entity),
+            Some(position.mask | velocity.mask)
+        );
+        assert_eq!(
+            world.get::<Position>(entity),
+            Some(&Position { x: 1.0, y: 2.0 })
+        );
+        assert_eq!(
+            world.get::<Velocity>(entity),
+            Some(&Velocity { x: 3.0, y: 4.0 })
+        );
+    }
+
+    #[test]
+    fn test_bundle_macro_spawn_bundles_clones_each_row() {
+        let mut world = DynWorld::new();
+
+        let entities = world.spawn_bundles(
+            MoverBundle {
+                position: Position { x: 5.0, y: 6.0 },
+                velocity: Velocity { x: 7.0, y: 8.0 },
+            },
+            3,
+        );
+
+        assert_eq!(entities.len(), 3);
+        for entity in entities {
+            assert_eq!(
+                world.get::<Position>(entity),
+                Some(&Position { x: 5.0, y: 6.0 })
+            );
+            assert_eq!(
+                world.get::<Velocity>(entity),
+                Some(&Velocity { x: 7.0, y: 8.0 })
+            );
+        }
+    }
+
+    #[test]
+    fn test_bundle_macro_group_spawn_routes_across_worlds() {
+        let mut core_registry = ComponentRegistry::new();
+        core_registry.register::<Position>();
+        let mut game_registry = ComponentRegistry::new();
+        game_registry.register::<Velocity>();
+
+        let mut ecs = DynEcs::new();
+        ecs.add_world_at(0, core_registry);
+        ecs.add_world_at(1, game_registry);
+
+        let entity = ecs.spawn_with(MoverBundle {
+            position: Position { x: 9.0, y: 0.0 },
+            velocity: Velocity { x: 0.0, y: 9.0 },
+        });
+
+        assert_eq!(
+            ecs.get::<Position>(entity),
+            Some(&Position { x: 9.0, y: 0.0 })
+        );
+        assert_eq!(
+            ecs.get::<Velocity>(entity),
+            Some(&Velocity { x: 0.0, y: 9.0 })
+        );
     }
 
     #[test]
