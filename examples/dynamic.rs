@@ -17,6 +17,8 @@ struct Health {
     value: f32,
 }
 
+freecs::impl_component!(Position, Velocity, Health);
+
 #[derive(Debug, Clone)]
 struct CollisionEvent {
     entity_a: freecs::Entity,

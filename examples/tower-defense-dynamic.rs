@@ -277,6 +277,19 @@ pub struct MoneyPopup {
     pub amount: i32,
 }
 
+freecs::impl_component!(
+    Position,
+    Velocity,
+    Tower,
+    Enemy,
+    Projectile,
+    GridCell,
+    GridPosition,
+    VisualEffect,
+    RangeIndicator,
+    MoneyPopup,
+);
+
 #[derive(Debug, Clone)]
 pub struct EnemySpawnedEvent {
     pub entity: Entity,

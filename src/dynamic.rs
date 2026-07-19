@@ -31,9 +31,11 @@
 //! #[derive(Default, Clone, Debug)]
 //! struct Velocity { x: f32, y: f32 }
 //!
+//! freecs::impl_component!(Position, Velocity);
+//!
 //! let mut world = DynWorld::new();
 //!
-//! // Types register lazily on first use; tuples spawn as bundles.
+//! // A component is a bundle, so tuples of them spawn as one set.
 //! let entity = world.spawn((
 //!     Position { x: 0.0, y: 0.0 },
 //!     Velocity { x: 1.0, y: 2.0 },
@@ -64,6 +66,7 @@
 //! # struct Position { x: f32, y: f32 }
 //! # #[derive(Default, Clone, Debug)]
 //! # struct Velocity { x: f32, y: f32 }
+//! # freecs::impl_component!(Position, Velocity);
 //! # let mut world = DynWorld::new();
 //! # world.spawn((Position { x: 1.0, y: 2.0 }, Velocity { x: 1.0, y: 2.0 }));
 //! let total: f32 = world
@@ -2949,6 +2952,7 @@ impl DynWorld {
     /// # use freecs::dynamic::DynWorld;
     /// # #[derive(Default, Clone, Debug, PartialEq)]
     /// # struct Position { x: f32, y: f32 }
+    /// # freecs::impl_component!(Position);
     /// struct DeltaTime(f32);
     /// struct Score(u32);
     ///
@@ -7424,8 +7428,22 @@ fn tags_match(tags: &[SparseTagSet], entity: Entity, tag_include: u64, tag_exclu
     true
 }
 
-/// A set of components spawned together. Implemented for tuples of
-/// registered component types up to eight elements.
+/// Marks a type as a component that may participate in a [`Bundle`]. It is
+/// the one nominal opt-in the dynamic path asks for: registration, `get`,
+/// `set`, and queries still take any `Send + Sync + Default + 'static` type,
+/// but spawning a type as part of a bundle needs this marker so tuples and
+/// nested bundles stay distinguishable from single components. Mark a type
+/// with [`impl_component!`](crate::impl_component), or declare it in a
+/// [`dynamic_schema!`](crate::dynamic_schema) block, which marks every listed
+/// type for you. The supertraits are exactly the component storage bounds, so
+/// the marker adds no requirement a component did not already meet.
+pub trait Component: Send + Sync + Default + 'static {}
+
+/// A set of components spawned together. Implemented for any [`Component`], for
+/// tuples of bundles up to fifteen elements, and for
+/// [`bundle!`](crate::bundle) structs. Because a component is itself a bundle,
+/// tuples and bundle structs nest freely and flatten into one component set on
+/// spawn.
 pub trait Bundle: sealed::SealedBundle {
     fn component_mask(world: &mut DynWorld) -> u64;
     fn write(self, world: &mut DynWorld, entity: Entity);
@@ -7434,20 +7452,43 @@ pub trait Bundle: sealed::SealedBundle {
 
 /// A [`Bundle`] whose components are `Clone`, so a whole batch of freshly
 /// spawned rows can be filled column by column from one bundle value. Sealed
-/// through [`Bundle`]; every clonable tuple bundle implements it.
+/// through [`Bundle`]; every clonable component, tuple, and bundle struct
+/// implements it.
 pub trait CloneBundle: Bundle + Clone {
     fn spawn_extend(&self, world: &mut DynWorld, table_index: usize, count: usize);
 }
 
+impl<C: Component> sealed::SealedBundle for C {}
+
+impl<C: Component> Bundle for C {
+    fn component_mask(world: &mut DynWorld) -> u64 {
+        world.component_key::<Self>().mask
+    }
+
+    fn write(self, world: &mut DynWorld, entity: Entity) {
+        world.set(entity, self);
+    }
+
+    fn write_group(self, ecs: &mut DynEcs, entity: Entity) {
+        ecs.set(entity, self);
+    }
+}
+
+impl<C: Component + Clone> CloneBundle for C {
+    fn spawn_extend(&self, world: &mut DynWorld, table_index: usize, count: usize) {
+        world.extend_column(table_index, count, self);
+    }
+}
+
 macro_rules! impl_bundle {
     ($($element:ident),+) => {
-        impl<$($element: Send + Sync + Default + 'static),+> sealed::SealedBundle for ($($element,)+) {}
+        impl<$($element: Bundle),+> sealed::SealedBundle for ($($element,)+) {}
 
-        impl<$($element: Send + Sync + Default + 'static),+> Bundle for ($($element,)+) {
+        impl<$($element: Bundle),+> Bundle for ($($element,)+) {
             fn component_mask(world: &mut DynWorld) -> u64 {
-                let mut mask = 0;
+                let mut mask = 0u64;
                 $(
-                    let element_mask = world.component_key::<$element>().mask;
+                    let element_mask = <$element as Bundle>::component_mask(world);
                     assert_eq!(
                         mask & element_mask,
                         0,
@@ -7461,21 +7502,21 @@ macro_rules! impl_bundle {
             #[allow(non_snake_case)]
             fn write(self, world: &mut DynWorld, entity: Entity) {
                 let ($($element,)+) = self;
-                $(world.set(entity, $element);)+
+                $($element.write(world, entity);)+
             }
 
             #[allow(non_snake_case)]
             fn write_group(self, ecs: &mut DynEcs, entity: Entity) {
                 let ($($element,)+) = self;
-                $(ecs.set(entity, $element);)+
+                $($element.write_group(ecs, entity);)+
             }
         }
 
-        impl<$($element: Send + Sync + Default + Clone + 'static),+> CloneBundle for ($($element,)+) {
+        impl<$($element: CloneBundle),+> CloneBundle for ($($element,)+) {
             #[allow(non_snake_case)]
             fn spawn_extend(&self, world: &mut DynWorld, table_index: usize, count: usize) {
                 let ($($element,)+) = self;
-                $(world.extend_column(table_index, count, $element);)+
+                $($element.spawn_extend(world, table_index, count);)+
             }
         }
     };
@@ -7489,6 +7530,13 @@ impl_bundle!(A, B, C, D, E);
 impl_bundle!(A, B, C, D, E, F);
 impl_bundle!(A, B, C, D, E, F, G);
 impl_bundle!(A, B, C, D, E, F, G, H);
+impl_bundle!(A, B, C, D, E, F, G, H, I);
+impl_bundle!(A, B, C, D, E, F, G, H, I, J);
+impl_bundle!(A, B, C, D, E, F, G, H, I, J, K);
+impl_bundle!(A, B, C, D, E, F, G, H, I, J, K, L);
+impl_bundle!(A, B, C, D, E, F, G, H, I, J, K, L, M);
+impl_bundle!(A, B, C, D, E, F, G, H, I, J, K, L, M, N);
+impl_bundle!(A, B, C, D, E, F, G, H, I, J, K, L, M, N, O);
 
 /// A cross-world typed query in progress, from [`DynEcs::query_join`].
 /// The fields are plain data like every query builder in this crate. Tag
@@ -8110,6 +8158,8 @@ pub struct EcsStats {
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ChildOf(pub Entity);
 
+impl Component for ChildOf {}
+
 /// A maintained child index over [`ChildOf`] links, for hierarchy-heavy
 /// consumers: [`DynWorld::children`] scans every link carrier on demand,
 /// while this answers from maps kept current by [`sync`](Self::sync).
@@ -8364,6 +8414,8 @@ mod tests {
         pub value: u32,
     }
 
+    crate::impl_component!(Position, Velocity, Health);
+
     struct Lcg(u64);
 
     impl Lcg {
@@ -8377,10 +8429,18 @@ mod tests {
     }
 
     crate::bundle! {
-        #[derive(Clone)]
+        #[derive(Default, Clone)]
         struct MoverBundle {
             position: Position,
             velocity: Velocity,
+        }
+    }
+
+    crate::bundle! {
+        #[derive(Default, Clone)]
+        struct ActorBundle {
+            mover: MoverBundle,
+            health: Health,
         }
     }
 
@@ -8458,6 +8518,50 @@ mod tests {
             ecs.get::<Velocity>(entity),
             Some(&Velocity { x: 0.0, y: 9.0 })
         );
+    }
+
+    #[test]
+    fn test_bundle_macro_builder_and_nested_flatten() {
+        let mut world = DynWorld::new();
+
+        let entity = world.spawn(
+            ActorBundle::builder()
+                .mover(
+                    MoverBundle::builder()
+                        .position(Position { x: 1.0, y: 2.0 })
+                        .velocity(Velocity { x: 3.0, y: 4.0 }),
+                )
+                .health(Health { value: 50.0 }),
+        );
+
+        assert_eq!(
+            world.get::<Position>(entity),
+            Some(&Position { x: 1.0, y: 2.0 })
+        );
+        assert_eq!(
+            world.get::<Velocity>(entity),
+            Some(&Velocity { x: 3.0, y: 4.0 })
+        );
+        assert_eq!(world.get::<Health>(entity), Some(&Health { value: 50.0 }));
+    }
+
+    #[test]
+    fn test_bundle_macro_mixes_into_tuple() {
+        let mut world = DynWorld::new();
+
+        let entity = world.spawn((
+            MoverBundle {
+                position: Position { x: 1.0, y: 1.0 },
+                velocity: Velocity { x: 2.0, y: 2.0 },
+            },
+            Health { value: 7.0 },
+        ));
+
+        assert_eq!(
+            world.get::<Position>(entity),
+            Some(&Position { x: 1.0, y: 1.0 })
+        );
+        assert_eq!(world.get::<Health>(entity), Some(&Health { value: 7.0 }));
     }
 
     #[test]
@@ -8769,6 +8873,7 @@ mod tests {
         struct C7(f32);
         #[derive(Default, Clone, Debug, PartialEq)]
         struct C8(f32);
+        crate::impl_component!(C1, C2, C3, C4, C5, C6, C7, C8);
 
         let mut world = DynWorld::new();
         let entity = world.spawn((
@@ -9087,6 +9192,7 @@ mod tests {
 
         #[derive(Default, Clone)]
         struct NeverSpawned;
+        crate::impl_component!(NeverSpawned);
         assert!(world.despawn_with_any::<(NeverSpawned,)>().is_empty());
         assert!(world.is_alive(plain));
     }
@@ -9329,6 +9435,7 @@ mod tests {
         static LIVE: AtomicIsize = AtomicIsize::new(0);
 
         struct Tracked(u64);
+        crate::impl_component!(Tracked);
         impl Default for Tracked {
             fn default() -> Self {
                 LIVE.fetch_add(1, Ordering::Relaxed);
@@ -9438,6 +9545,7 @@ mod tests {
         static LIVE: AtomicIsize = AtomicIsize::new(0);
 
         struct Tracked(u64);
+        crate::impl_component!(Tracked);
         impl Default for Tracked {
             fn default() -> Self {
                 LIVE.fetch_add(1, Ordering::Relaxed);

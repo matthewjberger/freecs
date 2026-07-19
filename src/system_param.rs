@@ -17,6 +17,8 @@
 //! #[derive(Default, Clone, Debug)]
 //! struct Velocity { x: f32, y: f32 }
 //!
+//! freecs::impl_component!(Position, Velocity);
+//!
 //! struct DeltaTime(f32);
 //! struct Score(u32);
 //!
@@ -76,6 +78,8 @@
 //! struct Position { x: f32, y: f32 }
 //! #[derive(Default, Clone, Debug)]
 //! struct Velocity { x: f32, y: f32 }
+//!
+//! freecs::impl_component!(Position, Velocity);
 //!
 //! fn drift(positions: Query<&mut Position>, velocities: Query<&Velocity>) {
 //!     let mut total = (0.0, 0.0);
@@ -1076,6 +1080,8 @@ mod tests {
     struct Health {
         value: f32,
     }
+
+    crate::impl_component!(Position, Velocity, Health);
 
     struct DeltaTime(f32);
     struct Score(u32);

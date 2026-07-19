@@ -2,8 +2,9 @@ use freecs::Schedule;
 use freecs::dynamic::{ChildOf, ComponentRegistry, DynEcs, DynWorld, ResourceHost, ResourceMap};
 use freecs::system_param::{Res, ResMut, ScheduleExt};
 
-// Components are plain structs. Default is the only requirement; there is
-// no derive macro and no registration ceremony, first use registers them.
+// Components are plain structs. Default is the only storage requirement, and
+// first use registers them. Taking part in a bundle spawn adds one nominal
+// marker, impl_component!, so tuples and nested bundles stay distinguishable.
 #[derive(Default, Clone, Debug)]
 struct Position {
     x: f32,
@@ -20,6 +21,8 @@ struct Velocity {
 struct Burning {
     lift: f32,
 }
+
+freecs::impl_component!(Position, Velocity, Burning);
 
 // Resources and events are also plain types; Default is not required.
 struct DeltaTime(f32);

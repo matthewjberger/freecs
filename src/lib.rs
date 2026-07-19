@@ -519,6 +519,7 @@ macro_rules! dynamic_schema {
         }
     ) => {
         $crate::dynamic_schema!(@consts 1u64; $($const),+);
+        $(impl $crate::dynamic::Component for $ty {})+
 
         $vis fn $register_fn() -> $crate::dynamic::ComponentRegistry {
             let mut registry = $crate::dynamic::ComponentRegistry::new();
@@ -539,6 +540,7 @@ macro_rules! dynamic_schema {
         }
     ) => {
         $crate::dynamic_schema!(@consts 1u64; $($const),+);
+        $(impl $crate::dynamic::Component for $ty {})+
 
         $vis fn $register_fn() -> $crate::dynamic::ComponentRegistry {
             let mut registry = $crate::dynamic::ComponentRegistry::new();
@@ -555,48 +557,78 @@ macro_rules! dynamic_schema {
     };
 }
 
-/// Declares a named bundle struct that spawns like a component tuple: a
-/// plain struct whose fields are component values, plus the
-/// [`dynamic::Bundle`] and [`dynamic::CloneBundle`] impls that route each
-/// field to its world. Anywhere a tuple bundle is accepted takes the struct
-/// too, so `spawn`, `spawn_bundles`, `queue_spawn`, and
-/// [`dynamic::DynEcs::spawn_with`] all work with no further wiring. The
-/// struct, its attributes, and each field's visibility pass through
-/// verbatim. Fields must be `Clone` because [`dynamic::CloneBundle`] is
-/// implemented for batch spawns; a component that is not `Clone` stays a
-/// tuple. Repeating a component type panics on spawn, matching tuples.
+/// Marks one or more types as a [`dynamic::Component`] so they may take part
+/// in a bundle. The types must be local to the calling crate (the orphan
+/// rule); wrap a foreign type such as a primitive in a newtype to mark it.
+/// Types declared through [`dynamic_schema!`] are marked for you and need no
+/// separate call.
+///
+/// ```rust
+/// #[derive(Default, Clone)]
+/// struct Position { x: f32 }
+///
+/// freecs::impl_component!(Position);
+/// ```
+#[cfg(feature = "dynamic")]
+#[macro_export]
+macro_rules! impl_component {
+    ($($ty:ty),+ $(,)?) => {
+        $(impl $crate::dynamic::Component for $ty {})+
+    };
+}
+
+/// Declares a named bundle struct plus a consuming builder. Each field is
+/// itself a bundle, a single [`dynamic::Component`] or a nested bundle struct,
+/// so a bundle flattens its fields into one component set on spawn and
+/// composes with other bundles and tuples. Anywhere a bundle is accepted takes
+/// the struct: `spawn`, `spawn_bundles`, `queue_spawn`, and
+/// [`dynamic::DynEcs::spawn_with`]. The struct, its attributes, and each
+/// field's visibility pass through verbatim. Derive `Default` and `Clone`:
+/// the builder starts from the default and batch spawns clone each row.
+/// `Name::builder()` returns the default, each field name is a consuming
+/// setter returning `Self`, and the value spawns directly. Repeating a
+/// component type across the flattened set panics on spawn.
 ///
 /// ```rust
 /// use freecs::dynamic::DynWorld;
 ///
-/// #[derive(Default, Clone, Debug, PartialEq)]
+/// #[derive(Default, Clone, PartialEq)]
 /// struct Position { x: f32 }
-///
-/// #[derive(Default, Clone, Debug, PartialEq)]
+/// #[derive(Default, Clone, PartialEq)]
 /// struct Velocity { x: f32 }
+/// #[derive(Default, Clone, PartialEq)]
+/// struct Health { value: f32 }
+///
+/// freecs::impl_component!(Position, Velocity, Health);
 ///
 /// freecs::bundle! {
-///     #[derive(Clone)]
-///     pub struct Mover {
-///         pub position: Position,
-///         pub velocity: Velocity,
+///     #[derive(Default, Clone)]
+///     struct Motion {
+///         position: Position,
+///         velocity: Velocity,
+///     }
+/// }
+///
+/// freecs::bundle! {
+///     #[derive(Default, Clone)]
+///     pub struct Actor {
+///         pub motion: Motion,
+///         pub health: Health,
 ///     }
 /// }
 ///
 /// let mut world = DynWorld::new();
-/// let entity = world.spawn(Mover {
-///     position: Position { x: 1.0 },
-///     velocity: Velocity { x: 2.0 },
-/// });
+/// let entity = world.spawn(
+///     Actor::builder()
+///         .motion(Motion {
+///             position: Position { x: 1.0 },
+///             velocity: Velocity { x: 2.0 },
+///         })
+///         .health(Health { value: 100.0 }),
+/// );
 /// assert_eq!(world.get::<Position>(entity).unwrap().x, 1.0);
 /// assert_eq!(world.get::<Velocity>(entity).unwrap().x, 2.0);
-///
-/// let batch = world.spawn_bundles(
-///     Mover { position: Position { x: 3.0 }, velocity: Velocity { x: 4.0 } },
-///     2,
-/// );
-/// assert_eq!(batch.len(), 2);
-/// assert_eq!(world.get::<Position>(batch[1]).unwrap().x, 3.0);
+/// assert_eq!(world.get::<Health>(entity).unwrap().value, 100.0);
 /// ```
 #[cfg(feature = "dynamic")]
 #[macro_export]
@@ -612,13 +644,27 @@ macro_rules! bundle {
             $($fvis $field: $ty),+
         }
 
+        impl $name {
+            $vis fn builder() -> Self {
+                <Self as ::core::default::Default>::default()
+            }
+
+            $(
+                $vis fn $field(mut self, value: $ty) -> Self {
+                    self.$field = value;
+                    self
+                }
+            )+
+        }
+
         impl $crate::dynamic::SealedBundle for $name {}
 
         impl $crate::dynamic::Bundle for $name {
             fn component_mask(world: &mut $crate::dynamic::DynWorld) -> u64 {
                 let mut mask = 0u64;
                 $(
-                    let element_mask = world.component_key::<$ty>().mask;
+                    let element_mask =
+                        <$ty as $crate::dynamic::Bundle>::component_mask(world);
                     assert_eq!(
                         mask & element_mask,
                         0,
@@ -630,11 +676,11 @@ macro_rules! bundle {
             }
 
             fn write(self, world: &mut $crate::dynamic::DynWorld, entity: $crate::Entity) {
-                $(world.set(entity, self.$field);)+
+                $($crate::dynamic::Bundle::write(self.$field, world, entity);)+
             }
 
             fn write_group(self, ecs: &mut $crate::dynamic::DynEcs, entity: $crate::Entity) {
-                $(ecs.set(entity, self.$field);)+
+                $($crate::dynamic::Bundle::write_group(self.$field, ecs, entity);)+
             }
         }
 
@@ -645,7 +691,14 @@ macro_rules! bundle {
                 table_index: usize,
                 count: usize,
             ) {
-                $(world.extend_column(table_index, count, &self.$field);)+
+                $(
+                    $crate::dynamic::CloneBundle::spawn_extend(
+                        &self.$field,
+                        world,
+                        table_index,
+                        count,
+                    );
+                )+
             }
         }
     };
@@ -659,9 +712,12 @@ macro_rules! bundle {
 /// their own member with [`dynamic::DynEcs::add_world_at`].
 ///
 /// ```rust
+/// #[derive(Default, Clone)]
+/// struct Value(u32);
+///
 /// freecs::dynamic_schema! {
 ///     pub fn register_main {
-///         value: u32 => VALUE,
+///         value: Value => VALUE,
 ///     }
 /// }
 ///
@@ -718,6 +774,8 @@ macro_rules! dynamic_worlds {
 ///
 /// #[derive(Default, Clone, Debug)]
 /// struct Position { x: f32 }
+///
+/// freecs::impl_component!(Position);
 ///
 /// struct Boss;
 ///
@@ -6154,10 +6212,24 @@ mod tests {
         }
 
         #[cfg(feature = "snapshot")]
+        #[derive(Default, Clone, Debug)]
+        #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+        struct SerdeSchemaPosition {
+            _x: f32,
+        }
+
+        #[cfg(feature = "snapshot")]
+        #[derive(Default, Clone, Debug)]
+        #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+        struct SerdeSchemaVelocity {
+            _x: f32,
+        }
+
+        #[cfg(feature = "snapshot")]
         crate::dynamic_schema! {
             serde fn register_schema_serde {
-                position: SchemaPosition => SERDE_SCHEMA_POSITION,
-                velocity: SchemaVelocity => SERDE_SCHEMA_VELOCITY,
+                position: SerdeSchemaPosition => SERDE_SCHEMA_POSITION,
+                velocity: SerdeSchemaVelocity => SERDE_SCHEMA_VELOCITY,
             }
         }
 
@@ -6165,7 +6237,10 @@ mod tests {
         #[test]
         fn test_dynamic_schema_serde_mode_registers_codecs() {
             let mut world = crate::dynamic::DynWorld::from_registry(register_schema_serde());
-            world.spawn((SchemaPosition { _x: 1.0 }, SchemaVelocity { _x: 2.0 }));
+            world.spawn((
+                SerdeSchemaPosition { _x: 1.0 },
+                SerdeSchemaVelocity { _x: 2.0 },
+            ));
 
             let snapshot = world.snapshot().unwrap();
             let restored =
