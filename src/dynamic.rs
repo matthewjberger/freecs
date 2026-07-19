@@ -3146,6 +3146,23 @@ impl DynWorld {
         entity
     }
 
+    /// Writes a bundle's components onto an existing entity, adding each by
+    /// migration when absent and stamping change ticks like [`set`](Self::set).
+    /// A no-op on a dead entity.
+    pub fn insert_bundle<B: Bundle>(&mut self, entity: Entity, bundle: B) {
+        if self.is_alive(entity) {
+            bundle.write(self, entity);
+        }
+    }
+
+    /// Removes every component a bundle names from an entity, returning whether
+    /// the entity lost any. Uses only the bundle's type set, so the values pass
+    /// through as `B::default()` and never touch storage.
+    pub fn remove_bundle<B: Bundle>(&mut self, entity: Entity) -> bool {
+        let mask = B::component_mask(self);
+        self.remove_components(entity, mask)
+    }
+
     /// The typed bulk spawn: `count` entities each carrying a clone of the
     /// bundle. For per-entity initialization at batch speed, use the keyed
     /// [`spawn_batch`](Self::spawn_batch) instead.
@@ -3396,6 +3413,21 @@ impl DynEcs {
         let entity = self.spawn();
         bundle.write_group(self, entity);
         entity
+    }
+
+    /// Writes a bundle's components onto an existing group entity, each routed
+    /// to the member world that registered its type. A no-op on a dead entity.
+    /// Panics like [`set`](Self::set) if a component type is registered nowhere.
+    pub fn insert_bundle<B: Bundle>(&mut self, entity: Entity, bundle: B) {
+        if self.is_alive(entity) {
+            bundle.write_group(self, entity);
+        }
+    }
+
+    /// Removes every component a bundle names from a group entity, each from
+    /// its routing member world, returning whether the entity lost any.
+    pub fn remove_bundle<B: Bundle>(&mut self, entity: Entity) -> bool {
+        B::remove_group(self, entity)
     }
 
     /// Which member world holds `T`, scanning members in index order and
@@ -7448,6 +7480,7 @@ pub trait Bundle: sealed::SealedBundle {
     fn component_mask(world: &mut DynWorld) -> u64;
     fn write(self, world: &mut DynWorld, entity: Entity);
     fn write_group(self, ecs: &mut DynEcs, entity: Entity);
+    fn remove_group(ecs: &mut DynEcs, entity: Entity) -> bool;
 }
 
 /// A [`Bundle`] whose components are `Clone`, so a whole batch of freshly
@@ -7471,6 +7504,15 @@ impl<C: Component> Bundle for C {
 
     fn write_group(self, ecs: &mut DynEcs, entity: Entity) {
         ecs.set(entity, self);
+    }
+
+    fn remove_group(ecs: &mut DynEcs, entity: Entity) -> bool {
+        if let Some(world_index) = ecs.route::<Self>() {
+            let mask = ecs.worlds[world_index].component_key::<Self>().mask;
+            ecs.worlds[world_index].remove_components(entity, mask)
+        } else {
+            false
+        }
     }
 }
 
@@ -7509,6 +7551,12 @@ macro_rules! impl_bundle {
             fn write_group(self, ecs: &mut DynEcs, entity: Entity) {
                 let ($($element,)+) = self;
                 $($element.write_group(ecs, entity);)+
+            }
+
+            fn remove_group(ecs: &mut DynEcs, entity: Entity) -> bool {
+                let mut removed = false;
+                $(removed |= <$element as Bundle>::remove_group(ecs, entity);)+
+                removed
             }
         }
 
@@ -8562,6 +8610,71 @@ mod tests {
             Some(&Position { x: 1.0, y: 1.0 })
         );
         assert_eq!(world.get::<Health>(entity), Some(&Health { value: 7.0 }));
+    }
+
+    #[test]
+    fn test_insert_and_remove_bundle_on_live_entity() {
+        let mut world = DynWorld::new();
+        let entity = world.spawn(Position { x: 1.0, y: 2.0 });
+
+        world.insert_bundle(entity, (Velocity { x: 3.0, y: 4.0 }, Health { value: 5.0 }));
+        assert_eq!(
+            world.get::<Velocity>(entity),
+            Some(&Velocity { x: 3.0, y: 4.0 })
+        );
+        assert_eq!(world.get::<Health>(entity), Some(&Health { value: 5.0 }));
+        assert_eq!(
+            world.get::<Position>(entity),
+            Some(&Position { x: 1.0, y: 2.0 })
+        );
+
+        assert!(world.remove_bundle::<(Velocity, Health)>(entity));
+        assert!(world.get::<Velocity>(entity).is_none());
+        assert!(world.get::<Health>(entity).is_none());
+        assert_eq!(
+            world.get::<Position>(entity),
+            Some(&Position { x: 1.0, y: 2.0 })
+        );
+    }
+
+    #[test]
+    fn test_insert_bundle_skips_dead_entity() {
+        let mut world = DynWorld::new();
+        let entity = world.spawn(Position { x: 1.0, y: 2.0 });
+        world.despawn_entities(&[entity]);
+
+        world.insert_bundle(entity, Velocity { x: 9.0, y: 9.0 });
+        assert!(!world.is_alive(entity));
+        assert!(world.get::<Velocity>(entity).is_none());
+    }
+
+    #[test]
+    fn test_insert_and_remove_bundle_across_worlds() {
+        let mut core_registry = ComponentRegistry::new();
+        core_registry.register::<Position>();
+        let mut game_registry = ComponentRegistry::new();
+        game_registry.register::<Velocity>();
+        game_registry.register::<Health>();
+
+        let mut ecs = DynEcs::new();
+        ecs.add_world_at(0, core_registry);
+        ecs.add_world_at(1, game_registry);
+
+        let entity = ecs.spawn_with(Position { x: 1.0, y: 0.0 });
+        ecs.insert_bundle(entity, (Velocity { x: 2.0, y: 0.0 }, Health { value: 3.0 }));
+        assert_eq!(
+            ecs.get::<Velocity>(entity),
+            Some(&Velocity { x: 2.0, y: 0.0 })
+        );
+        assert_eq!(ecs.get::<Health>(entity), Some(&Health { value: 3.0 }));
+
+        assert!(ecs.remove_bundle::<(Velocity, Health)>(entity));
+        assert!(ecs.get::<Velocity>(entity).is_none());
+        assert!(ecs.get::<Health>(entity).is_none());
+        assert_eq!(
+            ecs.get::<Position>(entity),
+            Some(&Position { x: 1.0, y: 0.0 })
+        );
     }
 
     #[test]

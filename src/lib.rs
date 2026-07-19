@@ -682,6 +682,15 @@ macro_rules! bundle {
             fn write_group(self, ecs: &mut $crate::dynamic::DynEcs, entity: $crate::Entity) {
                 $($crate::dynamic::Bundle::write_group(self.$field, ecs, entity);)+
             }
+
+            fn remove_group(ecs: &mut $crate::dynamic::DynEcs, entity: $crate::Entity) -> bool {
+                let mut removed = false;
+                $(
+                    removed |=
+                        <$ty as $crate::dynamic::Bundle>::remove_group(ecs, entity);
+                )+
+                removed
+            }
         }
 
         impl $crate::dynamic::CloneBundle for $name {
