@@ -3171,20 +3171,27 @@ impl DynWorld {
     }
 
     /// Removes every component a bundle names from an entity, returning whether
-    /// the entity lost any. Uses only the bundle's type set, so the values pass
-    /// through as `B::default()` and never touch storage.
+    /// the entity lost any. Reads the bundle's mask without registering any of
+    /// its types, so removing a bundle an entity never had touches nothing.
     pub fn remove_bundle<B: Bundle>(&mut self, entity: Entity) -> bool {
-        let mask = B::component_mask(self);
+        let mask = B::lookup_mask(self);
         self.remove_components(entity, mask)
     }
 
     /// Removes a bundle from an entity and hands its components back, all or
     /// nothing: when the entity is missing any of the bundle's components it
-    /// keeps them all and returns `None`. The returned value is cloned out
-    /// before removal, so the bundle's components must be `Clone`.
-    pub fn take_bundle<B: CloneBundle>(&mut self, entity: Entity) -> Option<B> {
-        let value = B::read_cloned(self, entity)?;
-        let mask = B::component_mask(self);
+    /// keeps them all and returns `None`. The values are moved out, so the
+    /// bundle needs no `Clone`.
+    pub fn take_bundle<B: Bundle>(&mut self, entity: Entity) -> Option<B> {
+        let mask = B::lookup_mask(self);
+        if mask == 0 {
+            return None;
+        }
+        let present = self.component_mask(entity)?;
+        if present & mask != mask {
+            return None;
+        }
+        let value = B::take(self, entity);
         self.remove_components(entity, mask);
         Some(value)
     }
@@ -3454,6 +3461,18 @@ impl DynEcs {
     /// its routing member world, returning whether the entity lost any.
     pub fn remove_bundle<B: Bundle>(&mut self, entity: Entity) -> bool {
         B::remove_group(self, entity)
+    }
+
+    /// Removes a bundle from a group entity and hands its components back, all
+    /// or nothing across member worlds: any missing component keeps them all
+    /// and returns `None`. Values are moved out, so the bundle needs no `Clone`.
+    pub fn take_bundle<B: Bundle>(&mut self, entity: Entity) -> Option<B> {
+        if !B::present_group(self, entity) {
+            return None;
+        }
+        let value = B::take_group(self, entity);
+        B::remove_group(self, entity);
+        Some(value)
     }
 
     /// Which member world holds `T`, scanning members in index order and
@@ -7491,10 +7510,9 @@ fn tags_match(tags: &[SparseTagSet], entity: Entity, tag_include: u64, tag_exclu
 /// `set`, and queries still take any `Send + Sync + Default + 'static` type,
 /// but spawning a type as part of a bundle needs this marker so tuples and
 /// nested bundles stay distinguishable from single components. Mark a type
-/// with [`impl_component!`](crate::impl_component), or declare it in a
-/// [`dynamic_schema!`](crate::dynamic_schema) block, which marks every listed
-/// type for you. The supertraits are exactly the component storage bounds, so
-/// the marker adds no requirement a component did not already meet.
+/// once with [`impl_component!`](crate::impl_component) (or a hand-written
+/// `impl`). The supertraits are exactly the component storage bounds, so the
+/// marker adds no requirement a component did not already meet.
 pub trait Component: Send + Sync + Default + 'static {}
 
 /// A set of components spawned together. Implemented for any [`Component`], for
@@ -7504,18 +7522,33 @@ pub trait Component: Send + Sync + Default + 'static {}
 /// spawn.
 pub trait Bundle: sealed::SealedBundle {
     fn component_mask(world: &mut DynWorld) -> u64;
+    /// The bundle's mask without registering any absent type, so removal and
+    /// take never grow the schema. Unregistered components contribute nothing.
+    fn lookup_mask(world: &DynWorld) -> u64;
     fn write(self, world: &mut DynWorld, entity: Entity);
+    /// Moves the bundle's components out of an entity, leaving each column slot
+    /// at `Default`. The caller must have verified every component is present.
+    fn take(world: &mut DynWorld, entity: Entity) -> Self
+    where
+        Self: Sized;
     fn write_group(self, ecs: &mut DynEcs, entity: Entity);
     fn remove_group(ecs: &mut DynEcs, entity: Entity) -> bool;
+    /// Whether every component the bundle names is present on a group entity,
+    /// each in its routing member world.
+    fn present_group(ecs: &DynEcs, entity: Entity) -> bool;
+    /// The group counterpart of [`take`](Self::take), moving each component out
+    /// of its routing member world. The caller must have verified presence.
+    fn take_group(ecs: &mut DynEcs, entity: Entity) -> Self
+    where
+        Self: Sized;
 }
 
 /// A [`Bundle`] whose components are `Clone`, so a whole batch of freshly
-/// spawned rows can be filled column by column from one bundle value. Sealed
-/// through [`Bundle`]; every clonable component, tuple, and bundle struct
-/// implements it.
-pub trait CloneBundle: Bundle + Clone {
+/// spawned rows can be filled column by column from one bundle value. The
+/// aggregate itself need not be `Clone`: a tuple or bundle struct qualifies
+/// when each of its components does. Sealed through [`Bundle`].
+pub trait CloneBundle: Bundle {
     fn spawn_extend(&self, world: &mut DynWorld, table_index: usize, count: usize);
-    fn read_cloned(world: &DynWorld, entity: Entity) -> Option<Self>;
 }
 
 impl<C: Component> sealed::SealedBundle for C {}
@@ -7525,8 +7558,20 @@ impl<C: Component> Bundle for C {
         world.component_key::<Self>().mask
     }
 
+    fn lookup_mask(world: &DynWorld) -> u64 {
+        world.lookup_key::<Self>().map_or(0, |key| key.mask)
+    }
+
     fn write(self, world: &mut DynWorld, entity: Entity) {
         world.set(entity, self);
+    }
+
+    fn take(world: &mut DynWorld, entity: Entity) -> Self {
+        std::mem::take(
+            world
+                .get_mut::<Self>(entity)
+                .expect("take requires the component to be present"),
+        )
     }
 
     fn write_group(self, ecs: &mut DynEcs, entity: Entity) {
@@ -7541,15 +7586,27 @@ impl<C: Component> Bundle for C {
             false
         }
     }
+
+    fn present_group(ecs: &DynEcs, entity: Entity) -> bool {
+        ecs.route_ref::<Self>()
+            .is_some_and(|world_index| ecs.worlds[world_index].get::<Self>(entity).is_some())
+    }
+
+    fn take_group(ecs: &mut DynEcs, entity: Entity) -> Self {
+        let world_index = ecs
+            .route::<Self>()
+            .expect("take_group requires the component to be routed and present");
+        std::mem::take(
+            ecs.worlds[world_index]
+                .get_mut::<Self>(entity)
+                .expect("take_group requires the component to be present"),
+        )
+    }
 }
 
 impl<C: Component + Clone> CloneBundle for C {
     fn spawn_extend(&self, world: &mut DynWorld, table_index: usize, count: usize) {
         world.extend_column(table_index, count, self);
-    }
-
-    fn read_cloned(world: &DynWorld, entity: Entity) -> Option<Self> {
-        world.get::<Self>(entity).cloned()
     }
 }
 
@@ -7572,10 +7629,20 @@ macro_rules! impl_bundle {
                 mask
             }
 
+            fn lookup_mask(world: &DynWorld) -> u64 {
+                let mut mask = 0u64;
+                $(mask |= <$element as Bundle>::lookup_mask(world);)+
+                mask
+            }
+
             #[allow(non_snake_case)]
             fn write(self, world: &mut DynWorld, entity: Entity) {
                 let ($($element,)+) = self;
                 $($element.write(world, entity);)+
+            }
+
+            fn take(world: &mut DynWorld, entity: Entity) -> Self {
+                ($(<$element as Bundle>::take(world, entity),)+)
             }
 
             #[allow(non_snake_case)]
@@ -7589,6 +7656,14 @@ macro_rules! impl_bundle {
                 $(removed |= <$element as Bundle>::remove_group(ecs, entity);)+
                 removed
             }
+
+            fn present_group(ecs: &DynEcs, entity: Entity) -> bool {
+                true $(&& <$element as Bundle>::present_group(ecs, entity))+
+            }
+
+            fn take_group(ecs: &mut DynEcs, entity: Entity) -> Self {
+                ($(<$element as Bundle>::take_group(ecs, entity),)+)
+            }
         }
 
         impl<$($element: CloneBundle),+> CloneBundle for ($($element,)+) {
@@ -7596,10 +7671,6 @@ macro_rules! impl_bundle {
             fn spawn_extend(&self, world: &mut DynWorld, table_index: usize, count: usize) {
                 let ($($element,)+) = self;
                 $($element.spawn_extend(world, table_index, count);)+
-            }
-
-            fn read_cloned(world: &DynWorld, entity: Entity) -> Option<Self> {
-                Some(($(<$element as CloneBundle>::read_cloned(world, entity)?,)+))
             }
         }
     };
@@ -8512,7 +8583,6 @@ mod tests {
     }
 
     crate::bundle! {
-        #[derive(Default, Clone)]
         struct MoverBundle {
             position: Position,
             velocity: Velocity,
@@ -8520,7 +8590,6 @@ mod tests {
     }
 
     crate::bundle! {
-        #[derive(Default, Clone)]
         struct ActorBundle {
             mover: MoverBundle,
             health: Health,
@@ -8709,6 +8778,44 @@ mod tests {
         assert_eq!(
             ecs.get::<Position>(entity),
             Some(&Position { x: 1.0, y: 0.0 })
+        );
+    }
+
+    #[test]
+    fn test_take_bundle_across_worlds_all_or_nothing() {
+        let mut core_registry = ComponentRegistry::new();
+        core_registry.register::<Position>();
+        let mut game_registry = ComponentRegistry::new();
+        game_registry.register::<Velocity>();
+        game_registry.register::<Health>();
+
+        let mut ecs = DynEcs::new();
+        ecs.add_world_at(0, core_registry);
+        ecs.add_world_at(1, game_registry);
+
+        let entity = ecs.spawn_with((
+            Position { x: 1.0, y: 2.0 },
+            Velocity { x: 3.0, y: 4.0 },
+            Health { value: 5.0 },
+        ));
+
+        let taken = ecs.take_bundle::<(Position, Health)>(entity);
+        assert_eq!(
+            taken,
+            Some((Position { x: 1.0, y: 2.0 }, Health { value: 5.0 }))
+        );
+        assert!(ecs.get::<Position>(entity).is_none());
+        assert!(ecs.get::<Health>(entity).is_none());
+        assert_eq!(
+            ecs.get::<Velocity>(entity),
+            Some(&Velocity { x: 3.0, y: 4.0 })
+        );
+
+        let missing = ecs.take_bundle::<(Velocity, Health)>(entity);
+        assert!(missing.is_none());
+        assert_eq!(
+            ecs.get::<Velocity>(entity),
+            Some(&Velocity { x: 3.0, y: 4.0 })
         );
     }
 

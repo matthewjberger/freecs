@@ -519,7 +519,6 @@ macro_rules! dynamic_schema {
         }
     ) => {
         $crate::dynamic_schema!(@consts 1u64; $($const),+);
-        $(impl $crate::dynamic::Component for $ty {})+
 
         $vis fn $register_fn() -> $crate::dynamic::ComponentRegistry {
             let mut registry = $crate::dynamic::ComponentRegistry::new();
@@ -540,7 +539,6 @@ macro_rules! dynamic_schema {
         }
     ) => {
         $crate::dynamic_schema!(@consts 1u64; $($const),+);
-        $(impl $crate::dynamic::Component for $ty {})+
 
         $vis fn $register_fn() -> $crate::dynamic::ComponentRegistry {
             let mut registry = $crate::dynamic::ComponentRegistry::new();
@@ -558,10 +556,9 @@ macro_rules! dynamic_schema {
 }
 
 /// Marks one or more types as a [`dynamic::Component`] so they may take part
-/// in a bundle. The types must be local to the calling crate (the orphan
-/// rule); wrap a foreign type such as a primitive in a newtype to mark it.
-/// Types declared through [`dynamic_schema!`] are marked for you and need no
-/// separate call.
+/// in a bundle. Mark each type exactly once. The types must be local to the
+/// calling crate (the orphan rule); wrap a foreign type such as a primitive in
+/// a newtype to mark it.
 ///
 /// ```rust
 /// #[derive(Default, Clone)]
@@ -583,11 +580,13 @@ macro_rules! impl_component {
 /// composes with other bundles and tuples. Anywhere a bundle is accepted takes
 /// the struct: `spawn`, `spawn_bundles`, `queue_spawn`, and
 /// [`dynamic::DynEcs::spawn_with`]. The struct, its attributes, and each
-/// field's visibility pass through verbatim. Derive `Default` and `Clone`:
-/// the builder starts from the default and batch spawns clone each row.
-/// `Name::builder()` returns the default, each field name is a consuming
-/// setter returning `Self`, and the value spawns directly. Repeating a
-/// component type across the flattened set panics on spawn.
+/// field's visibility pass through verbatim. The macro provides `Default`
+/// field by field (do not derive it yourself); `Name::builder()` returns that
+/// default and each field name is a consuming setter returning `Self`, so the
+/// value spawns directly. No `Clone` on the struct is needed; batch spawns and
+/// takes work when the fields are `Clone` and `Default`, which components
+/// already are. Repeating a component type across the flattened set panics on
+/// spawn.
 ///
 /// ```rust
 /// use freecs::dynamic::DynWorld;
@@ -602,7 +601,6 @@ macro_rules! impl_component {
 /// freecs::impl_component!(Position, Velocity, Health);
 ///
 /// freecs::bundle! {
-///     #[derive(Default, Clone)]
 ///     struct Motion {
 ///         position: Position,
 ///         velocity: Velocity,
@@ -610,7 +608,6 @@ macro_rules! impl_component {
 /// }
 ///
 /// freecs::bundle! {
-///     #[derive(Default, Clone)]
 ///     pub struct Actor {
 ///         pub motion: Motion,
 ///         pub health: Health,
@@ -644,6 +641,14 @@ macro_rules! bundle {
             $($fvis $field: $ty),+
         }
 
+        impl ::core::default::Default for $name {
+            fn default() -> Self {
+                Self {
+                    $($field: ::core::default::Default::default()),+
+                }
+            }
+        }
+
         impl $name {
             $vis fn builder() -> Self {
                 <Self as ::core::default::Default>::default()
@@ -675,8 +680,20 @@ macro_rules! bundle {
                 mask
             }
 
+            fn lookup_mask(world: &$crate::dynamic::DynWorld) -> u64 {
+                let mut mask = 0u64;
+                $(mask |= <$ty as $crate::dynamic::Bundle>::lookup_mask(world);)+
+                mask
+            }
+
             fn write(self, world: &mut $crate::dynamic::DynWorld, entity: $crate::Entity) {
                 $($crate::dynamic::Bundle::write(self.$field, world, entity);)+
+            }
+
+            fn take(world: &mut $crate::dynamic::DynWorld, entity: $crate::Entity) -> Self {
+                Self {
+                    $($field: <$ty as $crate::dynamic::Bundle>::take(world, entity),)+
+                }
             }
 
             fn write_group(self, ecs: &mut $crate::dynamic::DynEcs, entity: $crate::Entity) {
@@ -690,6 +707,16 @@ macro_rules! bundle {
                         <$ty as $crate::dynamic::Bundle>::remove_group(ecs, entity);
                 )+
                 removed
+            }
+
+            fn present_group(ecs: &$crate::dynamic::DynEcs, entity: $crate::Entity) -> bool {
+                true $(&& <$ty as $crate::dynamic::Bundle>::present_group(ecs, entity))+
+            }
+
+            fn take_group(ecs: &mut $crate::dynamic::DynEcs, entity: $crate::Entity) -> Self {
+                Self {
+                    $($field: <$ty as $crate::dynamic::Bundle>::take_group(ecs, entity),)+
+                }
             }
         }
 
@@ -708,19 +735,6 @@ macro_rules! bundle {
                         count,
                     );
                 )+
-            }
-
-            fn read_cloned(
-                world: &$crate::dynamic::DynWorld,
-                entity: $crate::Entity,
-            ) -> ::core::option::Option<Self> {
-                ::core::option::Option::Some(Self {
-                    $(
-                        $field: <$ty as $crate::dynamic::CloneBundle>::read_cloned(
-                            world, entity,
-                        )?,
-                    )+
-                })
             }
         }
     };
@@ -6254,6 +6268,9 @@ mod tests {
                 velocity: SerdeSchemaVelocity => SERDE_SCHEMA_VELOCITY,
             }
         }
+
+        #[cfg(feature = "snapshot")]
+        crate::impl_component!(SerdeSchemaPosition, SerdeSchemaVelocity);
 
         #[cfg(feature = "snapshot")]
         #[test]

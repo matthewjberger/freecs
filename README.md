@@ -115,9 +115,9 @@ freecs = { version = "5", features = ["dynamic"] }
 ```
 
 Runtime registration, no macro and no masks. Types register lazily on first
-use for `get`, `set`, and queries; a type marked with `impl_component!` (or
-declared in a `dynamic_schema!`) is a bundle, so components, tuples, and
-`bundle!` structs nest and flatten into one spawn. Systems are plain functions
+use for `get`, `set`, and queries; a type marked once with `impl_component!` is
+a bundle, so components, tuples, and `bundle!` structs nest and flatten into
+one spawn. Systems are plain functions
 whose arguments are `Res`, `ResMut`, and `Query`:
 
 ```rust
