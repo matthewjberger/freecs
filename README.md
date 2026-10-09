@@ -6,7 +6,7 @@
 
 A high-performance, archetype-based Entity Component System (ECS) for Rust
 
-> Used as the foundation of [Nightshade](https://github.com/matthewjberger/nightshade), a data-oriented game engine in Rust.
+> [Nightshade](https://github.com/matthewjberger/nightshade), a data-oriented game engine in Rust, was built on freecs before it moved to its own in-tree ECS.
 
 **Key Features**:
 
